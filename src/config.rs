@@ -79,6 +79,16 @@ impl RetryConfig {
         }
     }
 
+    /// GitHub Release Notes 的重试配置
+    pub const fn github_release_note() -> Self {
+        Self {
+            attempts: 2,
+            base_delay_secs: 5,
+            multiplier: 1.0,
+            max_delay_secs: 5,
+        }
+    }
+
     /// 卸载操作的默认重试配置
     pub const fn uninstall() -> Self {
         Self {

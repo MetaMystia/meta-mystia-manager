@@ -9,11 +9,15 @@ use serde::de::DeserializeOwned;
 use std::thread::sleep;
 use std::time::Duration;
 
-pub fn with_retry<F, T>(ui: &dyn Ui, op_desc: &str, mut f: F) -> Result<T>
+/// 重试执行操作
+///
+/// # 参数
+/// - `cfg`: 重试配置，`None` 表示使用默认的网络配置
+pub fn with_retry<F, T>(ui: &dyn Ui, op_desc: &str, cfg: Option<RetryConfig>, mut f: F) -> Result<T>
 where
     F: FnMut() -> Result<T>,
 {
-    let cfg = RetryConfig::network();
+    let cfg = cfg.unwrap_or_else(RetryConfig::network);
 
     for attempt in 0..cfg.attempts {
         match f() {
@@ -91,14 +95,18 @@ fn check_response_status(resp: &Response, ui: &dyn Ui, op_desc: &str) -> Result<
 }
 
 /// 使用重试机制获取并解析 JSON 数据
+///
+/// # 参数
+/// - `cfg`: 重试配置，`None` 表示使用默认的网络配置
 pub fn get_json_with_retry<T: DeserializeOwned>(
     client: &Client,
     ui: &dyn Ui,
     url: &str,
     accept_header: Option<&str>,
     op_desc: &str,
+    cfg: Option<RetryConfig>,
 ) -> Result<T> {
-    with_retry(ui, op_desc, || {
+    with_retry(ui, op_desc, cfg, || {
         let mut req = client.get(url);
         if let Some(h) = accept_header {
             req = req.header("Accept", h);
@@ -129,13 +137,17 @@ pub fn get_json_with_retry<T: DeserializeOwned>(
 }
 
 /// 使用重试机制获取响应
+///
+/// # 参数
+/// - `cfg`: 重试配置，`None` 表示使用默认的网络配置
 pub fn get_response_with_retry(
     client: &Client,
     ui: &dyn Ui,
     url: &str,
     op_desc: &str,
+    cfg: Option<RetryConfig>,
 ) -> Result<Response> {
-    with_retry(ui, op_desc, || {
+    with_retry(ui, op_desc, cfg, || {
         let resp = client
             .get(url)
             .send()

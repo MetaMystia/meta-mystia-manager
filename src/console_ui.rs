@@ -1093,22 +1093,18 @@ fn download_github_dll_not_found() -> Result<()> {
 
 fn download_display_github_release_notes(tag: &str, name: &str, body: &str) -> Result<()> {
     println!();
-    println!(
-        "{}",
-        style(format!("GitHub Release：{}（{}）", name, tag)).cyan()
-    );
+    println!("{}", style(format!("发行说明：{}（{}）", name, tag)).cyan());
+    println!("{}", "-".repeat(60));
 
     let trimmed = body.trim();
     if trimmed.is_empty() {
-        println!("{}", style("（无 Release Notes）").dim());
+        println!("{}", style("（发行说明为空）").dim());
     } else {
-        println!("{}", "-".repeat(60));
-
         let skin = MadSkin::default();
         skin.print_text(trimmed);
-
-        println!("{}", "-".repeat(60));
     }
+
+    println!("{}", "-".repeat(60));
 
     Ok(())
 }
@@ -1117,7 +1113,7 @@ fn download_ask_continue_after_release_notes() -> Result<bool> {
     println!();
 
     let confirm = Confirm::with_theme(&ColorfulTheme::default())
-        .with_prompt(" 是否继续当前操作？")
+        .with_prompt(" 以上内容为发行说明，是否继续当前操作？")
         .default(false)
         .interact_on_opt(&Term::stdout())?;
     let choice = confirm.unwrap_or(false);

@@ -239,17 +239,18 @@ impl<'a> Installer<'a> {
             )),
         );
 
-        // 显示 GitHub Release Notes（仅当安装最新 DLL 版本时）
-        if dll_version == version_info.latest_dll() {
-            match self.downloader.fetch_and_display_github_release_notes() {
-                Ok(Some(_)) => {
-                    if !self.ui.download_ask_continue_after_release_notes()? {
-                        return Err(ManagerError::UserCancelled);
-                    }
+        // 显示 GitHub Release Notes（获取所选版本的发行说明）
+        match self
+            .downloader
+            .fetch_and_display_github_release_notes(Some(&dll_version))
+        {
+            Ok(Some(_)) => {
+                if !self.ui.download_ask_continue_after_release_notes()? {
+                    return Err(ManagerError::UserCancelled);
                 }
-                Ok(None) => {}
-                Err(_) => {}
             }
+            Ok(None) => {}
+            Err(_) => {}
         }
 
         // 3. 创建临时下载目录

@@ -1,3 +1,4 @@
+use crate::config::RetryConfig;
 use crate::error::{ManagerError, Result};
 use crate::file_ops::atomic_rename_or_copy;
 use crate::metrics::report_event;
@@ -8,6 +9,7 @@ use crate::ui::Ui;
 use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
 use reqwest::blocking::{Client, ClientBuilder};
 use std::cmp;
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Mutex;
@@ -19,7 +21,7 @@ const REDIRECT_URL: &str = "https://url.izakaya.cc/getMetaMystia";
 const VERSION_API: &str = "https://api.izakaya.cc/version/meta-mystia";
 
 const BEPINEX_PRIMARY: &str = "https://builds.bepinex.dev/projects/bepinex_be";
-const GITHUB_API_URL: &str = "https://api.github.com/repos/MetaMikuAI/MetaMystia/releases/latest";
+const GITHUB_RELEASE_API_BASE: &str = "https://api.github.com/repos/MetaMikuAI/MetaMystia/releases";
 
 const RATE_LIMIT: usize = 128 * 1024; // 128KB/s
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5); // 连接超时
@@ -28,7 +30,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5); // 连接超时
 pub struct Downloader<'a> {
     client: Client,
     ui: &'a dyn Ui,
-    cached_github_release: Mutex<Option<serde_json::Value>>,
+    cached_github_releases: Mutex<HashMap<String, serde_json::Value>>,
     cached_version: Mutex<Option<VersionInfo>>,
 }
 
@@ -38,7 +40,7 @@ impl<'a> Downloader<'a> {
         Ok(Self {
             client,
             ui,
-            cached_github_release: Mutex::new(None),
+            cached_github_releases: Mutex::new(HashMap::new()),
             cached_version: Mutex::new(None),
         })
     }
@@ -58,7 +60,7 @@ impl<'a> Downloader<'a> {
     where
         F: FnMut() -> Result<T>,
     {
-        with_retry(self.ui, op_desc, f)
+        with_retry(self.ui, op_desc, None, f)
     }
 
     fn convert_reqwest_error(&self, e: reqwest::Error) -> String {
@@ -333,25 +335,60 @@ impl<'a> Downloader<'a> {
         }
     }
 
-    fn fetch_github_release_json(&self) -> Result<serde_json::Value> {
-        if let Ok(guard) = self.cached_github_release.lock()
-            && let Some(json) = guard.clone()
+    fn fetch_github_release_json(&self, version: Option<&str>) -> Result<serde_json::Value> {
+        let cache_key = version.unwrap_or("latest").to_string();
+
+        if let Ok(guard) = self.cached_github_releases.lock()
+            && let Some(json) = guard.get(&cache_key)
         {
-            return Ok(json);
+            return Ok(json.clone());
         }
 
-        let json: serde_json::Value = get_json_with_retry(
+        let api_url = if let Some(v) = version {
+            format!("{}/tags/v{}", GITHUB_RELEASE_API_BASE, v)
+        } else {
+            format!("{}/latest", GITHUB_RELEASE_API_BASE)
+        };
+
+        let result = get_json_with_retry::<serde_json::Value>(
             &self.client,
             self.ui,
-            GITHUB_API_URL,
+            &api_url,
             Some("application/vnd.github+json"),
             "请求 GitHub API ",
-        )?;
+            Some(RetryConfig::github_release_note()),
+        );
 
-        *self
-            .cached_github_release
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(json.clone());
+        let json = match result {
+            Ok(json) => json,
+            Err(e) => {
+                if let Some(v) = version
+                    && v.ends_with(".0")
+                {
+                    let trimmed_version = &v[..v.len() - 2];
+                    let fallback_url =
+                        format!("{}/tags/v{}", GITHUB_RELEASE_API_BASE, trimmed_version);
+                    if let Ok(fallback_json) = get_json_with_retry::<serde_json::Value>(
+                        &self.client,
+                        self.ui,
+                        &fallback_url,
+                        Some("application/vnd.github+json"),
+                        "请求 GitHub API ",
+                        Some(RetryConfig::github_release_note()),
+                    ) {
+                        if let Ok(mut guard) = self.cached_github_releases.lock() {
+                            guard.insert(cache_key, fallback_json.clone());
+                        }
+                        return Ok(fallback_json);
+                    }
+                }
+                return Err(e);
+            }
+        };
+
+        if let Ok(mut guard) = self.cached_github_releases.lock() {
+            guard.insert(cache_key, json.clone());
+        }
 
         Ok(json)
     }
@@ -359,7 +396,7 @@ impl<'a> Downloader<'a> {
     fn get_dll_download_url_from_github(&self) -> Result<String> {
         self.ui.download_attempt_github_dll()?;
 
-        let json = self.fetch_github_release_json()?;
+        let json = self.fetch_github_release_json(None)?;
 
         if let Some(assets) = json["assets"].as_array() {
             for asset in assets {
@@ -387,15 +424,18 @@ impl<'a> Downloader<'a> {
         ))
     }
 
-    fn get_github_release_notes(&self) -> Result<Option<(String, String, String)>> {
-        let json = self.fetch_github_release_json()?;
+    fn get_github_release_notes(
+        &self,
+        version: Option<&str>,
+    ) -> Result<Option<(String, String, String)>> {
+        let json = self.fetch_github_release_json(version)?;
 
         let tag = json["tag_name"].as_str().unwrap_or("").to_string();
         let name = json["name"].as_str().unwrap_or("").to_string();
         let body = json["body"].as_str().unwrap_or("").to_string();
 
         if tag.is_empty() && name.is_empty() && body.trim().is_empty() {
-            report_event("Download.GitHub.ReleaseNotes.Empty", None);
+            report_event("Download.GitHub.ReleaseNotes.Empty", version);
             Ok(None)
         } else {
             report_event("Download.GitHub.ReleaseNotes.Found", Some(&tag));
@@ -404,10 +444,14 @@ impl<'a> Downloader<'a> {
     }
 
     /// 获取并显示 GitHub Release Notes
+    ///
+    /// # 参数
+    /// - `version`: 版本号（不含 'v' 前缀），例如 "1.0.0"。如果为 None，则获取最新版本的 notes
     pub fn fetch_and_display_github_release_notes(
         &self,
+        version: Option<&str>,
     ) -> Result<Option<(String, String, String)>> {
-        match self.get_github_release_notes() {
+        match self.get_github_release_notes(version) {
             Ok(Some((tag, name, body))) => {
                 self.ui
                     .download_display_github_release_notes(&tag, &name, &body)?;
@@ -417,7 +461,7 @@ impl<'a> Downloader<'a> {
             Err(e) => {
                 report_event(
                     "Download.GitHub.ReleaseNotes.Failed",
-                    Some(&format!("{}", e)),
+                    Some(&format!("version={:?};error={}", version, e)),
                 );
                 Ok(None)
             }
@@ -544,8 +588,13 @@ impl<'a> Downloader<'a> {
         report_event("Download.BepInEx.Start", Some(version));
 
         let primary_url = format!("{}/{}/{}", BEPINEX_PRIMARY, version, filename);
-        let primary_result =
-            get_response_with_retry(&self.client, self.ui, &primary_url, "请求 BepInEx 主源");
+        let primary_result = get_response_with_retry(
+            &self.client,
+            self.ui,
+            &primary_url,
+            "请求 BepInEx 主源",
+            None,
+        );
 
         match primary_result {
             Ok(mut resp) => {
