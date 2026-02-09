@@ -1,10 +1,26 @@
-use crate::config::UninstallMode;
+use crate::config::{TEMP_DIR_NAME, UninstallMode};
+use crate::env_check::check_game_running;
 use crate::error::ManagerError;
 use crate::ui::Ui;
 
 use glob::glob;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+fn is_temp_path(path: &Path) -> bool {
+    path.components().any(|c| c.as_os_str() == TEMP_DIR_NAME)
+}
+
+fn ensure_game_not_running_for_path(path: &Path) -> Result<(), ManagerError> {
+    if is_temp_path(path) {
+        return Ok(());
+    }
+    if check_game_running()? {
+        return Err(ManagerError::GameRunning);
+    }
+
+    Ok(())
+}
 
 fn ensure_owner_writable(metadata: &std::fs::Metadata) -> std::fs::Permissions {
     let mut perms = metadata.permissions();
@@ -42,6 +58,8 @@ pub fn map_io_error_to_uninstall_error(err: &std::io::Error, path: &Path) -> Man
 
 /// 原子重命名或回退到 copy + remove
 pub fn atomic_rename_or_copy(src: &Path, dst: &Path) -> Result<(), ManagerError> {
+    ensure_game_not_running_for_path(dst)?;
+
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent).map_err(ManagerError::from)?;
     }
@@ -89,6 +107,8 @@ pub fn atomic_rename_or_copy(src: &Path, dst: &Path) -> Result<(), ManagerError>
 }
 
 fn backup_with_index(path: &Path, ext_suffix: &str) -> Result<PathBuf, ManagerError> {
+    ensure_game_not_running_for_path(path)?;
+
     if !path.exists() {
         return Err(ManagerError::from(std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -140,6 +160,11 @@ pub fn remove_glob_files(pattern: &Path) -> RemoveGlobResult {
     let pattern_str = normalize_path_for_glob(pattern);
     if let Ok(entries) = glob(&pattern_str) {
         for entry in entries.flatten() {
+            if let Err(e) = ensure_game_not_running_for_path(&entry) {
+                failed.push((entry, e));
+                continue;
+            }
+
             if entry.exists() {
                 let res = if entry.is_dir() {
                     std::fs::remove_dir_all(&entry)
@@ -270,6 +295,13 @@ pub fn execute_deletion(files: &[PathBuf], ui: &dyn Ui) -> Vec<DeletionResult> {
 
 /// 删除单个文件
 fn delete_file(path: &Path) -> DeletionResult {
+    if let Err(e) = ensure_game_not_running_for_path(path) {
+        return DeletionResult {
+            path: path.to_path_buf(),
+            status: DeletionStatus::Failed(Arc::new(e)),
+        };
+    }
+
     if !path.exists() {
         return DeletionResult {
             path: path.to_path_buf(),
@@ -341,6 +373,13 @@ fn delete_file(path: &Path) -> DeletionResult {
 
 /// 删除目录
 fn delete_directory(path: &Path) -> DeletionResult {
+    if let Err(e) = ensure_game_not_running_for_path(path) {
+        return DeletionResult {
+            path: path.to_path_buf(),
+            status: DeletionStatus::Failed(Arc::new(e)),
+        };
+    }
+
     if !path.exists() {
         return DeletionResult {
             path: path.to_path_buf(),

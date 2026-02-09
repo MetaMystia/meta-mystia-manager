@@ -1,3 +1,4 @@
+use crate::config::TEMP_DIR_NAME;
 use crate::metrics::report_event;
 use crate::shutdown::register_cleanup;
 
@@ -68,7 +69,7 @@ impl Drop for DirGuard {
 }
 
 pub fn create_temp_dir_with_guard(base: &Path) -> std::io::Result<(PathBuf, DirGuard)> {
-    let temp_dir = base.join(".meta-mystia-tmp");
+    let temp_dir = base.join(TEMP_DIR_NAME);
 
     if let Some(m) = REGISTERED_PATHS.get()
         && let Ok(guard) = m.lock()

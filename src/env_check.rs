@@ -4,6 +4,8 @@ use crate::metrics::report_event;
 use crate::ui::Ui;
 
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use steamlocate::SteamDir;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::Diagnostics::ToolHelp::{
@@ -68,8 +70,31 @@ pub fn check_game_directory(ui: &dyn Ui) -> Result<PathBuf> {
     Err(ManagerError::GameNotFound)
 }
 
+static GAME_RUNNING_CACHE: OnceLock<Mutex<(bool, Instant)>> = OnceLock::new();
+const CACHE_DURATION: Duration = Duration::from_secs(1);
+
 /// 检查游戏进程是否正在运行
 pub fn check_game_running() -> Result<bool> {
+    let cache =
+        GAME_RUNNING_CACHE.get_or_init(|| Mutex::new((false, Instant::now() - CACHE_DURATION)));
+
+    let mut guard = match cache.lock() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    };
+    let (cached_result, last_check) = *guard;
+
+    if last_check.elapsed() < CACHE_DURATION {
+        return Ok(cached_result);
+    }
+
+    let result = check_game_running_impl()?;
+    *guard = (result, Instant::now());
+
+    Ok(result)
+}
+
+fn check_game_running_impl() -> Result<bool> {
     unsafe {
         let snapshot_handle = match CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
             Ok(handle) => SnapshotHandle::new(handle),
