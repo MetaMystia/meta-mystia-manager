@@ -1,6 +1,6 @@
 [package]
 name = "meta-mystia-manager"
-version = "1.7.0"
+version = "1.7.1"
 authors = ["AnYiEE <i@anyi.in>"]
 edition = "2024"
 description = "A manager for MetaMystia Mod (https://github.com/MetaMikuAI/MetaMystia). Repository: https://github.com/AnYiEE/meta-mystia-manager"
