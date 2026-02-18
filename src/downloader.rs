@@ -63,7 +63,7 @@ impl<'a> Downloader<'a> {
         with_retry(self.ui, op_desc, None, f)
     }
 
-    fn convert_reqwest_error(&self, e: reqwest::Error) -> String {
+    fn convert_reqwest_error(e: reqwest::Error) -> String {
         if e.is_timeout() {
             "请求超时".to_string()
         } else if e.is_connect() {
@@ -113,7 +113,7 @@ impl<'a> Downloader<'a> {
         self.ui.download_version_info_start()?;
 
         let response = self.client.get(VERSION_API).send().map_err(|e| {
-            let msg = self.convert_reqwest_error(e);
+            let msg = Self::convert_reqwest_error(e);
             let _ = self.ui.download_version_info_failed(&msg);
             ManagerError::NetworkError(msg)
         })?;
@@ -160,7 +160,7 @@ impl<'a> Downloader<'a> {
         self.ui.download_share_code_start()?;
 
         let response = self.client.get(REDIRECT_URL).send().map_err(|e| {
-            let msg = self.convert_reqwest_error(e);
+            let msg = Self::convert_reqwest_error(e);
             let _ = self.ui.download_share_code_failed(&msg);
             ManagerError::NetworkError(msg)
         })?;

@@ -297,24 +297,21 @@ impl Ui for ConsoleUI {
 
     fn download_start(&self, filename: &str, total: Option<u64>) -> Result<usize> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let pb = match total {
-            Some(size) => {
-                let pb = ProgressBar::new(size);
-                let style = match ProgressStyle::default_bar()
-                    .template("{msg}\n[{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
-                {
-                    Ok(s) => s.progress_chars("#>-"),
-                    Err(_) => ProgressStyle::default_bar(),
-                };
-                pb.set_style(style);
-                pb.set_message(format!("下载：{}", filename));
-                pb
-            }
-            None => {
-                let pb = ProgressBar::new_spinner();
-                pb.set_message(format!("下载：{}", filename));
-                pb
-            }
+        let pb = if let Some(size) = total {
+            let pb = ProgressBar::new(size);
+            let style = match ProgressStyle::default_bar()
+                .template("{msg}\n[{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+            {
+                Ok(s) => s.progress_chars("#>-"),
+                Err(_) => ProgressStyle::default_bar(),
+            };
+            pb.set_style(style);
+            pb.set_message(format!("下载：{}", filename));
+            pb
+        } else {
+            let pb = ProgressBar::new_spinner();
+            pb.set_message(format!("下载：{}", filename));
+            pb
         };
 
         let mut guard = match self.bars.lock() {
@@ -560,7 +557,6 @@ fn select_operation_mode() -> Result<OperationMode> {
             _ => {
                 println!();
                 println!("{}", style("无效的选项，请输入 0、1、2 或 3").yellow());
-                continue;
             }
         }
     }
@@ -921,7 +917,6 @@ fn uninstall_select_uninstall_mode() -> Result<UninstallMode> {
             _ => {
                 println!();
                 println!("{}", style("无效的选项，请输入 0、1 或 2").yellow());
-                continue;
             }
         }
     }

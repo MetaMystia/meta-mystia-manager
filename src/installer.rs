@@ -325,14 +325,14 @@ impl<'a> Installer<'a> {
         }
 
         let bepinex_cfg_path = bepinex_config_dir.join("BepInEx.cfg");
-        let bepinex_cfg_logging = r#"[Logging.Console]
+        let bepinex_cfg_logging = r"[Logging.Console]
 
 ## Enables showing a console for log output.
 # Setting type: Boolean
 # Default value: true
 Enabled = false
-"#;
-        let bepinex_cfg_il2cpp = r#"[IL2CPP]
+";
+        let bepinex_cfg_il2cpp = r"[IL2CPP]
 
 ## URL to a ZIP file with managed Unity base libraries. They are used by Il2CppInterop to generate interop assemblies.
 ## The URL can include {VERSION} template which will be replaced with the game's Unity engine version.
@@ -342,7 +342,7 @@ Enabled = false
 # Setting type: String
 # Default value: https://unity.bepinex.dev/libraries/{VERSION}.zip
 UnityBaseLibrariesSource = https://url.izakaya.cc/unity-library
-"#;
+";
 
         let mut bepinex_cfg = String::new();
         if !show_bepinex_console {

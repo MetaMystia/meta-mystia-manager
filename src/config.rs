@@ -52,7 +52,7 @@ impl UninstallMode {
     }
 
     /// 获取卸载目标列表（模式字符串，是否为目录）
-    pub fn targets(&self) -> &'static [(&'static str, bool)] {
+    pub fn targets(self) -> &'static [(&'static str, bool)] {
         match self {
             UninstallMode::Light => Self::LIGHT_TARGETS,
             UninstallMode::Full => Self::FULL_TARGETS,

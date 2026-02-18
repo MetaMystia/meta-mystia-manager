@@ -52,7 +52,7 @@ impl VersionInfo {
     pub fn bepinex_version(&self) -> Result<&str> {
         self.bep_in_ex
             .split('#')
-            .nth(0)
+            .next()
             .map(|s| s.trim())
             .ok_or_else(|| {
                 report_event("Model.VersionInfo.Invalid", Some("bepinex_version"));

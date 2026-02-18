@@ -47,12 +47,11 @@ fn main() -> ExitCode {
             let cli_ui = CliUI::new(config.quiet);
             let _ = cli_ui.error("Windows platform is required");
             return ExitCode::from(1);
-        } else {
-            let console_ui = ConsoleUI::new();
-            let _ = console_ui.error("错误：仅支持 Windows 平台");
-            console_ui.wait_for_key().ok();
-            return ExitCode::from(1);
         }
+        let console_ui = ConsoleUI::new();
+        let _ = console_ui.error("错误：仅支持 Windows 平台");
+        console_ui.wait_for_key().ok();
+        return ExitCode::from(1);
     }
 
     let res = if let Some(ref config) = cli_config {

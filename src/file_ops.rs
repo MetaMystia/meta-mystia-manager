@@ -135,9 +135,8 @@ fn backup_with_index(path: &Path, ext_suffix: &str) -> Result<PathBuf, ManagerEr
                 if backup.exists() {
                     idx += 1;
                     continue;
-                } else {
-                    return Err(e);
                 }
+                return Err(e);
             }
         }
     }

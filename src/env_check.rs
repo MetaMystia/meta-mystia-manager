@@ -49,9 +49,8 @@ pub fn check_game_directory(ui: &dyn Ui) -> Result<PathBuf> {
                 ui.blank_line()?;
                 report_event("Env.SteamFound", Some(&candidate.display().to_string()));
                 return Ok(candidate);
-            } else {
-                ui.blank_line()?;
             }
+            ui.blank_line()?;
         }
     }
 

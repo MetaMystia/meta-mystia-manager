@@ -110,7 +110,7 @@ pub fn perform_self_update(
 
 fn generate_powershell_script(target: &str, new_exe: &str, pid: u32, auto_launch: bool) -> String {
     let launch_script = if auto_launch {
-        r#"
+        r"
 # 启动新 exe
 try {
     Start-Process -FilePath $New -WorkingDirectory $targetDir
@@ -120,7 +120,7 @@ try {
     }
     exit 1
 }
-"#
+"
     } else {
         ""
     };

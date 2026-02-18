@@ -34,8 +34,8 @@ impl<'a> Uninstaller<'a> {
         } else {
             self.ui.uninstall_select_mode()?
         };
-        let mode_desc = mode.description().to_string();
-        report_event("Uninstall.ModeSelected", Some(&mode_desc));
+        let mode_desc = mode.description();
+        report_event("Uninstall.ModeSelected", Some(mode_desc));
 
         // 2. 扫描实际存在的文件（相对于游戏目录）
         let existing_files = scan_existing_files(&self.game_root, mode);
@@ -51,10 +51,10 @@ impl<'a> Uninstaller<'a> {
 
         // 4. 确认删除
         if !self.ui.uninstall_confirm_deletion()? {
-            report_event("Uninstall.Cancelled", Some(&mode_desc));
+            report_event("Uninstall.Cancelled", Some(mode_desc));
             return Err(ManagerError::UserCancelled);
         }
-        report_event("Uninstall.Confirmed", Some(&mode_desc));
+        report_event("Uninstall.Confirmed", Some(mode_desc));
 
         // 5. 检查当前权限状态
         let is_elevated = is_elevated()?;

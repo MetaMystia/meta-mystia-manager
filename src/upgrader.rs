@@ -323,7 +323,6 @@ impl<'a> Upgrader<'a> {
         // 5. 安装新版本 MetaMystia DLL（仅当需要升级时）
         if let Some((temp_path, filename)) = temp_dll_path {
             let plugins_dir = self.game_root.join("BepInEx").join("plugins");
-            let mut backup_paths = Vec::new();
 
             let old_dll_pattern = plugins_dir.join("MetaMystia-*.dll");
             let mut to_backup = Vec::new();
@@ -338,7 +337,7 @@ impl<'a> Upgrader<'a> {
 
             for res in backup_paths_with_index(&to_backup, "dll.old") {
                 match res {
-                    Ok(backup_path) => backup_paths.push(backup_path),
+                    Ok(_) => {}
                     Err(e) => self.ui.upgrade_backup_failed(&format!("{}", e))?,
                 }
             }
@@ -373,15 +372,7 @@ impl<'a> Upgrader<'a> {
 
             self.ui.upgrade_install_success(&new_dll_path)?;
             report_event("Upgrade.Installed.DLL", Some(&filename));
-
-            if backup_paths.is_empty() {
-                None
-            } else {
-                Some(backup_paths)
-            }
-        } else {
-            None
-        };
+        }
 
         // 6. 安装 ResourceExample ZIP（仅当需要升级时）
         if let Some((temp_path, filename)) = temp_resourceex_path {
