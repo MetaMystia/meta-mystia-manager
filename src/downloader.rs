@@ -3,15 +3,16 @@ use crate::error::{ManagerError, Result};
 use crate::file_ops::atomic_rename_or_copy;
 use crate::metrics::report_event;
 use crate::model::VersionInfo;
-use crate::net::{get_json_with_retry, get_response_with_retry, with_retry};
+use crate::net::{get_json_with_retry, get_response_with_retry, read_system_proxy, with_retry};
 use crate::ui::Ui;
 
+use native_tls::TlsConnector;
 use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
-use reqwest::blocking::{Client, ClientBuilder};
 use std::cmp;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
@@ -28,7 +29,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5); // 连接超时
 
 /// 下载器
 pub struct Downloader<'a> {
-    client: Client,
+    agent: ureq::Agent,
     ui: &'a dyn Ui,
     cached_github_releases: Mutex<HashMap<String, serde_json::Value>>,
     cached_version: Mutex<Option<VersionInfo>>,
@@ -36,24 +37,28 @@ pub struct Downloader<'a> {
 
 impl<'a> Downloader<'a> {
     pub fn new(ui: &'a dyn Ui) -> Result<Self> {
-        let client = Self::build_client(CONNECT_TIMEOUT)?;
+        let agent = Self::build_agent(CONNECT_TIMEOUT)?;
         Ok(Self {
-            client,
+            agent,
             ui,
             cached_github_releases: Mutex::new(HashMap::new()),
             cached_version: Mutex::new(None),
         })
     }
 
-    fn build_client(connect_timeout: Duration) -> Result<Client> {
-        ClientBuilder::new()
-            .connect_timeout(connect_timeout)
-            .user_agent(crate::config::USER_AGENT)
-            .build()
-            .map_err(|e| {
-                report_event("Download.ClientBuildFailed", Some(&format!("{}", e)));
-                ManagerError::NetworkError(format!("创建 HTTP 客户端失败：{}", e))
-            })
+    fn build_agent(connect_timeout: Duration) -> Result<ureq::Agent> {
+        let tls = TlsConnector::new()
+            .map_err(|e| ManagerError::NetworkError(format!("创建 TLS 连接器失败：{}", e)))?;
+        let mut builder = ureq::AgentBuilder::new()
+            .tls_connector(Arc::new(tls))
+            .timeout_connect(connect_timeout)
+            .user_agent(crate::config::USER_AGENT);
+        if let Some(proxy) = read_system_proxy()
+            && let Ok(p) = ureq::Proxy::new(&proxy)
+        {
+            builder = builder.proxy(p);
+        }
+        Ok(builder.build())
     }
 
     fn retry<F, T>(&self, op_desc: &str, f: F) -> Result<T>
@@ -63,20 +68,21 @@ impl<'a> Downloader<'a> {
         with_retry(self.ui, op_desc, None, f)
     }
 
-    fn convert_reqwest_error(e: reqwest::Error) -> String {
-        if e.is_timeout() {
-            "请求超时".to_string()
-        } else if e.is_connect() {
-            "连接失败".to_string()
-        } else if e.is_status() {
-            format!(
-                "服务器返回错误：HTTP {}",
-                e.status()
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| "未知".to_string())
-            )
-        } else {
-            format!("请求失败：{}", e)
+    fn convert_ureq_error(e: &ureq::Error) -> String {
+        match e {
+            ureq::Error::Transport(t) => {
+                let s = t.to_string();
+                if s.contains("timed out") || s.contains("timeout") {
+                    "请求超时".to_string()
+                } else if s.contains("connect") || s.contains("Connection") {
+                    "连接失败".to_string()
+                } else {
+                    format!("请求失败：{}", e)
+                }
+            }
+            ureq::Error::Status(code, _) => {
+                format!("服务器返回错误：HTTP {}", code)
+            }
         }
     }
 
@@ -112,21 +118,14 @@ impl<'a> Downloader<'a> {
     fn try_get_version_info(&self) -> Result<VersionInfo> {
         self.ui.download_version_info_start()?;
 
-        let response = self.client.get(VERSION_API).send().map_err(|e| {
-            let msg = Self::convert_reqwest_error(e);
+        let response = self.agent.get(VERSION_API).call().map_err(|e| {
+            let msg = Self::convert_ureq_error(&e);
             let _ = self.ui.download_version_info_failed(&msg);
             ManagerError::NetworkError(msg)
         })?;
 
-        if !response.status().is_success() {
-            return Err(ManagerError::NetworkError(format!(
-                "获取版本信息失败：HTTP {}",
-                response.status()
-            )));
-        }
-
         let text = response
-            .text()
+            .into_string()
             .map_err(|e| ManagerError::NetworkError(format!("读取响应失败：{}", e)))?;
 
         let vi: VersionInfo = serde_json::from_str(&text).map_err(|e| {
@@ -159,21 +158,14 @@ impl<'a> Downloader<'a> {
     fn try_get_share_code(&self) -> Result<String> {
         self.ui.download_share_code_start()?;
 
-        let response = self.client.get(REDIRECT_URL).send().map_err(|e| {
-            let msg = Self::convert_reqwest_error(e);
+        let response = self.agent.get(REDIRECT_URL).call().map_err(|e| {
+            let msg = Self::convert_ureq_error(&e);
             let _ = self.ui.download_share_code_failed(&msg);
             ManagerError::NetworkError(msg)
         })?;
 
-        if !response.status().is_success() {
-            return Err(ManagerError::NetworkError(format!(
-                "获取下载链接失败：HTTP {}",
-                response.status()
-            )));
-        }
-
-        let final_url = response.url().as_str();
-        if let Some(code) = Self::parse_share_code_from_url(final_url) {
+        let final_url = response.get_url().to_string();
+        if let Some(code) = Self::parse_share_code_from_url(&final_url) {
             self.ui.download_share_code_success()?;
             report_event("Download.ShareCode.Success", Some(&code));
             Ok(code)
@@ -207,20 +199,17 @@ impl<'a> Downloader<'a> {
         file_size: Option<u64>,
         rate_limit: bool,
     ) -> Result<()> {
-        let mut response = self
-            .client
+        let response = self
+            .agent
             .get(url)
-            .send()
-            .map_err(|e| ManagerError::NetworkError(e.to_string()))?;
+            .call()
+            .map_err(|e| ManagerError::NetworkError(Self::convert_ureq_error(&e)))?;
 
-        if !response.status().is_success() {
-            return Err(ManagerError::NetworkError(format!(
-                "HTTP {}",
-                response.status()
-            )));
-        }
-
-        let total_size = file_size.or_else(|| response.content_length());
+        let total_size = file_size.or_else(|| {
+            response
+                .header("Content-Length")
+                .and_then(|v| v.parse::<u64>().ok())
+        });
         let filename = dest
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -228,7 +217,8 @@ impl<'a> Downloader<'a> {
 
         let id = self.ui.download_start(&filename, total_size)?;
 
-        self.write_response_to_file(&mut response, dest, id, rate_limit)
+        let mut reader = response.into_reader();
+        self.write_response_to_file(&mut reader, dest, id, rate_limit)
     }
 
     fn write_response_to_file<R: Read>(
@@ -351,7 +341,7 @@ impl<'a> Downloader<'a> {
         };
 
         let result = get_json_with_retry::<serde_json::Value>(
-            &self.client,
+            &self.agent,
             self.ui,
             &api_url,
             Some("application/vnd.github+json"),
@@ -369,7 +359,7 @@ impl<'a> Downloader<'a> {
                     let fallback_url =
                         format!("{}/tags/v{}", GITHUB_RELEASE_API_BASE, trimmed_version);
                     if let Ok(fallback_json) = get_json_with_retry::<serde_json::Value>(
-                        &self.client,
+                        &self.agent,
                         self.ui,
                         &fallback_url,
                         Some("application/vnd.github+json"),
@@ -589,7 +579,7 @@ impl<'a> Downloader<'a> {
 
         let primary_url = format!("{}/{}/{}", BEPINEX_PRIMARY, version, filename);
         let primary_result = get_response_with_retry(
-            &self.client,
+            &self.agent,
             self.ui,
             &primary_url,
             "请求 BepInEx 主源",
@@ -597,13 +587,17 @@ impl<'a> Downloader<'a> {
         );
 
         match primary_result {
-            Ok(mut resp) => {
-                let total_size = resp.content_length();
+            Ok(resp) => {
+                let total_size = resp
+                    .header("Content-Length")
+                    .and_then(|v| v.parse::<u64>().ok());
                 let id = self
                     .ui
                     .download_start("BepInEx（bepinex.dev）", total_size)?;
 
-                if let Err(e) = self.write_response_to_file(&mut resp, dest, id, false) {
+                if let Err(e) =
+                    self.write_response_to_file(&mut resp.into_reader(), dest, id, false)
+                {
                     self.ui.download_finish(id, "从 bepinex.dev 下载失败")?;
                     self.ui.download_bepinex_primary_failed(&format!(
                         "从 bepinex.dev 下载失败 ({}), 切换到备用源...",

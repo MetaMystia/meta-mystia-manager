@@ -1,0 +1,58 @@
+LIBRARY api-ms-win-core-synch-l1-2-0
+EXPORTS
+    ; ---------- Win8+ 新增 API：由本 shim 自行实现（Win8+ 转发真实 DLL，Win7 用 NT Keyed Events 模拟）
+    WaitOnAddress
+    WakeByAddressSingle
+    WakeByAddressAll
+
+    ; ---------- 以下函数在 Win7 的 kernel32.dll 中均已存在，直接转发 ----------
+
+    ; 临界区
+    InitializeCriticalSection             = kernel32.InitializeCriticalSection
+    InitializeCriticalSectionAndSpinCount = kernel32.InitializeCriticalSectionAndSpinCount
+    InitializeCriticalSectionEx           = kernel32.InitializeCriticalSectionEx
+    DeleteCriticalSection                 = kernel32.DeleteCriticalSection
+    EnterCriticalSection                  = kernel32.EnterCriticalSection
+    LeaveCriticalSection                  = kernel32.LeaveCriticalSection
+    TryEnterCriticalSection               = kernel32.TryEnterCriticalSection
+    SetCriticalSectionSpinCount           = kernel32.SetCriticalSectionSpinCount
+
+    ; SRW 锁（Vista+）
+    InitializeSRWLock                     = kernel32.InitializeSRWLock
+    AcquireSRWLockExclusive               = kernel32.AcquireSRWLockExclusive
+    AcquireSRWLockShared                  = kernel32.AcquireSRWLockShared
+    ReleaseSRWLockExclusive               = kernel32.ReleaseSRWLockExclusive
+    ReleaseSRWLockShared                  = kernel32.ReleaseSRWLockShared
+    TryAcquireSRWLockExclusive            = kernel32.TryAcquireSRWLockExclusive
+    TryAcquireSRWLockShared               = kernel32.TryAcquireSRWLockShared
+
+    ; 条件变量（Vista+）
+    InitializeConditionVariable           = kernel32.InitializeConditionVariable
+    SleepConditionVariableCS              = kernel32.SleepConditionVariableCS
+    SleepConditionVariableSRW             = kernel32.SleepConditionVariableSRW
+    WakeAllConditionVariable              = kernel32.WakeAllConditionVariable
+    WakeConditionVariable                 = kernel32.WakeConditionVariable
+
+    ; 一次性初始化（Vista+）
+    InitOnceInitialize                    = kernel32.InitOnceInitialize
+    InitOnceBeginInitialize               = kernel32.InitOnceBeginInitialize
+    InitOnceComplete                      = kernel32.InitOnceComplete
+    InitOnceExecuteOnce                   = kernel32.InitOnceExecuteOnce
+
+    ; 事件 / 互斥体 / 信号量
+    CreateEventExW                        = kernel32.CreateEventExW
+    OpenEventW                            = kernel32.OpenEventW
+    SetEvent                              = kernel32.SetEvent
+    ResetEvent                            = kernel32.ResetEvent
+    CreateMutexExW                        = kernel32.CreateMutexExW
+    OpenMutexW                            = kernel32.OpenMutexW
+    ReleaseMutex                          = kernel32.ReleaseMutex
+    CreateSemaphoreExW                    = kernel32.CreateSemaphoreExW
+    OpenSemaphoreW                        = kernel32.OpenSemaphoreW
+    ReleaseSemaphore                      = kernel32.ReleaseSemaphore
+
+    ; Sleep / Wait
+    Sleep                                 = kernel32.Sleep
+    SleepEx                               = kernel32.SleepEx
+    WaitForSingleObjectEx                 = kernel32.WaitForSingleObjectEx
+    WaitForMultipleObjectsEx              = kernel32.WaitForMultipleObjectsEx

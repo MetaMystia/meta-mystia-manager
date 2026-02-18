@@ -14,45 +14,38 @@ static CALLBACKS: OnceLock<Mutex<Vec<Option<CleanupCallback>>>> = OnceLock::new(
 static SET_HANDLER: Once = Once::new();
 static SHUTDOWN_STARTED: AtomicBool = AtomicBool::new(false);
 
+const CTRL_C_EVENT: u32 = 0;
+const CTRL_BREAK_EVENT: u32 = 1;
+const CTRL_CLOSE_EVENT: u32 = 2;
+const CTRL_LOGOFF_EVENT: u32 = 5;
+const CTRL_SHUTDOWN_EVENT: u32 = 6;
+
+unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> i32 {
+    if matches!(
+        ctrl_type,
+        CTRL_C_EVENT
+            | CTRL_BREAK_EVENT
+            | CTRL_CLOSE_EVENT
+            | CTRL_LOGOFF_EVENT
+            | CTRL_SHUTDOWN_EVENT
+    ) {
+        run_shutdown();
+        std::process::exit(0);
+    } else {
+        0
+    }
+}
+
+unsafe extern "system" {
+    fn SetConsoleCtrlHandler(
+        handler: Option<unsafe extern "system" fn(u32) -> i32>,
+        add: i32,
+    ) -> i32;
+}
+
 fn ensure_handlers() {
-    SET_HANDLER.call_once(|| {
-        let _ = ctrlc::set_handler(move || {
-            run_shutdown();
-            std::process::exit(0);
-        });
-
-        const CTRL_C_EVENT: u32 = 0;
-        const CTRL_BREAK_EVENT: u32 = 1;
-        const CTRL_CLOSE_EVENT: u32 = 2;
-        const CTRL_LOGOFF_EVENT: u32 = 5;
-        const CTRL_SHUTDOWN_EVENT: u32 = 6;
-
-        unsafe extern "system" fn console_handler(ctrl_type: u32) -> i32 {
-            if matches!(
-                ctrl_type,
-                CTRL_C_EVENT
-                    | CTRL_BREAK_EVENT
-                    | CTRL_CLOSE_EVENT
-                    | CTRL_LOGOFF_EVENT
-                    | CTRL_SHUTDOWN_EVENT
-            ) {
-                run_shutdown();
-                1
-            } else {
-                0
-            }
-        }
-
-        unsafe extern "system" {
-            fn SetConsoleCtrlHandler(
-                handler: Option<unsafe extern "system" fn(u32) -> i32>,
-                add: i32,
-            ) -> i32;
-        }
-
-        unsafe {
-            let _ = SetConsoleCtrlHandler(Some(console_handler), 1);
-        }
+    SET_HANDLER.call_once(|| unsafe {
+        let _ = SetConsoleCtrlHandler(Some(console_ctrl_handler), 1);
     });
 }
 

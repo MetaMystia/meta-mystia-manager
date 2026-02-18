@@ -3,11 +3,19 @@ use crate::error::{ManagerError, Result};
 use crate::metrics::report_event;
 use crate::ui::Ui;
 
-use reqwest::blocking::{Client, Response};
-use reqwest::header::{HeaderValue, RETRY_AFTER};
 use serde::de::DeserializeOwned;
+use std::ffi::OsString;
+use std::os::windows::ffi::OsStringExt;
 use std::thread::sleep;
 use std::time::Duration;
+use ureq::Response;
+use winapi::{
+    shared::minwindef::HKEY,
+    um::{
+        winnt::{KEY_READ, REG_DWORD, REG_SZ},
+        winreg::{HKEY_CURRENT_USER, RegCloseKey, RegOpenKeyExW, RegQueryValueExW},
+    },
+};
 
 /// 重试执行操作
 ///
@@ -56,42 +64,37 @@ where
     unreachable!()
 }
 
-fn parse_retry_after_seconds(hv: Option<&HeaderValue>) -> Option<u64> {
-    hv.and_then(|v| v.to_str().ok())
-        .and_then(|s| s.trim().parse::<u64>().ok())
-}
+/// 将 ureq::Error 转换为 ManagerError，同时处理 429 Rate Limit
+pub fn handle_ureq_error(e: ureq::Error, ui: &dyn Ui, op_desc: &str) -> ManagerError {
+    match e {
+        ureq::Error::Status(429, ref resp) => {
+            let retry_after = resp
+                .header("Retry-After")
+                .and_then(|v| v.parse::<u64>().ok());
 
-fn check_response_status(resp: &Response, ui: &dyn Ui, op_desc: &str) -> Result<()> {
-    if resp.status().is_success() {
-        return Ok(());
-    }
-
-    if resp.status().as_u16() == 429 {
-        if let Some(secs) = parse_retry_after_seconds(resp.headers().get(RETRY_AFTER))
-            && secs <= 30
-        {
-            ui.network_rate_limited(secs)?;
-            report_event(
-                "Network.RateLimited",
-                Some(&format!("{};retry_after={}", op_desc, secs)),
-            );
-            sleep(Duration::from_secs(secs));
-        } else {
-            report_event("Network.RateLimited", Some(op_desc));
+            if let Some(secs) = retry_after
+                && secs <= 30
+            {
+                let _ = ui.network_rate_limited(secs);
+                report_event(
+                    "Network.RateLimited",
+                    Some(&format!("{};retry_after={}", op_desc, secs)),
+                );
+                sleep(Duration::from_secs(secs));
+            } else {
+                report_event("Network.RateLimited", Some(op_desc));
+            }
+            ManagerError::RateLimited(op_desc.to_string())
         }
-        return Err(ManagerError::RateLimited(op_desc.to_string()));
+        ureq::Error::Status(code, _) => {
+            report_event(
+                "Network.HttpError",
+                Some(&format!("{};status={}", op_desc, code)),
+            );
+            ManagerError::NetworkError(format!("{}返回错误：HTTP {}", op_desc, code))
+        }
+        ureq::Error::Transport(t) => ManagerError::NetworkError(format!("请求失败：{}", t)),
     }
-
-    report_event(
-        "Network.HttpError",
-        Some(&format!("{};status={}", op_desc, resp.status())),
-    );
-
-    Err(ManagerError::NetworkError(format!(
-        "{}返回错误：HTTP {}",
-        op_desc,
-        resp.status()
-    )))
 }
 
 /// 使用重试机制获取并解析 JSON 数据
@@ -99,7 +102,7 @@ fn check_response_status(resp: &Response, ui: &dyn Ui, op_desc: &str) -> Result<
 /// # 参数
 /// - `cfg`: 重试配置，`None` 表示使用默认的网络配置
 pub fn get_json_with_retry<T: DeserializeOwned>(
-    client: &Client,
+    agent: &ureq::Agent,
     ui: &dyn Ui,
     url: &str,
     accept_header: Option<&str>,
@@ -107,18 +110,14 @@ pub fn get_json_with_retry<T: DeserializeOwned>(
     cfg: Option<RetryConfig>,
 ) -> Result<T> {
     with_retry(ui, op_desc, cfg, || {
-        let mut req = client.get(url);
+        let mut req = agent.get(url);
         if let Some(h) = accept_header {
-            req = req.header("Accept", h);
+            req = req.set("Accept", h);
         }
 
-        let resp = req
-            .send()
-            .map_err(|e| ManagerError::NetworkError(format!("请求失败：{}", e)))?;
+        let resp = req.call().map_err(|e| handle_ureq_error(e, ui, op_desc))?;
 
-        check_response_status(&resp, ui, op_desc)?;
-
-        let text = resp.text().map_err(|e| {
+        let text = resp.into_string().map_err(|e| {
             report_event(
                 "Network.ReadFailed",
                 Some(&format!("{};err={}", op_desc, e)),
@@ -141,20 +140,119 @@ pub fn get_json_with_retry<T: DeserializeOwned>(
 /// # 参数
 /// - `cfg`: 重试配置，`None` 表示使用默认的网络配置
 pub fn get_response_with_retry(
-    client: &Client,
+    agent: &ureq::Agent,
     ui: &dyn Ui,
     url: &str,
     op_desc: &str,
     cfg: Option<RetryConfig>,
 ) -> Result<Response> {
     with_retry(ui, op_desc, cfg, || {
-        let resp = client
+        let resp = agent
             .get(url)
-            .send()
-            .map_err(|e| ManagerError::NetworkError(format!("请求失败：{}", e)))?;
-
-        check_response_status(&resp, ui, op_desc)?;
+            .call()
+            .map_err(|e| handle_ureq_error(e, ui, op_desc))?;
 
         Ok(resp)
     })
+}
+
+/// 读取系统代理设置，供构建 ureq::Agent 时使用。
+/// ureq 自身仅读取环境变量（HTTP_PROXY 等），不读取 Windows 注册表系统代理，
+/// 此函数优先读取环境变量，再回落到注册表。
+/// 返回形如 `"http://host:port"` 的字符串，可直接传入 `ureq::Proxy::new`
+pub fn read_system_proxy() -> Option<String> {
+    for var in &["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
+        if let Ok(val) = std::env::var(var)
+            && !val.is_empty()
+        {
+            return Some(val);
+        }
+    }
+
+    read_windows_registry_proxy()
+}
+
+#[cfg(windows)]
+fn read_windows_registry_proxy() -> Option<String> {
+    unsafe {
+        let subkey: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\0"
+            .encode_utf16()
+            .collect();
+
+        let mut hkey: HKEY = std::ptr::null_mut();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, subkey.as_ptr(), 0, KEY_READ, &mut hkey) != 0 {
+            return None;
+        }
+
+        let enable_name: Vec<u16> = "ProxyEnable\0".encode_utf16().collect();
+        let mut enable: u32 = 0;
+        let mut size = std::mem::size_of::<u32>() as u32;
+        let mut kind: u32 = 0;
+        RegQueryValueExW(
+            hkey,
+            enable_name.as_ptr(),
+            std::ptr::null_mut(),
+            &mut kind,
+            &mut enable as *mut u32 as *mut u8,
+            &mut size,
+        );
+
+        if kind != REG_DWORD || enable == 0 {
+            RegCloseKey(hkey);
+            return None;
+        }
+
+        let server_name: Vec<u16> = "ProxyServer\0".encode_utf16().collect();
+        let mut buf = vec![0u16; 512];
+        let mut buf_size = (buf.len() * 2) as u32;
+        kind = 0;
+        let ret = RegQueryValueExW(
+            hkey,
+            server_name.as_ptr(),
+            std::ptr::null_mut(),
+            &mut kind,
+            buf.as_mut_ptr() as *mut u8,
+            &mut buf_size,
+        );
+        RegCloseKey(hkey);
+
+        if ret != 0 || kind != REG_SZ {
+            return None;
+        }
+
+        let len = buf_size as usize / 2;
+        let s = OsString::from_wide(&buf[..len])
+            .to_string_lossy()
+            .trim_end_matches('\0')
+            .to_string();
+
+        if s.is_empty() {
+            return None;
+        }
+
+        let proxy_addr = if s.contains('=') {
+            let find = |prefix: &str| -> Option<String> {
+                s.split(';').find_map(|part| {
+                    let part = part.trim();
+                    part.strip_prefix(prefix).map(|v| v.to_string())
+                })
+            };
+            find("https=")
+                .or_else(|| find("http="))
+                .unwrap_or(s.clone())
+        } else {
+            s
+        };
+
+        if proxy_addr.contains("://") {
+            Some(proxy_addr)
+        } else {
+            Some(format!("http://{}", proxy_addr))
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn read_windows_registry_proxy() -> Option<String> {
+    None
 }

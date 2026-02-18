@@ -8,7 +8,7 @@ use crate::ui::Ui;
 use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
-use windows::Win32::System::Threading::CREATE_NO_WINDOW;
+use winapi::um::winbase::CREATE_NO_WINDOW;
 
 pub fn perform_self_update(
     game_root: &Path,
@@ -72,18 +72,6 @@ pub fn perform_self_update(
         ))
     })?;
 
-    if !script_path.exists() {
-        report_event(
-            "SelfUpdate.Failed.ScriptMissing",
-            Some(&script_path.display().to_string()),
-        );
-        ui.manager_update_failed("升级脚本不存在")?;
-        return Err(ManagerError::from(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "升级脚本不存在",
-        )));
-    }
-
     // 4. 启动脚本
     let shells = ["pwsh.exe", "powershell.exe"];
 
@@ -94,7 +82,7 @@ pub fn perform_self_update(
             .arg("Bypass")
             .arg("-File")
             .arg(&script_path)
-            .creation_flags(CREATE_NO_WINDOW.0)
+            .creation_flags(CREATE_NO_WINDOW)
             .spawn();
 
         if res.is_ok() {

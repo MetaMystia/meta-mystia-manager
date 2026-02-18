@@ -1,6 +1,7 @@
 {
   "recommendations": [
     "EditorConfig.EditorConfig",
+    "ms-vscode.cpptools",
     "rust-lang.rust-analyzer",
     "streetsidesoftware.code-spell-checker",
     "tamasfe.even-better-toml"

@@ -3,9 +3,12 @@ use crate::metrics::report_event;
 
 use std::os::windows::process::CommandExt;
 use std::process::Command;
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
-use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
-use windows::Win32::System::Threading::{CREATE_NO_WINDOW, GetCurrentProcess, OpenProcessToken};
+use std::ptr::null_mut;
+use winapi::um::handleapi::CloseHandle;
+use winapi::um::processthreadsapi::{GetCurrentProcess, OpenProcessToken};
+use winapi::um::securitybaseapi::GetTokenInformation;
+use winapi::um::winbase::CREATE_NO_WINDOW;
+use winapi::um::winnt::{HANDLE, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
 
 struct TokenHandle(HANDLE);
 
@@ -22,7 +25,7 @@ impl TokenHandle {
 impl Drop for TokenHandle {
     fn drop(&mut self) {
         unsafe {
-            let _ = CloseHandle(self.0);
+            CloseHandle(self.0);
         }
     }
 }
@@ -44,9 +47,9 @@ impl Drop for TempScript {
 /// 检查当前进程是否具有管理员权限
 pub fn is_elevated() -> Result<bool> {
     unsafe {
-        let mut token = HANDLE::default();
+        let mut token: HANDLE = null_mut();
 
-        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
             return Ok(false);
         }
 
@@ -58,12 +61,12 @@ pub fn is_elevated() -> Result<bool> {
         let result = GetTokenInformation(
             token_handle.raw(),
             TokenElevation,
-            Some(&mut elevation as *mut _ as *mut _),
+            &mut elevation as *mut TOKEN_ELEVATION as *mut _,
             size_of::<TOKEN_ELEVATION>() as u32,
             &mut return_length,
         );
 
-        if result.is_ok() {
+        if result != 0 {
             Ok(elevation.TokenIsElevated != 0)
         } else {
             Ok(false)
@@ -108,7 +111,7 @@ pub fn elevate_and_restart() -> Result<()> {
             .arg("Bypass")
             .arg("-File")
             .arg(&script_path)
-            .creation_flags(CREATE_NO_WINDOW.0)
+            .creation_flags(CREATE_NO_WINDOW)
             .spawn();
 
         if res.is_ok() {

@@ -3,14 +3,16 @@ use crate::error::{ManagerError, Result};
 use crate::metrics::report_event;
 use crate::ui::Ui;
 
+use std::mem::zeroed;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use steamlocate::SteamDir;
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
-use windows::Win32::System::Diagnostics::ToolHelp::{
+use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
+use winapi::um::tlhelp32::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
+use winapi::um::winnt::HANDLE;
 
 struct SnapshotHandle(HANDLE);
 
@@ -27,7 +29,7 @@ impl SnapshotHandle {
 impl Drop for SnapshotHandle {
     fn drop(&mut self) {
         unsafe {
-            let _ = CloseHandle(self.0);
+            CloseHandle(self.0);
         }
     }
 }
@@ -95,38 +97,34 @@ pub fn check_game_running() -> Result<bool> {
 
 fn check_game_running_impl() -> Result<bool> {
     unsafe {
-        let snapshot_handle = match CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
-            Ok(handle) => SnapshotHandle::new(handle),
-            Err(e) => {
-                report_event(
-                    "Env.GameRunning.CheckFailed.CreateToolhelp32Snapshot",
-                    Some(&format!("{:?}", e)),
-                );
-                return Err(ManagerError::ProcessListError(format!(
-                    "无法获取进程列表：{:?}",
-                    e
-                )));
-            }
-        };
+        let raw_snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if raw_snapshot == INVALID_HANDLE_VALUE {
+            let e = std::io::Error::last_os_error();
+            report_event(
+                "Env.GameRunning.CheckFailed.CreateToolhelp32Snapshot",
+                Some(&format!("{}", e)),
+            );
+            return Err(ManagerError::ProcessListError(format!(
+                "无法获取进程列表：{}",
+                e
+            )));
+        }
+        let snapshot_handle = SnapshotHandle::new(raw_snapshot);
         let snapshot = snapshot_handle.as_raw();
 
-        let mut entry = PROCESSENTRY32W {
-            dwSize: size_of::<PROCESSENTRY32W>() as u32,
-            ..Default::default()
-        };
+        let mut entry: PROCESSENTRY32W = zeroed();
+        entry.dwSize = size_of::<PROCESSENTRY32W>() as u32;
 
-        match Process32FirstW(snapshot, &mut entry) {
-            Ok(()) => {}
-            Err(e) => {
-                report_event(
-                    "Env.GameRunning.CheckFailed.Process32FirstW",
-                    Some(&format!("{:?}", e)),
-                );
-                return Err(ManagerError::ProcessListError(format!(
-                    "读取进程列表失败：{:?}",
-                    e
-                )));
-            }
+        if Process32FirstW(snapshot, &mut entry) == 0 {
+            let e = std::io::Error::last_os_error();
+            report_event(
+                "Env.GameRunning.CheckFailed.Process32FirstW",
+                Some(&format!("{}", e)),
+            );
+            return Err(ManagerError::ProcessListError(format!(
+                "读取进程列表失败：{}",
+                e
+            )));
         }
 
         let target = GAME_PROCESS_NAME.to_lowercase();
@@ -145,7 +143,7 @@ fn check_game_running_impl() -> Result<bool> {
                 return Ok(true);
             }
 
-            if Process32NextW(snapshot, &mut entry).is_err() {
+            if Process32NextW(snapshot, &mut entry) == 0 {
                 break;
             }
         }

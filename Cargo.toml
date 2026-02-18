@@ -18,22 +18,19 @@ clap = { version = "4.5", features = ["derive"] }
 md5 = "0.8"
 
 # Windows API
-windows = { version = "0.62", features = [
-  "Win32_Foundation",
-  "Win32_Security",
-  "Win32_Storage_FileSystem",
-  "Win32_System_Console",
-  "Win32_System_Diagnostics_ToolHelp",
-  "Win32_System_Threading",
-  "Win32_UI_Shell",
+winapi = { version = "0.3", features = [
+  "handleapi",
+  "processthreadsapi",
+  "securitybaseapi",
+  "shellapi",
+  "tlhelp32",
+  "winnt",
+  "winreg",
 ] }
 
 # HTTP 客户端
-reqwest = { version = "0.13", features = [
-  "blocking",
-  "default-tls",
-  "system-proxy",
-], default-features = false }
+ureq = { version = "2.12", features = ["native-tls"], default-features = false }
+native-tls = "0.2"
 
 # URL 编码
 percent-encoding = "2.3"
@@ -58,7 +55,6 @@ termimad = "0.34.1"
 
 # 错误处理
 thiserror = "2.0"
-ctrlc = "3.5"
 
 [build-dependencies]
 winres = "0.1"

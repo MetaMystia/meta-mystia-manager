@@ -1,10 +1,13 @@
-use crate::error::{ManagerError, Result};
+use crate::config::USER_AGENT;
+use crate::error::Result;
+use crate::net::read_system_proxy;
 use crate::shutdown::SHUTDOWN_TIMEOUT;
 
+use native_tls::TlsConnector;
 use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
-use reqwest::blocking::Client;
 use std::collections::HashMap;
 use std::process::Command;
+use std::sync::Arc;
 use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
 use std::sync::{Mutex, OnceLock};
 use std::thread::{JoinHandle, spawn};
@@ -85,26 +88,26 @@ pub fn get_user_id() -> String {
         .clone()
 }
 
-static CACHED_CLIENT: OnceLock<Client> = OnceLock::new();
+static CACHED_AGENT: OnceLock<ureq::Agent> = OnceLock::new();
 
-fn get_client() -> Result<&'static Client> {
-    if let Some(c) = CACHED_CLIENT.get() {
-        return Ok(c);
-    }
-
-    let client = Client::builder()
-        .timeout(DEFAULT_TIMEOUT)
-        .user_agent(crate::config::USER_AGENT)
-        .build()
-        .map_err(|e| ManagerError::NetworkError(format!("创建 metrics HTTP 客户端失败：{}", e)))?;
-
-    Ok(CACHED_CLIENT.get_or_init(|| client))
+fn get_agent() -> &'static ureq::Agent {
+    CACHED_AGENT.get_or_init(|| {
+        let tls = TlsConnector::new().expect("TLS init failed");
+        let mut builder = ureq::AgentBuilder::new()
+            .tls_connector(Arc::new(tls))
+            .timeout(DEFAULT_TIMEOUT)
+            .user_agent(USER_AGENT);
+        if let Some(proxy) = read_system_proxy()
+            && let Ok(p) = ureq::Proxy::new(&proxy)
+        {
+            builder = builder.proxy(p);
+        }
+        builder.build()
+    })
 }
 
 fn send_with_client(url: String) {
-    if let Ok(client) = get_client() {
-        let _ = client.get(&url).send();
-    }
+    let _ = get_agent().get(&url).call();
 }
 
 struct TrackingWorker {
