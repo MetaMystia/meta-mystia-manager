@@ -636,10 +636,10 @@ fn install_display_version_info(version_info: &VersionInfo) -> Result<()> {
         "  • ResourceExample ZIP：{}",
         style(version_info.latest_resourceex()).green()
     );
-
-    if let Ok(bep_ver) = version_info.bepinex_version() {
-        println!("  • BepInEx：{}", style(bep_ver).green());
-    }
+    println!(
+        "  • BepInEx：{}",
+        style(version_info.bepinex_version()?).green()
+    );
 
     Ok(())
 }

@@ -108,7 +108,7 @@ impl Ui for CliUI {
             "Versions - MetaMystia DLL: {}, ResourceExample ZIP: {}, BepInEx: {}",
             version_info.latest_dll(),
             version_info.latest_resourceex(),
-            version_info.bep_in_ex
+            version_info.bepinex_version()?
         ));
         Ok(())
     }
