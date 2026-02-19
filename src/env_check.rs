@@ -3,16 +3,21 @@ use crate::error::{ManagerError, Result};
 use crate::metrics::report_event;
 use crate::ui::Ui;
 
-use std::mem::zeroed;
-use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
-use steamlocate::SteamDir;
-use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
-use winapi::um::tlhelp32::{
-    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
+use std::{
+    mem::{size_of, zeroed},
+    path::PathBuf,
+    sync::{Mutex, OnceLock},
+    time::{Duration, Instant},
 };
-use winapi::um::winnt::HANDLE;
+use steamlocate::SteamDir;
+use winapi::um::{
+    handleapi::{CloseHandle, INVALID_HANDLE_VALUE},
+    tlhelp32::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+        TH32CS_SNAPPROCESS,
+    },
+    winnt::HANDLE,
+};
 
 struct SnapshotHandle(HANDLE);
 

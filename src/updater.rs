@@ -5,9 +5,7 @@ use crate::model::VersionInfo;
 use crate::temp_dir::create_temp_dir_with_guard;
 use crate::ui::Ui;
 
-use std::os::windows::process::CommandExt;
-use std::path::Path;
-use std::process::Command;
+use std::{os::windows::process::CommandExt, path::Path, process::Command};
 use winapi::um::winbase::CREATE_NO_WINDOW;
 
 pub fn perform_self_update(

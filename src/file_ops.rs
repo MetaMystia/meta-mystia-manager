@@ -4,8 +4,10 @@ use crate::error::ManagerError;
 use crate::ui::Ui;
 
 use glob::glob;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 fn is_temp_path(path: &Path) -> bool {
     path.components().any(|c| c.as_os_str() == TEMP_DIR_NAME)

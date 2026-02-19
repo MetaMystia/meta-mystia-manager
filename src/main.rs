@@ -35,8 +35,7 @@ use crate::updater::perform_self_update;
 use crate::upgrader::Upgrader;
 
 use clap::Parser;
-use std::path::PathBuf;
-use std::process::ExitCode;
+use std::{path::PathBuf, process::ExitCode};
 
 fn main() -> ExitCode {
     let cli_args = Cli::parse();

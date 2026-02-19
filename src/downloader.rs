@@ -8,14 +8,15 @@ use crate::ui::Ui;
 
 use native_tls::TlsConnector;
 use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
-use std::cmp;
-use std::collections::HashMap;
-use std::io::{Read, Write};
-use std::path::Path;
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::thread::sleep;
-use std::time::{Duration, Instant};
+use std::{
+    cmp,
+    collections::HashMap,
+    io::{Read, Write},
+    path::Path,
+    sync::{Arc, Mutex},
+    thread::sleep,
+    time::{Duration, Instant},
+};
 
 const FILE_API: &str = "https://file.izakaya.cc/api/public/dl";
 const REDIRECT_URL: &str = "https://url.izakaya.cc/getMetaMystia";

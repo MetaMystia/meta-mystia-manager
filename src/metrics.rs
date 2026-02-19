@@ -5,13 +5,16 @@ use crate::shutdown::SHUTDOWN_TIMEOUT;
 
 use native_tls::TlsConnector;
 use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
-use std::collections::HashMap;
-use std::process::Command;
-use std::sync::Arc;
-use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
-use std::sync::{Mutex, OnceLock};
-use std::thread::{JoinHandle, spawn};
-use std::time::Duration;
+use std::{
+    collections::HashMap,
+    process::Command,
+    sync::{
+        Arc, Mutex, OnceLock,
+        mpsc::{RecvTimeoutError, Sender, channel},
+    },
+    thread::{JoinHandle, spawn},
+    time::Duration,
+};
 
 const ID_SITE: &str = "13";
 const TRACKING_ENDPOINT: &str = "https://track.izakaya.cc/api.php";

@@ -4,10 +4,10 @@ use crate::metrics::report_event;
 use crate::ui::Ui;
 
 use serde::de::DeserializeOwned;
-use std::ffi::OsString;
-use std::os::windows::ffi::OsStringExt;
-use std::thread::sleep;
-use std::time::Duration;
+use std::{
+    ffi::OsString, mem::size_of, os::windows::ffi::OsStringExt, ptr::null_mut, thread::sleep,
+    time::Duration,
+};
 use ureq::Response;
 use winapi::{
     shared::minwindef::HKEY,
@@ -179,19 +179,19 @@ fn read_windows_registry_proxy() -> Option<String> {
             .encode_utf16()
             .collect();
 
-        let mut hkey: HKEY = std::ptr::null_mut();
+        let mut hkey: HKEY = null_mut();
         if RegOpenKeyExW(HKEY_CURRENT_USER, subkey.as_ptr(), 0, KEY_READ, &mut hkey) != 0 {
             return None;
         }
 
         let enable_name: Vec<u16> = "ProxyEnable\0".encode_utf16().collect();
         let mut enable: u32 = 0;
-        let mut size = std::mem::size_of::<u32>() as u32;
+        let mut size = size_of::<u32>() as u32;
         let mut kind: u32 = 0;
         RegQueryValueExW(
             hkey,
             enable_name.as_ptr(),
-            std::ptr::null_mut(),
+            null_mut(),
             &mut kind,
             &mut enable as *mut u32 as *mut u8,
             &mut size,
@@ -209,7 +209,7 @@ fn read_windows_registry_proxy() -> Option<String> {
         let ret = RegQueryValueExW(
             hkey,
             server_name.as_ptr(),
-            std::ptr::null_mut(),
+            null_mut(),
             &mut kind,
             buf.as_mut_ptr() as *mut u8,
             &mut buf_size,

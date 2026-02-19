@@ -1,14 +1,16 @@
 use crate::error::{ManagerError, Result};
 use crate::metrics::report_event;
 
-use std::os::windows::process::CommandExt;
-use std::process::Command;
-use std::ptr::null_mut;
-use winapi::um::handleapi::CloseHandle;
-use winapi::um::processthreadsapi::{GetCurrentProcess, OpenProcessToken};
-use winapi::um::securitybaseapi::GetTokenInformation;
-use winapi::um::winbase::CREATE_NO_WINDOW;
-use winapi::um::winnt::{HANDLE, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
+use std::{
+    mem::size_of, os::windows::process::CommandExt, path::PathBuf, process::Command, ptr::null_mut,
+};
+use winapi::um::{
+    handleapi::CloseHandle,
+    processthreadsapi::{GetCurrentProcess, OpenProcessToken},
+    securitybaseapi::GetTokenInformation,
+    winbase::CREATE_NO_WINDOW,
+    winnt::{HANDLE, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation},
+};
 
 struct TokenHandle(HANDLE);
 
@@ -30,10 +32,10 @@ impl Drop for TokenHandle {
     }
 }
 
-struct TempScript(std::path::PathBuf);
+struct TempScript(PathBuf);
 
 impl TempScript {
-    fn new(path: std::path::PathBuf) -> Self {
+    fn new(path: PathBuf) -> Self {
         Self(path)
     }
 }

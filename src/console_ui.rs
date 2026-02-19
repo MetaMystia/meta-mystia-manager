@@ -1,6 +1,5 @@
 use crate::config::{OperationMode, UninstallMode};
-use crate::error::ManagerError;
-use crate::error::Result;
+use crate::error::{ManagerError, Result};
 use crate::metrics::{get_user_id, report_event};
 use crate::model::VersionInfo;
 use crate::ui::Ui;
@@ -8,10 +7,15 @@ use crate::ui::Ui;
 use console::{Term, style};
 use dialoguer::{Confirm, Input, theme::ColorfulTheme};
 use indicatif::{ProgressBar, ProgressStyle};
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::{
+    cmp::min,
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 use termimad::MadSkin;
 
 /// 控制台 UI 实现
@@ -1309,7 +1313,7 @@ fn select_version_from_list(component: &str, versions: &[String]) -> Result<usiz
         println!();
 
         let start = current_page * page_size;
-        let end = std::cmp::min(start + page_size, versions.len());
+        let end = min(start + page_size, versions.len());
 
         for (i, v) in versions[start..end].iter().enumerate() {
             let global_index = start + i;
@@ -1412,7 +1416,7 @@ fn select_version_not_available(
         style(format!("错误：{} 版本 {} 不可用", component, version)).red()
     );
 
-    let display_count = std::cmp::min(10, available.len());
+    let display_count = min(10, available.len());
     let header = if available.len() < 10 {
         "可用版本："
     } else {

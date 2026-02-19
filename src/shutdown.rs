@@ -1,11 +1,16 @@
 use crate::metrics;
 
-use std::mem::take;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{RecvTimeoutError, channel};
-use std::sync::{Mutex, Once, OnceLock};
-use std::thread::spawn;
-use std::time::{Duration, Instant};
+use std::{
+    mem::take,
+    panic::{AssertUnwindSafe, catch_unwind},
+    sync::{
+        Mutex, Once, OnceLock,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{RecvTimeoutError, channel},
+    },
+    thread::spawn,
+    time::{Duration, Instant},
+};
 
 pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -100,7 +105,7 @@ pub fn run_shutdown() {
     for (i, cb) in callbacks.into_iter().enumerate() {
         let tx = tx.clone();
         spawn(move || {
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(cb));
+            let _ = catch_unwind(AssertUnwindSafe(cb));
             let _ = tx.send(i);
         });
     }

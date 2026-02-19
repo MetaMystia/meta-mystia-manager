@@ -8,10 +8,7 @@ use crate::permission::{elevate_and_restart, is_elevated};
 use crate::shutdown::run_shutdown;
 use crate::ui::Ui;
 
-use std::collections::HashSet;
-use std::path::PathBuf;
-use std::thread::sleep;
-use std::time::Duration;
+use std::{collections::HashSet, path::PathBuf, thread::sleep, time::Duration};
 
 /// 卸载管理器
 pub struct Uninstaller<'a> {

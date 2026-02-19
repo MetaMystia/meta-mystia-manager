@@ -3,7 +3,10 @@ use crate::error::Result;
 use crate::model::VersionInfo;
 use crate::ui::Ui;
 
-use std::path::{Path, PathBuf};
+use std::{
+    cmp::min,
+    path::{Path, PathBuf},
+};
 
 /// CLI UI 实现
 pub struct CliUI {
@@ -533,7 +536,7 @@ impl Ui for CliUI {
             component, version
         ));
 
-        let display_count = std::cmp::min(10, available.len());
+        let display_count = min(10, available.len());
         let header = if available.len() < 10 {
             "Available versions:"
         } else {

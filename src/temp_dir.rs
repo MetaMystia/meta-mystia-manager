@@ -2,8 +2,10 @@ use crate::config::TEMP_DIR_NAME;
 use crate::metrics::report_event;
 use crate::shutdown::register_cleanup;
 
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::{
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, OnceLock},
+};
 
 type RefCounter = Arc<Mutex<usize>>;
 type PathRegistry = Vec<(PathBuf, RefCounter)>;
