@@ -9,12 +9,9 @@ use std::{
     time::Duration,
 };
 use ureq::Response;
-use winapi::{
-    shared::minwindef::HKEY,
-    um::{
-        winnt::{KEY_READ, REG_DWORD, REG_SZ},
-        winreg::{HKEY_CURRENT_USER, RegCloseKey, RegOpenKeyExW, RegQueryValueExW},
-    },
+use windows_sys::Win32::System::Registry::{
+    HKEY, HKEY_CURRENT_USER, KEY_READ, REG_DWORD, REG_SZ, RegCloseKey, RegOpenKeyExW,
+    RegQueryValueExW,
 };
 
 /// 重试执行操作

@@ -16,7 +16,6 @@ use std::{
         atomic::{AtomicUsize, Ordering},
     },
 };
-use termimad::MadSkin;
 
 /// 控制台 UI 实现
 pub struct ConsoleUI {
@@ -1099,8 +1098,7 @@ fn download_display_github_release_notes(tag: &str, name: &str, body: &str) -> R
     if trimmed.is_empty() {
         println!("{}", style("（发行说明为空）").dim());
     } else {
-        let skin = MadSkin::default();
-        skin.print_text(trimmed);
+        print_markdown(trimmed);
     }
 
     println!("{}", "-".repeat(60));
@@ -1427,4 +1425,198 @@ fn select_version_not_available(
     println!();
 
     Ok(())
+}
+
+fn print_markdown(text: &str) {
+    let mut in_code_block = false;
+
+    'outer: for line in text.lines() {
+        if line.starts_with("```") {
+            in_code_block = !in_code_block;
+            continue;
+        }
+
+        if in_code_block {
+            println!("  {}", style(line).dim());
+            continue;
+        }
+
+        let trimmed_line = line.trim();
+
+        if matches!(
+            trimmed_line,
+            "---" | "***" | "___" | "- - -" | "* * *" | "_ _ _"
+        ) {
+            println!("{}", style("─".repeat(60)).dim());
+            continue;
+        }
+
+        let heading_level = trimmed_line.chars().take_while(|&c| c == '#').count();
+        if (1..=6).contains(&heading_level)
+            && let Some(rest) = trimmed_line[heading_level..].strip_prefix(' ')
+        {
+            let rendered = render_inline(rest);
+            if heading_level <= 2 {
+                println!("{}", style(rendered).bold().cyan());
+            } else {
+                println!("{}", style(rendered).bold());
+            }
+            continue;
+        }
+
+        if let Some(rest) = line.strip_prefix('>') {
+            let content = rest.strip_prefix(' ').unwrap_or(rest);
+            println!(
+                "  {} {}",
+                style("│").dim(),
+                style(render_inline(content)).dim()
+            );
+            continue;
+        }
+
+        for prefix in &["- ", "* ", "+ "] {
+            if let Some(rest) = trimmed_line.strip_prefix(prefix) {
+                println!("  {} {}", style("•").cyan(), render_inline(rest));
+                continue 'outer;
+            }
+        }
+
+        let digit_count = trimmed_line
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .count();
+        if digit_count > 0
+            && let Some(rest) = trimmed_line[digit_count..].strip_prefix(". ")
+        {
+            println!(
+                "  {} {}",
+                style(format!("{}.", &trimmed_line[..digit_count])).cyan(),
+                render_inline(rest)
+            );
+            continue;
+        }
+
+        if trimmed_line.is_empty() {
+            println!();
+            continue;
+        }
+
+        println!("{}", render_inline(line));
+    }
+}
+
+fn render_inline(s: &str) -> String {
+    let b = s.as_bytes();
+    let n = b.len();
+    let mut result = String::with_capacity(n + 32);
+    let mut i = 0;
+
+    while i < n {
+        match b[i] {
+            b'`' => {
+                let start = i + 1;
+                if let Some(p) = b[start..].iter().position(|&c| c == b'`') {
+                    let end = start + p;
+                    result.push_str(&format!("{}", style(&s[start..end]).yellow()));
+                    i = end + 1;
+                } else {
+                    result.push('`');
+                    i += 1;
+                }
+            }
+            b'~' if b.get(i + 1) == Some(&b'~') => {
+                let start = i + 2;
+                if let Some(p) = b[start..].windows(2).position(|w| w == b"~~") {
+                    let end = start + p;
+                    result.push_str(&format!("{}", style(&s[start..end]).strikethrough()));
+                    i = end + 2;
+                } else {
+                    result.push_str("~~");
+                    i += 2;
+                }
+            }
+            b'*' if b.get(i + 1) == Some(&b'*') && b.get(i + 2) == Some(&b'*') => {
+                let start = i + 3;
+                if let Some(p) = b[start..].windows(3).position(|w| w == b"***") {
+                    let end = start + p;
+                    result.push_str(&format!("{}", style(&s[start..end]).bold().italic()));
+                    i = end + 3;
+                } else {
+                    result.push_str("***");
+                    i += 3;
+                }
+            }
+            b'*' if b.get(i + 1) == Some(&b'*') => {
+                let start = i + 2;
+                if let Some(p) = b[start..].windows(2).position(|w| w == b"**") {
+                    let end = start + p;
+                    result.push_str(&format!("{}", style(&s[start..end]).bold()));
+                    i = end + 2;
+                } else {
+                    result.push_str("**");
+                    i += 2;
+                }
+            }
+            b'_' if b.get(i + 1) == Some(&b'_') => {
+                let start = i + 2;
+                if let Some(p) = b[start..].windows(2).position(|w| w == b"__") {
+                    let end = start + p;
+                    result.push_str(&format!("{}", style(&s[start..end]).bold()));
+                    i = end + 2;
+                } else {
+                    result.push_str("__");
+                    i += 2;
+                }
+            }
+            b'*' => {
+                let start = i + 1;
+                if let Some(p) = b[start..].iter().position(|&c| c == b'*') {
+                    let end = start + p;
+                    if end > start {
+                        result.push_str(&format!("{}", style(&s[start..end]).italic()));
+                        i = end + 1;
+                    } else {
+                        result.push('*');
+                        i += 1;
+                    }
+                } else {
+                    result.push('*');
+                    i += 1;
+                }
+            }
+            b'[' => {
+                let text_start = i + 1;
+                if let Some(cb) = b[text_start..].iter().position(|&c| c == b']') {
+                    let text_end = text_start + cb;
+                    let after = text_end + 1;
+                    if b.get(after) == Some(&b'(')
+                        && let Some(cp) = b[after + 1..].iter().position(|&c| c == b')')
+                    {
+                        let url_start = after + 1;
+                        let url_end = url_start + cp;
+                        result.push('[');
+                        result.push_str(&render_inline(&s[text_start..text_end]));
+                        result.push_str("](");
+                        result.push_str(&s[url_start..url_end]);
+                        result.push(')');
+                        i = url_end + 1;
+                        continue;
+                    }
+                }
+                result.push('[');
+                i += 1;
+            }
+            c if c >= 0x80 => {
+                let ch = s[i..].chars().next().unwrap();
+                result.push(ch);
+                i += ch.len_utf8();
+            }
+            c => {
+                result.push(c as char);
+                i += 1;
+            }
+        }
+    }
+
+    result
 }

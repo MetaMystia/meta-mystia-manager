@@ -4,12 +4,12 @@ use crate::metrics::report_event;
 use std::{
     mem::size_of, os::windows::process::CommandExt, path::PathBuf, process::Command, ptr::null_mut,
 };
-use winapi::um::{
-    handleapi::CloseHandle,
-    processthreadsapi::{GetCurrentProcess, OpenProcessToken},
-    securitybaseapi::GetTokenInformation,
-    winbase::CREATE_NO_WINDOW,
-    winnt::{HANDLE, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation},
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+use windows_sys::Win32::Security::{
+    GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
+};
+use windows_sys::Win32::System::Threading::{
+    CREATE_NO_WINDOW, GetCurrentProcess, OpenProcessToken,
 };
 
 struct TokenHandle(HANDLE);

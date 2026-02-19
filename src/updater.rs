@@ -6,7 +6,7 @@ use crate::temp_dir::create_temp_dir_with_guard;
 use crate::ui::Ui;
 
 use std::{os::windows::process::CommandExt, path::Path, process::Command};
-use winapi::um::winbase::CREATE_NO_WINDOW;
+use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
 pub fn perform_self_update(
     game_root: &Path,

@@ -14,18 +14,21 @@ panic = "abort"
 strip = "symbols"
 
 [dependencies]
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.5", features = [
+  "std",
+  "derive",
+  "help",
+  "usage",
+], default-features = false }
 md5 = "0.8"
 
 # Windows API
-winapi = { version = "0.3", features = [
-  "handleapi",
-  "processthreadsapi",
-  "securitybaseapi",
-  "shellapi",
-  "tlhelp32",
-  "winnt",
-  "winreg",
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_Registry",
+  "Win32_System_Threading",
 ] }
 
 # HTTP 客户端
@@ -51,7 +54,6 @@ zip = { version = "7.2", features = ["deflate"], default-features = false }
 console = "0.16"
 dialoguer = "0.12"
 indicatif = "0.18"
-termimad = "0.34.1"
 
 # 错误处理
 thiserror = "2.0"
