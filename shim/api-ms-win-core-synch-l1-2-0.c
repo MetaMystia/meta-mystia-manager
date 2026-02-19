@@ -140,7 +140,10 @@ static BOOL Shim_WaitOnAddress_Fallback(
     DWORD dwMilliseconds)
 {
   if (!g_nt_wait || !g_keyed_event)
+  {
+    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
     return FALSE;
+  }
 
   /* If value already differs, return immediately */
   BOOL changed = FALSE;
@@ -186,7 +189,10 @@ static BOOL Shim_WaitOnAddress_Fallback(
 static VOID Shim_WakeByAddressSingle_Fallback(PVOID Address)
 {
   if (!g_nt_release || !g_keyed_event)
+  {
+    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
     return;
+  }
   LARGE_INTEGER zero;
   zero.QuadPart = 0;
   g_nt_release(g_keyed_event, Address, FALSE, &zero);
@@ -195,7 +201,10 @@ static VOID Shim_WakeByAddressSingle_Fallback(PVOID Address)
 static VOID Shim_WakeByAddressAll_Fallback(PVOID Address)
 {
   if (!g_nt_release || !g_keyed_event)
+  {
+    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
     return;
+  }
   LARGE_INTEGER zero;
   zero.QuadPart = 0;
   /* Wake up to a reasonable maximum to avoid unbounded looping.

@@ -95,7 +95,10 @@ __declspec(dllexport) BOOL WINAPI ProcessPrng(PUCHAR pbData, SIZE_T cbData)
                         ? 0xFFFFFFFFUL
                         : (ULONG)remaining;
       if (!g_fallback_RtlGenRandom(p, chunk))
+      {
+        SetLastError(ERROR_GEN_FAILURE);
         return FALSE;
+      }
       p += chunk;
       remaining -= chunk;
     }
