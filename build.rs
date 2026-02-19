@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{path::Path, process::Command};
 
 fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS")
@@ -31,11 +31,41 @@ fn main() {
             eprintln!("[build.rs] failed to compile Windows resources: {}", e);
         }
 
-        // 将 Win7 兼容 shim DLL 复制到输出目录（与 exe 同目录）。
         // 每个 shim 解决一个 Rust libstd 通过 raw-dylib 依赖的 Win8+ API：
         //   - api-ms-win-core-synch-l1-2-0.dll : WaitOnAddress / WakeByAddress*
         //   - bcryptprimitives.dll             : ProcessPrng
 
+        // 注册 shim 源文件变动时重新触发构建
+        for src in &[
+            "shim/api-ms-win-core-synch-l1-2-0.c",
+            "shim/api-ms-win-core-synch-l1-2-0.def",
+            "shim/bcryptprimitives.c",
+            "shim/bcryptprimitives.def",
+        ] {
+            println!("cargo:rerun-if-changed={}", src);
+        }
+
+        // 调用 shim/build.ps1 编译 shim DLL（需要本机 MSVC）
+        // 若 PowerShell 或 MSVC 不可用则仅打印警告，不中断构建
+        let ps_script = Path::new("shim/build.ps1");
+        if ps_script.exists() {
+            let status = Command::new("powershell.exe")
+                .args([
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    ps_script.to_str().unwrap(),
+                ])
+                .status();
+            match status {
+                Ok(s) if s.success() => {}
+                Ok(s) => eprintln!("[build.rs] warning: shim/build.ps1 exited with {}", s),
+                Err(e) => eprintln!("[build.rs] warning: failed to run shim/build.ps1: {}", e),
+            }
+        }
+
+        // 将 shim DLL 复制到输出目录（与 exe 同目录）
         let out_dir = std::env::var("OUT_DIR").unwrap_or_default();
         let exe_dir = (|| {
             let out = Path::new(&out_dir);
@@ -46,13 +76,10 @@ fn main() {
             }
             None
         })();
-
-        let shims = [
+        for shim_src_str in &[
             "shim/api-ms-win-core-synch-l1-2-0.dll",
             "shim/bcryptprimitives.dll",
-        ];
-
-        for shim_src_str in &shims {
+        ] {
             let shim_src = Path::new(shim_src_str);
             let dll_name = shim_src.file_name().unwrap().to_string_lossy();
             if shim_src.exists() {
