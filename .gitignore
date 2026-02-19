@@ -1,5 +1,1 @@
-shim/*.dll
-shim/*.exp
-shim/*.lib
-shim/*.obj
 /target
