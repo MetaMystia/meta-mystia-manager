@@ -4,6 +4,9 @@
   "[c]": {
     "editor.defaultFormatter": "ms-vscode.cpptools"
   },
+  "[powershell]": {
+    "editor.defaultFormatter": "ms-vscode.powershell"
+  },
   "[rust]": {
     "editor.defaultFormatter": "rust-lang.rust-analyzer"
   },
@@ -21,6 +24,7 @@
     "bcryptprimitives",
     "bepinex",
     "codegen",
+    "COMDATs",
     "dialoguer",
     "handleapi",
     "HINSTANCE",
@@ -35,6 +39,7 @@
     "minwindef",
     "MSVC",
     "mystia",
+    "NODEFAULTLIB",
     "nologo",
     "ntdll",
     "ntifs",
@@ -43,6 +48,7 @@
     "prng",
     "PROCESSENTRY",
     "processthreadsapi",
+    "rdata",
     "reqwest",
     "resourceex",
     "securitybaseapi",
