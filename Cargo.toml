@@ -11,7 +11,7 @@ codegen-units = 1
 lto = true
 opt-level = "z"
 panic = "abort"
-strip = true
+strip = "symbols"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
@@ -45,7 +45,7 @@ semver = "1.0"
 steamlocate = "2.0.1"
 
 # ZIP 解压
-zip = "7.2"
+zip = { version = "7.2", features = ["deflate"], default-features = false }
 
 # 用户交互
 console = "0.16"
