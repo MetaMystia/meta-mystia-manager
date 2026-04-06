@@ -11,6 +11,7 @@ pub trait Ui: Send + Sync {
     fn display_game_running_warning(&self) -> Result<()>;
     fn display_available_updates(
         &self,
+        bepinex_available: bool,
         dll_available: bool,
         resourceex_available: bool,
     ) -> Result<()>;
@@ -54,6 +55,8 @@ pub trait Ui: Send + Sync {
     fn upgrade_delete_failed(&self, path: &Path, err: &str) -> Result<()>;
     fn upgrade_checking_installed_version(&self) -> Result<()>;
     fn upgrade_detected_resourceex(&self) -> Result<()>;
+    fn upgrade_display_current_and_latest_bepinex(&self, current: &str, latest: &str)
+    -> Result<()>;
     fn upgrade_display_current_and_latest_dll(&self, current: &str, latest: &str) -> Result<()>;
     fn upgrade_display_current_and_latest_resourceex(
         &self,
@@ -61,11 +64,15 @@ pub trait Ui: Send + Sync {
         latest: &str,
     ) -> Result<()>;
     fn upgrade_no_update_needed(&self) -> Result<()>;
+    fn upgrade_bepinex_needs_upgrade(&self) -> Result<()>;
+    fn upgrade_bepinex_already_latest(&self) -> Result<()>;
     fn upgrade_detected_new_dll(&self, current: &str, new: &str) -> Result<()>;
     fn upgrade_dll_already_latest(&self) -> Result<()>;
     fn upgrade_resourceex_needs_upgrade(&self) -> Result<()>;
+    fn upgrade_downloading_bepinex(&self) -> Result<()>;
     fn upgrade_downloading_dll(&self) -> Result<()>;
     fn upgrade_downloading_resourceex(&self) -> Result<()>;
+    fn upgrade_installing_bepinex(&self) -> Result<()>;
     fn upgrade_installing_dll(&self) -> Result<()>;
     fn upgrade_installing_resourceex(&self) -> Result<()>;
     fn upgrade_install_success(&self, path: &Path) -> Result<()>;

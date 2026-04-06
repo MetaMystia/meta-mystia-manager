@@ -48,9 +48,13 @@ impl Ui for CliUI {
 
     fn display_available_updates(
         &self,
+        bepinex_available: bool,
         dll_available: bool,
         resourceex_available: bool,
     ) -> Result<()> {
+        if bepinex_available {
+            self.stdout("BepInEx update available.");
+        }
         if dll_available {
             self.stdout("MetaMystia DLL update available.");
         }
@@ -200,6 +204,18 @@ impl Ui for CliUI {
         Ok(())
     }
 
+    fn upgrade_display_current_and_latest_bepinex(
+        &self,
+        current: &str,
+        latest: &str,
+    ) -> Result<()> {
+        self.stdout(&format!(
+            "BepInEx - Current: {}, Latest: {}",
+            current, latest
+        ));
+        Ok(())
+    }
+
     fn upgrade_display_current_and_latest_dll(&self, current: &str, latest: &str) -> Result<()> {
         self.stdout(&format!(
             "MetaMystia DLL - Current: {}, Latest: {}",
@@ -225,6 +241,16 @@ impl Ui for CliUI {
         Ok(())
     }
 
+    fn upgrade_bepinex_needs_upgrade(&self) -> Result<()> {
+        self.stdout("BepInEx needs upgrade.");
+        Ok(())
+    }
+
+    fn upgrade_bepinex_already_latest(&self) -> Result<()> {
+        self.stdout("BepInEx is already the latest version.");
+        Ok(())
+    }
+
     fn upgrade_detected_new_dll(&self, current: &str, new: &str) -> Result<()> {
         self.stdout(&format!(
             "New MetaMystia DLL version available: {} -> {}",
@@ -243,6 +269,11 @@ impl Ui for CliUI {
         Ok(())
     }
 
+    fn upgrade_downloading_bepinex(&self) -> Result<()> {
+        self.stdout("Downloading BepInEx...");
+        Ok(())
+    }
+
     fn upgrade_downloading_dll(&self) -> Result<()> {
         self.stdout("Downloading MetaMystia DLL...");
         Ok(())
@@ -250,6 +281,11 @@ impl Ui for CliUI {
 
     fn upgrade_downloading_resourceex(&self) -> Result<()> {
         self.stdout("Downloading ResourceExample ZIP...");
+        Ok(())
+    }
+
+    fn upgrade_installing_bepinex(&self) -> Result<()> {
+        self.stdout("Installing BepInEx...");
         Ok(())
     }
 

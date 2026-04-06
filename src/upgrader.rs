@@ -1,5 +1,7 @@
+use crate::config::BEPINEX_VERSION_FILE;
 use crate::downloader::Downloader;
 use crate::error::{ManagerError, Result};
+use crate::extractor::Extractor;
 use crate::file_ops::{
     atomic_rename_or_copy, backup_paths_with_index, glob_matches, remove_glob_files,
 };
@@ -173,8 +175,26 @@ impl<'a> Upgrader<'a> {
         Ok((dll, res))
     }
 
+    fn read_bepinex_version(&self) -> Option<String> {
+        let version_file = self.game_root.join(BEPINEX_VERSION_FILE);
+        std::fs::read_to_string(&version_file)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
     /// 检查是否有可用升级
-    pub fn has_updates(&self, version_info: &VersionInfo) -> Result<(bool, bool)> {
+    pub fn has_updates(&self, version_info: &VersionInfo) -> Result<(bool, bool, bool)> {
+        let bep_needs = version_info
+            .bepinex_version()
+            .ok()
+            .map(|latest| {
+                self.read_bepinex_version()
+                    .map(|cur| cur != latest)
+                    .unwrap_or(true)
+            })
+            .unwrap_or(false);
+
         let (dll_opt, res_opt) = self.get_installed_versions()?;
 
         let dll_needs = dll_opt
@@ -186,7 +206,7 @@ impl<'a> Upgrader<'a> {
             .map(|cur| cur != version_info.latest_resourceex())
             .unwrap_or(false);
 
-        Ok((dll_needs, res_needs))
+        Ok((bep_needs, dll_needs, res_needs))
     }
 
     /// 执行升级
@@ -196,6 +216,7 @@ impl<'a> Upgrader<'a> {
         // 1. 查找当前安装的版本
         self.ui.upgrade_checking_installed_version()?;
 
+        let current_bepinex_version = self.read_bepinex_version();
         let (dll_opt, res_opt) = self.get_installed_versions()?;
         let current_dll_version = match dll_opt {
             Some(v) => v,
@@ -210,8 +231,10 @@ impl<'a> Upgrader<'a> {
         report_event(
             "Upgrade.Detected",
             Some(&format!(
-                "dll:{};resourceex:{}",
-                current_dll_version, current_resourceex_version
+                "bepinex:{};dll:{};resourceex:{}",
+                current_bepinex_version.as_deref().unwrap_or("unknown"),
+                current_dll_version,
+                current_resourceex_version
             )),
         );
 
@@ -225,6 +248,24 @@ impl<'a> Upgrader<'a> {
         self.ui.blank_line()?;
         let version_info = self.downloader.get_version_info()?;
         report_event("Upgrade.VersionInfo", Some(&version_info.to_string()));
+
+        // 检查 BepInEx 是否需要升级
+        let new_bepinex_version = version_info.bepinex_version().ok().map(|s| s.to_string());
+        let bepinex_needs_upgrade = new_bepinex_version
+            .as_ref()
+            .map(|new_ver| {
+                current_bepinex_version
+                    .as_ref()
+                    .map(|cur| cur != new_ver)
+                    .unwrap_or(true)
+            })
+            .unwrap_or(false);
+        if let Some(ref new_ver) = new_bepinex_version {
+            self.ui.upgrade_display_current_and_latest_bepinex(
+                current_bepinex_version.as_deref().unwrap_or("未知"),
+                new_ver,
+            )?;
+        }
 
         // 检查 MetaMystia DLL 是否需要升级
         let new_dll_version = version_info.latest_dll();
@@ -243,12 +284,17 @@ impl<'a> Upgrader<'a> {
             )?;
         }
 
-        if !dll_needs_upgrade && !resourceex_needs_upgrade {
+        if !bepinex_needs_upgrade && !dll_needs_upgrade && !resourceex_needs_upgrade {
             self.ui.upgrade_no_update_needed()?;
             return Ok(());
         }
 
         // 显示升级信息
+        if bepinex_needs_upgrade {
+            self.ui.upgrade_bepinex_needs_upgrade()?;
+        } else if new_bepinex_version.is_some() {
+            self.ui.upgrade_bepinex_already_latest()?;
+        }
         if dll_needs_upgrade {
             self.ui
                 .upgrade_detected_new_dll(&current_dll_version, new_dll_version)?;
@@ -270,7 +316,13 @@ impl<'a> Upgrader<'a> {
             self.ui.upgrade_dll_already_latest()?;
         }
         if resourceex_needs_upgrade {
+            if dll_needs_upgrade {
+                self.ui.blank_line()?;
+            }
             self.ui.upgrade_resourceex_needs_upgrade()?;
+        }
+        if bepinex_needs_upgrade && !dll_needs_upgrade && !resourceex_needs_upgrade {
+            self.ui.blank_line()?;
         }
         if dll_needs_upgrade && !resourceex_needs_upgrade {
             self.ui.blank_line()?;
@@ -281,10 +333,6 @@ impl<'a> Upgrader<'a> {
 
         // 4. 下载新版本
 
-        if dll_needs_upgrade {
-            self.ui.upgrade_downloading_dll()?;
-        }
-
         let (temp_dir, _temp_guard) = create_temp_dir_with_guard(&self.game_root).map_err(|e| {
             ManagerError::from(std::io::Error::new(
                 e.kind(),
@@ -292,10 +340,26 @@ impl<'a> Upgrader<'a> {
             ))
         })?;
 
+        // 下载 BepInEx（仅当需要升级时）
+        let temp_bepinex_path = if bepinex_needs_upgrade {
+            let bepinex_filename = version_info.bepinex_filename()?;
+            let path = temp_dir.join(bepinex_filename);
+
+            self.ui.upgrade_downloading_bepinex()?;
+
+            self.downloader.download_bepinex(&version_info, &path)?;
+
+            Some(path)
+        } else {
+            None
+        };
+
         // 下载 DLL（仅当需要升级时）
         let temp_dll_path = if dll_needs_upgrade {
             let new_dll_filename = VersionInfo::metamystia_filename(new_dll_version);
             let path = temp_dir.join(&new_dll_filename);
+
+            self.ui.upgrade_downloading_dll()?;
 
             self.downloader
                 .download_metamystia(&share_code, new_dll_version, &path, true)?;
@@ -320,7 +384,29 @@ impl<'a> Upgrader<'a> {
             None
         };
 
-        // 5. 安装新版本 MetaMystia DLL（仅当需要升级时）
+        // 5. 安装 BepInEx（仅当需要升级时）
+        if let Some(bepinex_path) = temp_bepinex_path {
+            self.ui.upgrade_installing_bepinex()?;
+
+            // 升级时保留 plugins 和 config 目录
+            Extractor::deploy_bepinex(
+                &bepinex_path,
+                &self.game_root,
+                &["BepInEx/config", "BepInEx/plugins"],
+            )?;
+
+            // 更新版本标记文件
+            if let Ok(bep_version) = version_info.bepinex_version() {
+                let version_file = self.game_root.join(BEPINEX_VERSION_FILE);
+                let _ = std::fs::write(&version_file, bep_version.as_bytes());
+            }
+
+            self.ui
+                .upgrade_install_success(&self.game_root.join("BepInEx"))?;
+            report_event("Upgrade.Installed.BepInEx", new_bepinex_version.as_deref());
+        }
+
+        // 6. 安装新版本 MetaMystia DLL（仅当需要升级时）
         if let Some((temp_path, filename)) = temp_dll_path {
             let plugins_dir = self.game_root.join("BepInEx").join("plugins");
 
@@ -342,6 +428,10 @@ impl<'a> Upgrader<'a> {
                 }
             }
 
+            if !bepinex_needs_upgrade {
+                self.ui.blank_line()?;
+                self.ui.blank_line()?;
+            }
             self.ui.upgrade_installing_dll()?;
 
             let new_dll_path = plugins_dir.join(&filename);
@@ -374,7 +464,7 @@ impl<'a> Upgrader<'a> {
             report_event("Upgrade.Installed.DLL", Some(&filename));
         }
 
-        // 6. 安装 ResourceExample ZIP（仅当需要升级时）
+        // 7. 安装 ResourceExample ZIP（仅当需要升级时）
         if let Some((temp_path, filename)) = temp_resourceex_path {
             let resourceex_dir = self.game_root.join("ResourceEx");
             let old_resourceex_pattern = resourceex_dir.join("ResourceExample-*.zip");
@@ -395,7 +485,7 @@ impl<'a> Upgrader<'a> {
                 }
             }
 
-            if !dll_needs_upgrade {
+            if !bepinex_needs_upgrade && !dll_needs_upgrade {
                 self.ui.blank_line()?;
                 self.ui.blank_line()?;
             }
@@ -421,7 +511,7 @@ impl<'a> Upgrader<'a> {
             report_event("Upgrade.Installed.ResourceEx", Some(&filename));
         }
 
-        // 7. 清理临时文件
+        // 8. 清理临时文件
         self.ui.upgrade_cleanup_start()?;
         self.cleanup_old_files()?;
 

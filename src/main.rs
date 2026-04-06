@@ -141,9 +141,9 @@ fn run(ui: &dyn Ui) -> Result<()> {
     // 4. 显示可升级项
     if let Some(vi) = &version_info
         && let Ok(upgrader) = Upgrader::new(game_root.clone(), ui)
-        && let Ok((dll_needs, res_needs)) = upgrader.has_updates(vi)
+        && let Ok((bep_needs, dll_needs, res_needs)) = upgrader.has_updates(vi)
     {
-        ui.display_available_updates(dll_needs, res_needs)?;
+        ui.display_available_updates(bep_needs, dll_needs, res_needs)?;
     }
 
     // 5. 选择操作模式

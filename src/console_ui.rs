@@ -84,11 +84,15 @@ impl Ui for ConsoleUI {
 
     fn display_available_updates(
         &self,
+        bepinex_available: bool,
         dll_available: bool,
         resourceex_available: bool,
     ) -> Result<()> {
-        if dll_available || resourceex_available {
+        if bepinex_available || dll_available || resourceex_available {
             println!("检测到可升级项：");
+            if bepinex_available {
+                println!("  • BepInEx 可升级");
+            }
             if dll_available {
                 println!("  • MetaMystia DLL 可升级");
             }
@@ -387,8 +391,18 @@ impl Ui for ConsoleUI {
         Ok(())
     }
 
-    fn upgrade_display_current_and_latest_dll(&self, current: &str, latest: &str) -> Result<()> {
+    fn upgrade_display_current_and_latest_bepinex(
+        &self,
+        current: &str,
+        latest: &str,
+    ) -> Result<()> {
         println!();
+        println!("当前 BepInEx 版本：{}", style(current).green());
+        println!("最新 BepInEx 版本：{}", style(latest).green());
+        Ok(())
+    }
+
+    fn upgrade_display_current_and_latest_dll(&self, current: &str, latest: &str) -> Result<()> {
         println!("当前 MetaMystia DLL 版本：{}", style(current).green());
         println!("最新 MetaMystia DLL 版本：{}", style(latest).green());
         Ok(())
@@ -410,14 +424,24 @@ impl Ui for ConsoleUI {
         Ok(())
     }
 
-    fn upgrade_detected_new_dll(&self, current: &str, new: &str) -> Result<()> {
+    fn upgrade_bepinex_needs_upgrade(&self) -> Result<()> {
         println!();
+        println!("BepInEx 需要升级");
+        Ok(())
+    }
+
+    fn upgrade_bepinex_already_latest(&self) -> Result<()> {
+        println!();
+        println!("BepInEx 已是最新版本");
+        Ok(())
+    }
+
+    fn upgrade_detected_new_dll(&self, current: &str, new: &str) -> Result<()> {
         println!("发现新版本 MetaMystia DLL：v{} -> v{}", current, new);
         Ok(())
     }
 
     fn upgrade_dll_already_latest(&self) -> Result<()> {
-        println!();
         println!("MetaMystia DLL 已是最新版本");
         Ok(())
     }
@@ -425,6 +449,12 @@ impl Ui for ConsoleUI {
     fn upgrade_resourceex_needs_upgrade(&self) -> Result<()> {
         println!("ResourceExample ZIP 需要升级");
         println!();
+        Ok(())
+    }
+
+    fn upgrade_downloading_bepinex(&self) -> Result<()> {
+        println!();
+        println!("正在下载 BepInEx...");
         Ok(())
     }
 
@@ -440,9 +470,14 @@ impl Ui for ConsoleUI {
         Ok(())
     }
 
+    fn upgrade_installing_bepinex(&self) -> Result<()> {
+        println!();
+        println!();
+        println!("正在安装 BepInEx...");
+        Ok(())
+    }
+
     fn upgrade_installing_dll(&self) -> Result<()> {
-        println!();
-        println!();
         println!("正在安装 MetaMystia DLL...");
         Ok(())
     }

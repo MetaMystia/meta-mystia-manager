@@ -1,5 +1,5 @@
 use crate::cli::InstallConfig;
-use crate::config::UninstallMode;
+use crate::config::{BEPINEX_VERSION_FILE, UninstallMode};
 use crate::downloader::Downloader;
 use crate::error::{ManagerError, Result};
 use crate::extractor::Extractor;
@@ -309,7 +309,21 @@ impl<'a> Installer<'a> {
         let bepinex_exists = bepinex_dir.exists();
 
         // 安装 BepInEx（如果之前存在则保留 plugins 目录）
-        Extractor::deploy_bepinex(&bepinex_path, &self.game_root, bepinex_exists)?;
+        Extractor::deploy_bepinex(
+            &bepinex_path,
+            &self.game_root,
+            if bepinex_exists {
+                &["BepInEx/plugins"]
+            } else {
+                &[]
+            },
+        )?;
+
+        // 写入 BepInEx 版本标记文件
+        if let Ok(bep_version) = version_info.bepinex_version() {
+            let version_file = self.game_root.join(BEPINEX_VERSION_FILE);
+            let _ = std::fs::write(&version_file, bep_version.as_bytes());
+        }
 
         // 写入默认配置（如果不存在）
         let bepinex_config_dir = self.game_root.join("BepInEx").join("config");

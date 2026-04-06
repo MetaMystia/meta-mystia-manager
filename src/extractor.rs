@@ -184,16 +184,20 @@ impl Extractor {
     }
 
     /// 安装 BepInEx 到游戏根目录
-    pub fn deploy_bepinex(zip_path: &Path, game_root: &Path, skip_plugins: bool) -> Result<()> {
+    pub fn deploy_bepinex(
+        zip_path: &Path,
+        game_root: &Path,
+        exclude_patterns: &[&str],
+    ) -> Result<()> {
         report_event(
             "Deploy.BepInEx.Start",
             Some(&zip_path.display().to_string()),
         );
 
-        let res = if skip_plugins {
-            Self::extract_zip_safe_with_exclusions(zip_path, game_root, &["BepInEx/plugins"])
-        } else {
+        let res = if exclude_patterns.is_empty() {
             Self::extract_zip_safe(zip_path, game_root)
+        } else {
+            Self::extract_zip_safe_with_exclusions(zip_path, game_root, exclude_patterns)
         };
 
         match res {
