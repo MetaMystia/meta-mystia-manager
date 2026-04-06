@@ -28,6 +28,9 @@ const GITHUB_RELEASE_API_BASE: &str = "https://api.github.com/repos/MetaMikuAI/M
 const RATE_LIMIT: usize = 128 * 1024; // 128KB/s
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5); // 连接超时
 
+const EXTERNAL_SOURCE_MIN_SPEED_BPS: usize = 128 * 1024; // 128KB/s，外部源最低速度阈值
+const SPEED_CHECK_INTERVAL: Duration = Duration::from_secs(10); // 速度检测区间
+
 /// 下载器
 pub struct Downloader<'a> {
     agent: ureq::Agent,
@@ -188,8 +191,19 @@ impl<'a> Downloader<'a> {
         file_size: Option<u64>,
         rate_limit: bool,
     ) -> Result<()> {
+        self.download_file_with_progress_and_speed_check(url, dest, file_size, rate_limit, None)
+    }
+
+    fn download_file_with_progress_and_speed_check(
+        &self,
+        url: &str,
+        dest: &Path,
+        file_size: Option<u64>,
+        rate_limit: bool,
+        min_speed_bps: Option<usize>,
+    ) -> Result<()> {
         self.retry("下载文件", || {
-            self.try_download(url, dest, file_size, rate_limit)
+            self.try_download(url, dest, file_size, rate_limit, min_speed_bps)
         })
     }
 
@@ -199,6 +213,7 @@ impl<'a> Downloader<'a> {
         dest: &Path,
         file_size: Option<u64>,
         rate_limit: bool,
+        min_speed_bps: Option<usize>,
     ) -> Result<()> {
         let response = self
             .agent
@@ -219,7 +234,7 @@ impl<'a> Downloader<'a> {
         let id = self.ui.download_start(&filename, total_size)?;
 
         let mut reader = response.into_reader();
-        self.write_response_to_file(&mut reader, dest, id, rate_limit)
+        self.write_response_to_file(&mut reader, dest, id, rate_limit, min_speed_bps)
     }
 
     fn write_response_to_file<R: Read>(
@@ -228,6 +243,7 @@ impl<'a> Downloader<'a> {
         dest: &Path,
         id: usize,
         rate_limit: bool,
+        min_speed_bps: Option<usize>,
     ) -> Result<()> {
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
@@ -258,6 +274,9 @@ impl<'a> Downloader<'a> {
         let mut downloaded = 0u64;
         let start = Instant::now();
 
+        let mut window_start = Instant::now();
+        let mut window_bytes = 0u64;
+
         loop {
             let to_read = buffer.len();
 
@@ -275,8 +294,27 @@ impl<'a> Downloader<'a> {
                 ))
             })?;
             downloaded += n as u64;
+            window_bytes += n as u64;
 
             self.ui.download_update(id, downloaded)?;
+
+            if let Some(min_speed) = min_speed_bps {
+                let window_elapsed = window_start.elapsed();
+                if window_elapsed >= SPEED_CHECK_INTERVAL {
+                    let avg_speed = window_bytes as f64 / window_elapsed.as_secs_f64();
+                    if (avg_speed as usize) < min_speed {
+                        let _ = std::fs::remove_file(&tmp_path);
+                        let speed_kbs = avg_speed / 1024.0;
+                        let threshold_kbs = min_speed / 1024;
+                        return Err(ManagerError::SlowDownload(format!(
+                            "{:.1} KB/s < {} KB/s",
+                            speed_kbs, threshold_kbs
+                        )));
+                    }
+                    window_start = Instant::now();
+                    window_bytes = 0;
+                }
+            }
 
             if rate_limit {
                 let expected_secs = (downloaded as f64) / (RATE_LIMIT as f64);
@@ -490,7 +528,13 @@ impl<'a> Downloader<'a> {
 
         match self.get_dll_download_url_from_github() {
             Ok(url) => {
-                if let Err(e) = self.download_file_with_progress(&url, dest, None, false) {
+                if let Err(e) = self.download_file_with_progress_and_speed_check(
+                    &url,
+                    dest,
+                    None,
+                    false,
+                    Some(EXTERNAL_SOURCE_MIN_SPEED_BPS),
+                ) {
                     self.ui.download_switch_to_fallback(&format!(
                         "从 GitHub 下载 MetaMystia DLL 失败：{}，切换到备用源...",
                         e
@@ -596,9 +640,13 @@ impl<'a> Downloader<'a> {
                     .ui
                     .download_start("BepInEx（bepinex.dev）", total_size)?;
 
-                if let Err(e) =
-                    self.write_response_to_file(&mut resp.into_reader(), dest, id, false)
-                {
+                if let Err(e) = self.write_response_to_file(
+                    &mut resp.into_reader(),
+                    dest,
+                    id,
+                    false,
+                    Some(EXTERNAL_SOURCE_MIN_SPEED_BPS),
+                ) {
                     self.ui.download_finish(id, "从 bepinex.dev 下载失败")?;
                     self.ui.download_bepinex_primary_failed(&format!(
                         "从 bepinex.dev 下载失败 ({}), 切换到备用源...",

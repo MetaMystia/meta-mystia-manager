@@ -25,6 +25,9 @@ pub enum ManagerError {
     #[error("被限流：{0}")]
     RateLimited(String),
 
+    #[error("下载速度过慢：{0}")]
+    SlowDownload(String),
+
     #[error("解压失败：{0}")]
     ExtractFailed(String),
 

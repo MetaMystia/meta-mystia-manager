@@ -28,6 +28,10 @@ where
         match f() {
             Ok(v) => return Ok(v),
             Err(e) => {
+                if matches!(e, ManagerError::SlowDownload(_)) {
+                    return Err(e);
+                }
+
                 let raw = (cfg.base_delay_secs as f64) * cfg.multiplier.powi(attempt as i32);
                 let delay_secs = raw.min(cfg.max_delay_secs as f64).ceil() as u64;
 
