@@ -29,7 +29,13 @@ const RATE_LIMIT: usize = 128 * 1024; // 128KB/s
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5); // 连接超时
 
 const EXTERNAL_SOURCE_MIN_SPEED_BPS: usize = 128 * 1024; // 128KB/s，外部源最低速度阈值
-const SPEED_CHECK_INTERVAL: Duration = Duration::from_secs(10); // 速度检测区间
+const SPEED_CHECK_INTERVAL: Duration = Duration::from_secs(10); // 滑动窗口长度
+const OVERALL_CHECK_INTERVAL: Duration = Duration::from_secs(5); // 整体均速采样间隔
+const WARMUP_DURATION: Duration = Duration::from_secs(5); // 启动期豁免
+const MAX_CONSECUTIVE_SLOW_WINDOWS: u32 = 2; // 滑动窗口连续低速换源阈值
+const MAX_CONSECUTIVE_SLOW_OVERALL: u32 = 2; // 整体均速连续低速换源阈值
+const TAIL_SKIP_RATIO: f64 = 0.90; // 已下载比例豁免阈值
+const TAIL_SKIP_MIN_REMAINING_CAP: u64 = 384 * 1024; // 剩余字节豁免阈值上限
 
 /// 下载器
 pub struct Downloader<'a> {
@@ -234,7 +240,7 @@ impl<'a> Downloader<'a> {
         let id = self.ui.download_start(&filename, total_size)?;
 
         let mut reader = response.into_reader();
-        self.write_response_to_file(&mut reader, dest, id, rate_limit, min_speed_bps)
+        self.write_response_to_file(&mut reader, dest, id, total_size, rate_limit, min_speed_bps)
     }
 
     fn write_response_to_file<R: Read>(
@@ -242,6 +248,7 @@ impl<'a> Downloader<'a> {
         resp: &mut R,
         dest: &Path,
         id: usize,
+        total_size: Option<u64>,
         rate_limit: bool,
         min_speed_bps: Option<usize>,
     ) -> Result<()> {
@@ -276,6 +283,9 @@ impl<'a> Downloader<'a> {
 
         let mut window_start = Instant::now();
         let mut window_bytes = 0u64;
+        let mut slow_window_count: u32 = 0;
+        let mut last_overall_check = Instant::now();
+        let mut slow_overall_count: u32 = 0;
 
         loop {
             let to_read = buffer.len();
@@ -299,20 +309,81 @@ impl<'a> Downloader<'a> {
             self.ui.download_update(id, downloaded)?;
 
             if let Some(min_speed) = min_speed_bps {
-                let window_elapsed = window_start.elapsed();
-                if window_elapsed >= SPEED_CHECK_INTERVAL {
-                    let avg_speed = window_bytes as f64 / window_elapsed.as_secs_f64();
-                    if (avg_speed as usize) < min_speed {
-                        let _ = std::fs::remove_file(&tmp_path);
-                        let speed_kbs = avg_speed / 1024.0;
-                        let threshold_kbs = min_speed / 1024;
-                        return Err(ManagerError::SlowDownload(format!(
-                            "{:.1} KB/s < {} KB/s",
-                            speed_kbs, threshold_kbs
-                        )));
+                let elapsed = start.elapsed();
+
+                // 启动期豁免
+                if elapsed >= WARMUP_DURATION {
+                    // 收尾豁免（同时作用于两条检测路径）
+                    let in_tail_skip = match total_size {
+                        Some(total) if total > 0 => {
+                            let ratio_skip = (downloaded as f64 / total as f64) >= TAIL_SKIP_RATIO;
+                            let by_ratio_remaining =
+                                (total as f64 * (1.0 - TAIL_SKIP_RATIO)) as u64;
+                            let eff_tail_remaining =
+                                cmp::min(TAIL_SKIP_MIN_REMAINING_CAP, by_ratio_remaining);
+                            let bytes_left = total.saturating_sub(downloaded);
+                            ratio_skip || bytes_left <= eff_tail_remaining
+                        }
+                        _ => false,
+                    };
+
+                    if !in_tail_skip {
+                        // 路径 A：滑动窗口
+                        let window_elapsed = window_start.elapsed();
+                        if window_elapsed >= SPEED_CHECK_INTERVAL {
+                            let avg_speed = window_bytes as f64 / window_elapsed.as_secs_f64();
+                            if (avg_speed as usize) < min_speed {
+                                slow_window_count += 1;
+                                if slow_window_count >= MAX_CONSECUTIVE_SLOW_WINDOWS {
+                                    let _ = std::fs::remove_file(&tmp_path);
+                                    let speed_kbs = avg_speed / 1024.0;
+                                    let threshold_kbs = min_speed / 1024;
+                                    report_event(
+                                        "Download.SlowSpeed.Triggered.Window",
+                                        Some(&format!(
+                                            "{:.1}KB/s<{}KB/s",
+                                            speed_kbs, threshold_kbs
+                                        )),
+                                    );
+                                    return Err(ManagerError::SlowDownload(format!(
+                                        "{:.1} KB/s < {} KB/s",
+                                        speed_kbs, threshold_kbs
+                                    )));
+                                }
+                            } else {
+                                slow_window_count = 0;
+                            }
+                            window_start = Instant::now();
+                            window_bytes = 0;
+                        }
+
+                        // 路径 B：整体均速
+                        if last_overall_check.elapsed() >= OVERALL_CHECK_INTERVAL {
+                            let overall_avg = downloaded as f64 / elapsed.as_secs_f64().max(1e-3);
+                            if (overall_avg as usize) < min_speed {
+                                slow_overall_count += 1;
+                                if slow_overall_count >= MAX_CONSECUTIVE_SLOW_OVERALL {
+                                    let _ = std::fs::remove_file(&tmp_path);
+                                    let speed_kbs = overall_avg / 1024.0;
+                                    let threshold_kbs = min_speed / 1024;
+                                    report_event(
+                                        "Download.SlowSpeed.Triggered.Overall",
+                                        Some(&format!(
+                                            "{:.1}KB/s<{}KB/s",
+                                            speed_kbs, threshold_kbs
+                                        )),
+                                    );
+                                    return Err(ManagerError::SlowDownload(format!(
+                                        "整体均速 {:.1} KB/s < {} KB/s",
+                                        speed_kbs, threshold_kbs
+                                    )));
+                                }
+                            } else {
+                                slow_overall_count = 0;
+                            }
+                            last_overall_check = Instant::now();
+                        }
                     }
-                    window_start = Instant::now();
-                    window_bytes = 0;
                 }
             }
 
@@ -644,6 +715,7 @@ impl<'a> Downloader<'a> {
                     &mut resp.into_reader(),
                     dest,
                     id,
+                    total_size,
                     false,
                     Some(EXTERNAL_SOURCE_MIN_SPEED_BPS),
                 ) {
