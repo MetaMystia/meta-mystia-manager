@@ -112,7 +112,6 @@ pub fn run_shutdown() {
 
     drop(tx);
 
-    let mut completed_flags = vec![false; total];
     let mut completed = 0;
 
     while completed < total {
@@ -123,12 +122,7 @@ pub fn run_shutdown() {
 
         let remaining = deadline - now;
         match rx.recv_timeout(remaining) {
-            Ok(idx) => {
-                if !completed_flags[idx] {
-                    completed_flags[idx] = true;
-                    completed += 1;
-                }
-            }
+            Ok(_idx) => completed += 1,
             Err(RecvTimeoutError::Timeout) => {
                 break;
             }
