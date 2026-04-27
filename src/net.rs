@@ -24,6 +24,12 @@ where
 {
     let cfg = cfg.unwrap_or_else(RetryConfig::network);
 
+    if cfg.attempts == 0 {
+        return Err(ManagerError::Other(
+            "重试配置无效：attempts 必须至少为 1".to_string(),
+        ));
+    }
+
     for attempt in 0..cfg.attempts {
         match f() {
             Ok(v) => return Ok(v),
@@ -62,7 +68,7 @@ where
         }
     }
 
-    unreachable!()
+    Err(ManagerError::Other("重试流程意外结束".to_string()))
 }
 
 /// 将 ureq::Error 转换为 ManagerError，同时处理 429 Rate Limit
