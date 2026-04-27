@@ -1230,9 +1230,12 @@ fn render_inline(s: &str) -> String {
                 i += 1;
             }
             c if c >= 0x80 => {
-                let ch = s[i..].chars().next().unwrap();
-                result.push(ch);
-                i += ch.len_utf8();
+                if let Some(ch) = s[i..].chars().next() {
+                    result.push(ch);
+                    i += ch.len_utf8();
+                } else {
+                    break;
+                }
             }
             c => {
                 result.push(c as char);
