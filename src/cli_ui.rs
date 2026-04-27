@@ -182,14 +182,6 @@ impl Ui for CliUI {
         Ok(())
     }
 
-    fn upgrade_warn_unparse_version(&self, filename: &str) -> Result<()> {
-        self.stderr(&format!(
-            "Warning: Unable to parse version from {}",
-            filename
-        ));
-        Ok(())
-    }
-
     fn upgrade_backup_failed(&self, err: &str) -> Result<()> {
         self.stderr(&format!("Backup failed: {}", err));
         Ok(())

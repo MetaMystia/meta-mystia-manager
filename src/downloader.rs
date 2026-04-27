@@ -3,7 +3,10 @@ use crate::error::{ManagerError, Result};
 use crate::file_ops::atomic_rename_or_copy;
 use crate::metrics::report_event;
 use crate::model::VersionInfo;
-use crate::net::{get_json_with_retry, get_response_with_retry, read_system_proxy, with_retry};
+use crate::net::{
+    JsonRequestError, get_json_with_retry_stopping_on_status, get_response_with_retry,
+    read_system_proxy, with_retry,
+};
 use crate::ui::Ui;
 
 use native_tls::TlsConnector;
@@ -138,7 +141,7 @@ impl<'a> Downloader<'a> {
             .into_string()
             .map_err(|e| ManagerError::NetworkError(format!("读取响应失败：{}", e)))?;
 
-        let vi: VersionInfo = serde_json::from_str(&text).map_err(|e| {
+        let mut vi: VersionInfo = serde_json::from_str(&text).map_err(|e| {
             let snippet: String = text.chars().take(200).collect();
 
             let _ = self
@@ -152,6 +155,7 @@ impl<'a> Downloader<'a> {
             ManagerError::Other(format!("解析版本信息失败：{}", e))
         })?;
 
+        vi.normalize_versions();
         vi.validate()?;
 
         self.ui.download_version_info_success()?;
@@ -435,6 +439,113 @@ impl<'a> Downloader<'a> {
         }
     }
 
+    fn download_share_code_candidates(
+        &self,
+        share_code: &str,
+        filenames: &[String],
+        dest: &Path,
+    ) -> Result<String> {
+        let mut last_err = None;
+
+        for filename in filenames {
+            let url = Self::file_api_url(share_code, filename);
+
+            match self.download_file_with_progress(&url, dest, None, true) {
+                Ok(()) => return Ok(filename.clone()),
+                Err(e) => last_err = Some(e),
+            }
+        }
+
+        Err(last_err
+            .unwrap_or_else(|| ManagerError::NetworkError("没有可用的下载文件名候选".to_string())))
+    }
+
+    fn download_share_code_asset_with_events(
+        &self,
+        share_code: &str,
+        filenames: &[String],
+        dest: &Path,
+        version: &str,
+        success_event: &str,
+        failed_event: &str,
+    ) -> Result<String> {
+        match self.download_share_code_candidates(share_code, filenames, dest) {
+            Ok(filename) => {
+                report_event(
+                    success_event,
+                    Some(&format!("version={};file={}", version, filename)),
+                );
+                Ok(filename)
+            }
+            Err(e) => {
+                report_event(failed_event, Some(&format!("{}", e)));
+                Err(e)
+            }
+        }
+    }
+
+    fn github_release_fallback_tag(version: &str) -> Option<String> {
+        let normalized = VersionInfo::normalize_version(version);
+        let parts: Vec<_> = normalized.split('.').collect();
+
+        match parts.as_slice() {
+            [major, minor, patch]
+                if major.parse::<u64>().is_ok()
+                    && minor.parse::<u64>().is_ok()
+                    && patch.parse::<u64>().ok() == Some(0) =>
+            {
+                Some(format!("{}.{}", major, minor))
+            }
+            _ => None,
+        }
+    }
+
+    fn github_release_fallback_tag_for_status(version: &str, status_code: u16) -> Option<String> {
+        if status_code == 404 {
+            Self::github_release_fallback_tag(version)
+        } else {
+            None
+        }
+    }
+
+    fn github_release_tag_matches_requested_version(requested: &str, tag: &str) -> bool {
+        let requested = VersionInfo::normalize_version(requested);
+        let tag = VersionInfo::normalize_version(tag);
+
+        !tag.is_empty()
+            && (requested == tag
+                || Self::github_release_fallback_tag(&requested)
+                    .as_deref()
+                    .is_some_and(|fallback| fallback == tag))
+    }
+
+    fn github_release_api_url(version: Option<&str>) -> String {
+        if let Some(version) = version {
+            format!("{}/tags/v{}", GITHUB_RELEASE_API_BASE, version)
+        } else {
+            format!("{}/latest", GITHUB_RELEASE_API_BASE)
+        }
+    }
+
+    fn github_release_not_found_error() -> ManagerError {
+        ManagerError::NetworkError("请求 GitHub API 返回错误：HTTP 404".to_string())
+    }
+
+    fn fetch_github_release_json_from_url(
+        &self,
+        api_url: &str,
+    ) -> std::result::Result<serde_json::Value, JsonRequestError> {
+        get_json_with_retry_stopping_on_status(
+            &self.agent,
+            self.ui,
+            api_url,
+            Some("application/vnd.github+json"),
+            "请求 GitHub API ",
+            Some(RetryConfig::github_release_note()),
+            &[404],
+        )
+    }
+
     fn fetch_github_release_json(&self, version: Option<&str>) -> Result<serde_json::Value> {
         let cache_key = version.unwrap_or("latest").to_string();
 
@@ -444,45 +555,46 @@ impl<'a> Downloader<'a> {
             return Ok(json.clone());
         }
 
-        let api_url = if let Some(v) = version {
-            format!("{}/tags/v{}", GITHUB_RELEASE_API_BASE, v)
-        } else {
-            format!("{}/latest", GITHUB_RELEASE_API_BASE)
-        };
+        let api_url = Self::github_release_api_url(version);
 
-        let result = get_json_with_retry::<serde_json::Value>(
-            &self.agent,
-            self.ui,
-            &api_url,
-            Some("application/vnd.github+json"),
-            "请求 GitHub API ",
-            Some(RetryConfig::github_release_note()),
-        );
-
-        let json = match result {
+        let json = match self.fetch_github_release_json_from_url(&api_url) {
             Ok(json) => json,
-            Err(e) => {
+            Err(JsonRequestError::HttpStatus(404)) => {
                 if let Some(v) = version
-                    && v.ends_with(".0")
+                    && let Some(fallback_tag) = Self::github_release_fallback_tag_for_status(v, 404)
                 {
-                    let trimmed_version = &v[..v.len() - 2];
-                    let fallback_url =
-                        format!("{}/tags/v{}", GITHUB_RELEASE_API_BASE, trimmed_version);
-                    if let Ok(fallback_json) = get_json_with_retry::<serde_json::Value>(
-                        &self.agent,
-                        self.ui,
-                        &fallback_url,
-                        Some("application/vnd.github+json"),
-                        "请求 GitHub API ",
-                        Some(RetryConfig::github_release_note()),
-                    ) {
-                        if let Ok(mut guard) = self.cached_github_releases.lock() {
-                            guard.insert(cache_key, fallback_json.clone());
+                    let fallback_url = Self::github_release_api_url(Some(&fallback_tag));
+                    match self.fetch_github_release_json_from_url(&fallback_url) {
+                        Ok(fallback_json) => {
+                            if let Ok(mut guard) = self.cached_github_releases.lock() {
+                                guard.insert(cache_key, fallback_json.clone());
+                            }
+                            return Ok(fallback_json);
                         }
-                        return Ok(fallback_json);
+                        Err(JsonRequestError::HttpStatus(404)) => {
+                            return Err(Self::github_release_not_found_error());
+                        }
+                        Err(JsonRequestError::Other(err)) => {
+                            return Err(err);
+                        }
+                        Err(JsonRequestError::HttpStatus(status)) => {
+                            return Err(ManagerError::NetworkError(format!(
+                                "请求 GitHub API 返回错误：HTTP {}",
+                                status
+                            )));
+                        }
                     }
                 }
-                return Err(e);
+                return Err(Self::github_release_not_found_error());
+            }
+            Err(JsonRequestError::Other(err)) => {
+                return Err(err);
+            }
+            Err(JsonRequestError::HttpStatus(status)) => {
+                return Err(ManagerError::NetworkError(format!(
+                    "请求 GitHub API 返回错误：HTTP {}",
+                    status
+                )));
             }
         };
 
@@ -493,25 +605,74 @@ impl<'a> Downloader<'a> {
         Ok(json)
     }
 
-    fn get_dll_download_url_from_github(&self) -> Result<String> {
+    fn github_metamystia_asset_candidates_for_tag(tag: &str) -> Vec<String> {
+        let normalized = VersionInfo::normalize_version(tag);
+        let parts: Vec<_> = normalized.split('.').collect();
+
+        match parts.as_slice() {
+            [major, minor] if major.parse::<u64>().is_ok() && minor.parse::<u64>().is_ok() => {
+                vec![
+                    format!("MetaMystia-v{}.{}.dll", major, minor),
+                    format!("MetaMystia-v{}.{}.0.dll", major, minor),
+                ]
+            }
+            [major, minor, patch]
+                if major.parse::<u64>().is_ok()
+                    && minor.parse::<u64>().is_ok()
+                    && patch.parse::<u64>().is_ok() =>
+            {
+                vec![format!("MetaMystia-v{}.{}.{}.dll", major, minor, patch)]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn get_dll_download_url_from_github(&self, version: &str) -> Result<String> {
         self.ui.download_attempt_github_dll()?;
 
-        let json = self.fetch_github_release_json(None)?;
+        let json = self.fetch_github_release_json(Some(version))?;
+        let tag = json["tag_name"].as_str().unwrap_or("");
+
+        if !Self::github_release_tag_matches_requested_version(version, tag) {
+            report_event(
+                "Download.GitHub.Dll.TagMismatch",
+                Some(&format!("requested={};tag={}", version, tag)),
+            );
+            return Err(ManagerError::NetworkError(format!(
+                "GitHub Release 标签与目标版本不一致：目标 {}，实际 {}",
+                version,
+                if tag.is_empty() { "<empty>" } else { tag }
+            )));
+        }
+
+        let candidates = Self::github_metamystia_asset_candidates_for_tag(tag);
+
+        if candidates.is_empty() {
+            report_event(
+                "Download.GitHub.Dll.InvalidTag",
+                Some(&format!("requested={};tag={}", version, tag)),
+            );
+            return Err(ManagerError::NetworkError(format!(
+                "无法从 GitHub Release 标签解析 MetaMystia 文件名：{}",
+                if tag.is_empty() { "<empty>" } else { tag }
+            )));
+        }
 
         if let Some(assets) = json["assets"].as_array() {
             for asset in assets {
-                match (
+                if let (Some(name), Some(url)) = (
                     asset["name"].as_str(),
                     asset["browser_download_url"].as_str(),
-                ) {
-                    (Some(name), Some(url))
-                        if name.starts_with("MetaMystia-v") && name.ends_with(".dll") =>
-                    {
-                        self.ui.download_found_github_asset(name)?;
-                        report_event("Download.GitHub.Dll.Found", Some(name));
-                        return Ok(url.to_string());
-                    }
-                    _ => {}
+                ) && candidates
+                    .iter()
+                    .any(|candidate| candidate.eq_ignore_ascii_case(name))
+                {
+                    self.ui.download_found_github_asset(name)?;
+                    report_event(
+                        "Download.GitHub.Dll.Found",
+                        Some(&format!("requested={};tag={};file={}", version, tag, name)),
+                    );
+                    return Ok(url.to_string());
                 }
             }
         }
@@ -578,26 +739,22 @@ impl<'a> Downloader<'a> {
     ) -> Result<()> {
         report_event("Download.Metamystia.Start", Some(version));
 
-        if !try_github {
-            let filename = VersionInfo::metamystia_filename(version);
-            let url = Self::file_api_url(share_code, &filename);
+        let fallback_filenames = [VersionInfo::metamystia_filename(version)];
 
-            return match self.download_file_with_progress(&url, dest, None, true) {
-                Ok(()) => {
-                    report_event("Download.Metamystia.Success.Fallback", Some(version));
-                    Ok(())
-                }
-                Err(e) => {
-                    report_event(
-                        "Download.Metamystia.Failed.Fallback",
-                        Some(&format!("{}", e)),
-                    );
-                    Err(e)
-                }
-            };
+        if !try_github {
+            return self
+                .download_share_code_asset_with_events(
+                    share_code,
+                    &fallback_filenames,
+                    dest,
+                    version,
+                    "Download.Metamystia.Success.Fallback",
+                    "Download.Metamystia.Failed.Fallback",
+                )
+                .map(|_| ());
         }
 
-        match self.get_dll_download_url_from_github() {
+        match self.get_dll_download_url_from_github(version) {
             Ok(url) => {
                 if let Err(e) = self.download_file_with_progress_and_speed_check(
                     &url,
@@ -613,22 +770,15 @@ impl<'a> Downloader<'a> {
                     self.ui.download_try_fallback_metamystia()?;
                     report_event("Download.Metamystia.Failed.GitHub", Some(&format!("{}", e)));
 
-                    let filename = VersionInfo::metamystia_filename(version);
-                    let fallback_url = Self::file_api_url(share_code, &filename);
-
-                    match self.download_file_with_progress(&fallback_url, dest, None, true) {
-                        Ok(()) => {
-                            report_event("Download.Metamystia.Success.Fallback", Some(version));
-                            Ok(())
-                        }
-                        Err(e) => {
-                            report_event(
-                                "Download.Metamystia.Failed.Fallback",
-                                Some(&format!("{}", e)),
-                            );
-                            Err(e)
-                        }
-                    }
+                    self.download_share_code_asset_with_events(
+                        share_code,
+                        &fallback_filenames,
+                        dest,
+                        version,
+                        "Download.Metamystia.Success.Fallback",
+                        "Download.Metamystia.Failed.Fallback",
+                    )
+                    .map(|_| ())
                 } else {
                     report_event("Download.Metamystia.Success.GitHub", Some(version));
                     Ok(())
@@ -641,22 +791,15 @@ impl<'a> Downloader<'a> {
                 self.ui.download_try_fallback_metamystia()?;
                 report_event("Download.Metamystia.GitHubUrlFailed", None);
 
-                let filename = VersionInfo::metamystia_filename(version);
-                let url = Self::file_api_url(share_code, &filename);
-
-                match self.download_file_with_progress(&url, dest, None, true) {
-                    Ok(()) => {
-                        report_event("Download.Metamystia.Success.Fallback", Some(version));
-                        Ok(())
-                    }
-                    Err(e) => {
-                        report_event(
-                            "Download.Metamystia.Failed.Fallback",
-                            Some(&format!("{}", e)),
-                        );
-                        Err(e)
-                    }
-                }
+                self.download_share_code_asset_with_events(
+                    share_code,
+                    &fallback_filenames,
+                    dest,
+                    version,
+                    "Download.Metamystia.Success.Fallback",
+                    "Download.Metamystia.Failed.Fallback",
+                )
+                .map(|_| ())
             }
         }
     }
@@ -665,19 +808,17 @@ impl<'a> Downloader<'a> {
     pub fn download_resourceex(&self, share_code: &str, version: &str, dest: &Path) -> Result<()> {
         report_event("Download.ResourceEx.Start", Some(version));
 
-        let filename = VersionInfo::resourceex_filename(version);
-        let url = Self::file_api_url(share_code, &filename);
+        let filenames = [VersionInfo::resourceex_filename(version)];
 
-        match self.download_file_with_progress(&url, dest, None, true) {
-            Ok(()) => {
-                report_event("Download.ResourceEx.Success", Some(version));
-                Ok(())
-            }
-            Err(e) => {
-                report_event("Download.ResourceEx.Failed", Some(&format!("{}", e)));
-                Err(e)
-            }
-        }
+        self.download_share_code_asset_with_events(
+            share_code,
+            &filenames,
+            dest,
+            version,
+            "Download.ResourceEx.Success",
+            "Download.ResourceEx.Failed",
+        )
+        .map(|_| ())
     }
 
     /// 下载 BepInEx
@@ -727,21 +868,16 @@ impl<'a> Downloader<'a> {
                     report_event("Download.BepInEx.Failed.Primary", Some(&format!("{}", e)));
 
                     let share_code = self.get_share_code()?;
-                    let fallback_url = Self::file_api_url(&share_code, &filename_with_version);
-
-                    match self.download_file_with_progress(&fallback_url, dest, None, true) {
-                        Ok(()) => {
-                            report_event("Download.BepInEx.Success.Fallback", Some(version));
-                            Ok(false)
-                        }
-                        Err(e) => {
-                            report_event(
-                                "Download.BepInEx.Failed.Fallback",
-                                Some(&format!("{}", e)),
-                            );
-                            Err(e)
-                        }
-                    }
+                    let fallback_filenames = [filename_with_version.clone()];
+                    self.download_share_code_asset_with_events(
+                        &share_code,
+                        &fallback_filenames,
+                        dest,
+                        version,
+                        "Download.BepInEx.Success.Fallback",
+                        "Download.BepInEx.Failed.Fallback",
+                    )
+                    .map(|_| false)
                 } else {
                     report_event("Download.BepInEx.Success.Primary", Some(version));
                     Ok(true)
@@ -754,18 +890,16 @@ impl<'a> Downloader<'a> {
                 report_event("Download.BepInEx.PrimaryRequestFailed", Some(version));
 
                 let share_code = self.get_share_code()?;
-                let fallback_url = Self::file_api_url(&share_code, &filename_with_version);
-
-                match self.download_file_with_progress(&fallback_url, dest, None, true) {
-                    Ok(()) => {
-                        report_event("Download.BepInEx.Success.Fallback", Some(version));
-                        Ok(false)
-                    }
-                    Err(e) => {
-                        report_event("Download.BepInEx.Failed.Fallback", Some(&format!("{}", e)));
-                        Err(e)
-                    }
-                }
+                let fallback_filenames = [filename_with_version.clone()];
+                self.download_share_code_asset_with_events(
+                    &share_code,
+                    &fallback_filenames,
+                    dest,
+                    version,
+                    "Download.BepInEx.Success.Fallback",
+                    "Download.BepInEx.Failed.Fallback",
+                )
+                .map(|_| false)
             }
         }
     }

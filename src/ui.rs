@@ -49,7 +49,6 @@ pub trait Ui: Send + Sync {
     fn install_finished(&self, show_bepinex_console: bool) -> Result<()>;
 
     // 升级相关
-    fn upgrade_warn_unparse_version(&self, filename: &str) -> Result<()>;
     fn upgrade_backup_failed(&self, err: &str) -> Result<()>;
     fn upgrade_deleted(&self, path: &Path) -> Result<()>;
     fn upgrade_delete_failed(&self, path: &Path, err: &str) -> Result<()>;

@@ -1,9 +1,12 @@
 use crate::cli::InstallConfig;
-use crate::config::{BEPINEX_VERSION_FILE, UninstallMode};
+use crate::config::{METAMYSTIA_PLUGIN_GLOB, RESOURCEEX_ZIP_GLOB, UninstallMode};
 use crate::downloader::Downloader;
 use crate::error::{ManagerError, Result};
 use crate::extractor::Extractor;
-use crate::file_ops::{atomic_rename_or_copy, count_results, execute_deletion, glob_matches};
+use crate::file_ops::{
+    atomic_rename_or_copy, count_results, execute_deletion, glob_matches, glob_matches_by_filename,
+    write_bepinex_version_marker,
+};
 use crate::metrics::report_event;
 use crate::model::VersionInfo;
 use crate::temp_dir::create_temp_dir_with_guard;
@@ -33,13 +36,10 @@ impl<'a> Installer<'a> {
 
     /// 检查是否已安装 MetaMystia DLL
     pub fn check_metamystia_installed(&self) -> bool {
-        let metamystia_pattern = self
-            .game_root
-            .join("BepInEx")
-            .join("plugins")
-            .join("MetaMystia-*.dll");
-
-        let matches = glob_matches(&metamystia_pattern);
+        let matches = glob_matches_by_filename(
+            &self.game_root.join(METAMYSTIA_PLUGIN_GLOB),
+            VersionInfo::is_metamystia_filename,
+        );
         !matches.is_empty()
     }
 
@@ -47,8 +47,10 @@ impl<'a> Installer<'a> {
     pub fn check_resourceex_installed(&self) -> bool {
         let resourceex_dir = self.game_root.join("ResourceEx");
         resourceex_dir.exists() && resourceex_dir.is_dir() && {
-            let resourceex_pattern = resourceex_dir.join("ResourceExample-*.zip");
-            let matches = glob_matches(&resourceex_pattern);
+            let matches = glob_matches_by_filename(
+                &self.game_root.join(RESOURCEEX_ZIP_GLOB),
+                VersionInfo::is_resourceex_filename,
+            );
             !matches.is_empty()
         }
     }
@@ -94,8 +96,10 @@ impl<'a> Installer<'a> {
         // 2. 删除 plugins 目录中的 MetaMystia DLL
         let plugins_dir = bepinex_dir.join("plugins");
         if plugins_dir.exists() {
-            let metamystia_pattern = plugins_dir.join("MetaMystia-*.dll");
-            for entry in glob_matches(&metamystia_pattern) {
+            for entry in glob_matches_by_filename(
+                &game_root.join(METAMYSTIA_PLUGIN_GLOB),
+                VersionInfo::is_metamystia_filename,
+            ) {
                 push(entry);
             }
         }
@@ -103,8 +107,10 @@ impl<'a> Installer<'a> {
         // 3. 删除 ResourceEx 目录中的 ResourceExample ZIP
         let resourceex_dir = game_root.join("ResourceEx");
         if resourceex_dir.exists() {
-            let resourceex_pattern = resourceex_dir.join("ResourceExample-*.zip");
-            for entry in glob_matches(&resourceex_pattern) {
+            for entry in glob_matches_by_filename(
+                &game_root.join(RESOURCEEX_ZIP_GLOB),
+                VersionInfo::is_resourceex_filename,
+            ) {
                 push(entry);
             }
         }
@@ -160,11 +166,11 @@ impl<'a> Installer<'a> {
         let install_resourceex = if let Some(cfg) = config {
             cfg.install_resourceex
         } else if cleanup_before_deploy {
-            let resourceex_pattern = self
-                .game_root
-                .join("ResourceEx")
-                .join("ResourceExample-*.zip");
-            let resourceex_exists = !glob_matches(&resourceex_pattern).is_empty();
+            let resourceex_exists = !glob_matches_by_filename(
+                &self.game_root.join(RESOURCEEX_ZIP_GLOB),
+                VersionInfo::is_resourceex_filename,
+            )
+            .is_empty();
             if resourceex_exists {
                 true
             } else {
@@ -185,15 +191,20 @@ impl<'a> Installer<'a> {
         let dll_version = if let Some(cfg) = config
             && let Some(ref v) = cfg.dll_version
         {
-            if !version_info.dlls.contains(v) {
+            let Some(matched) = version_info
+                .dlls
+                .iter()
+                .find(|available| VersionInfo::versions_match(available, v))
+                .cloned()
+            else {
                 self.ui
                     .select_version_not_available("MetaMystia DLL", v, &version_info.dlls)?;
                 return Err(ManagerError::Other(format!(
                     "Specified MetaMystia DLL version \"{}\" is not available",
                     v
                 )));
-            }
-            v.clone()
+            };
+            matched
         } else if self.ui.select_version_ask_select("MetaMystia DLL")? {
             let idx = self
                 .ui
@@ -208,22 +219,27 @@ impl<'a> Installer<'a> {
             if let Some(cfg) = config
                 && let Some(ref v) = cfg.resourceex_version
             {
-                if !version_info.zips.contains(v) {
+                let Some(matched) = version_info
+                    .zips
+                    .iter()
+                    .find(|available| VersionInfo::versions_match(available, v))
+                    .cloned()
+                else {
                     self.ui.select_version_not_available(
-                        "ResourceExample ZIP",
+                        "ResourceEx ZIP",
                         v,
                         &version_info.zips,
                     )?;
                     return Err(ManagerError::Other(format!(
-                        "Specified ResourceExample ZIP version \"{}\" is not available",
+                        "Specified ResourceEx ZIP version \"{}\" is not available",
                         v
                     )));
-                }
-                Some(v.clone())
-            } else if self.ui.select_version_ask_select("ResourceExample ZIP")? {
+                };
+                Some(matched)
+            } else if self.ui.select_version_ask_select("ResourceEx ZIP")? {
                 let idx = self
                     .ui
-                    .select_version_from_list("ResourceExample ZIP", &version_info.zips)?;
+                    .select_version_from_list("ResourceEx ZIP", &version_info.zips)?;
                 Some(version_info.zips[idx].clone())
             } else {
                 Some(version_info.latest_resourceex().to_string())
@@ -274,7 +290,7 @@ impl<'a> Installer<'a> {
 
         // 下载 MetaMystia DLL
         let dll_path = temp_dir.join(VersionInfo::metamystia_filename(&dll_version));
-        let try_github = dll_version == version_info.latest_dll();
+        let try_github = VersionInfo::versions_match(&dll_version, version_info.latest_dll());
         self.downloader
             .download_metamystia(&share_code, &dll_version, &dll_path, try_github)?;
 
@@ -320,10 +336,7 @@ impl<'a> Installer<'a> {
         )?;
 
         // 写入 BepInEx 版本标记文件
-        if let Ok(bep_version) = version_info.bepinex_version() {
-            let version_file = self.game_root.join(BEPINEX_VERSION_FILE);
-            let _ = std::fs::write(&version_file, bep_version.as_bytes());
-        }
+        write_bepinex_version_marker(&self.game_root, &version_info);
 
         // 写入默认配置（如果不存在）
         let bepinex_config_dir = self.game_root.join("BepInEx").join("config");

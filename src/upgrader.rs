@@ -1,17 +1,60 @@
-use crate::config::BEPINEX_VERSION_FILE;
+use crate::config::{
+    BEPINEX_VERSION_FILE, METAMYSTIA_PLUGIN_GLOB, METAMYSTIA_PLUGIN_OLD_GLOB, RESOURCEEX_ZIP_GLOB,
+    RESOURCEEX_ZIP_OLD_GLOB,
+};
 use crate::downloader::Downloader;
 use crate::error::{ManagerError, Result};
 use crate::extractor::Extractor;
 use crate::file_ops::{
-    atomic_rename_or_copy, backup_paths_with_index, glob_matches, remove_glob_files,
+    atomic_rename_or_copy, backup_paths_with_index, glob_matches_by_filename, remove_glob_files,
+    write_bepinex_version_marker,
 };
 use crate::metrics::report_event;
 use crate::model::VersionInfo;
 use crate::temp_dir::create_temp_dir_with_guard;
 use crate::ui::Ui;
 
-use semver::Version;
-use std::path::{Path, PathBuf};
+use std::{
+    cmp::Ordering,
+    path::{Path, PathBuf},
+};
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ParsedVersion {
+    parts: Vec<u64>,
+    display: String,
+}
+
+struct InstalledAssetPattern<'a> {
+    pattern: &'a str,
+    matcher: fn(&str) -> bool,
+    version_from_filename: fn(&str) -> Option<String>,
+    backup_suffix: &'a str,
+}
+
+impl Ord for ParsedVersion {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let max_len = self.parts.len().max(other.parts.len());
+
+        for index in 0..max_len {
+            let left = *self.parts.get(index).unwrap_or(&0);
+            let right = *other.parts.get(index).unwrap_or(&0);
+
+            match left.cmp(&right) {
+                Ordering::Equal => continue,
+                non_eq => return non_eq,
+            }
+        }
+
+        Ordering::Equal
+    }
+}
+
+impl PartialOrd for ParsedVersion {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
 
 /// 升级管理器
 pub struct Upgrader<'a> {
@@ -30,140 +73,193 @@ impl<'a> Upgrader<'a> {
         })
     }
 
-    fn parse_version(name: &str, prefix: &str, suffix: &str) -> Option<Version> {
-        if let Some(s) = name.strip_prefix(prefix)
-            && let Some(ver_part) = s.strip_suffix(suffix)
-            && let Ok(v) = Version::parse(ver_part)
-        {
-            return Some(v);
+    fn report_backup_results(&self, results: Vec<Result<PathBuf>>) -> Result<()> {
+        for res in results {
+            if let Err(e) = res {
+                self.ui.upgrade_backup_failed(&format!("{}", e))?;
+            }
         }
-        None
+
+        Ok(())
+    }
+
+    fn cleanup_old_files_by_pattern(
+        &self,
+        pattern: &Path,
+        matcher: fn(&str) -> bool,
+    ) -> Result<()> {
+        for entry in glob_matches_by_filename(pattern, matcher) {
+            let result = remove_glob_files(&entry);
+            for removed in result.removed.iter() {
+                self.ui.upgrade_deleted(removed)?;
+            }
+            for (path, err) in result.failed.into_iter() {
+                self.ui.upgrade_delete_failed(&path, &format!("{}", err))?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn parse_numeric_version(version: &str) -> Option<ParsedVersion> {
+        let version = VersionInfo::normalize_version(version);
+        let parts = VersionInfo::strict_numeric_version_parts(&version)?;
+
+        Some(ParsedVersion {
+            parts,
+            display: version,
+        })
+    }
+
+    fn versions_match(current: &str, latest: &str) -> bool {
+        VersionInfo::versions_match(current, latest)
+    }
+
+    fn backup_existing_assets(
+        &self,
+        pattern: &Path,
+        matcher: fn(&str) -> bool,
+        current_filename: &str,
+        backup_suffix: &str,
+    ) -> Result<()> {
+        let mut to_backup = Vec::new();
+
+        for old_entry in glob_matches_by_filename(pattern, matcher) {
+            if let Some(old_filename) = old_entry.file_name().and_then(|name| name.to_str())
+                && (old_filename == current_filename || old_filename.ends_with(".old"))
+            {
+                continue;
+            }
+
+            to_backup.push(old_entry);
+        }
+
+        self.report_backup_results(backup_paths_with_index(&to_backup, backup_suffix))
+    }
+
+    fn install_asset_from_temp(
+        &self,
+        temp_path: &Path,
+        destination: &Path,
+        temp_extension: &str,
+    ) -> Result<()> {
+        if let Some(parent) = destination.parent()
+            && !parent.exists()
+        {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                ManagerError::from(std::io::Error::new(
+                    e.kind(),
+                    format!("创建目录 {} 失败：{}", parent.display(), e),
+                ))
+            })?;
+        }
+
+        let tmp_new = destination.with_extension(temp_extension);
+        std::fs::copy(temp_path, &tmp_new).map_err(|e| {
+            ManagerError::from(std::io::Error::new(
+                e.kind(),
+                format!("复制临时文件 {} 失败：{}", tmp_new.display(), e),
+            ))
+        })?;
+
+        atomic_rename_or_copy(&tmp_new, destination).map_err(|e| {
+            ManagerError::from(std::io::Error::other(format!(
+                "安装新版本 {} 失败：{}",
+                destination.display(),
+                e
+            )))
+        })
     }
 
     fn consolidate_installed_dlls(&self) -> Result<Option<(String, PathBuf)>> {
-        let plugins_dir = self.game_root.join("BepInEx").join("plugins");
-        self.consolidate_installed_by_pattern(
-            &plugins_dir,
-            "MetaMystia-*.dll",
-            "MetaMystia-v",
-            ".dll",
-            "dll.old",
-        )
+        self.consolidate_installed_by_pattern(InstalledAssetPattern {
+            pattern: METAMYSTIA_PLUGIN_GLOB,
+            matcher: VersionInfo::is_metamystia_filename,
+            version_from_filename: VersionInfo::metamystia_version_from_filename,
+            backup_suffix: "dll.old",
+        })
     }
 
     fn consolidate_installed_resourceex(&self) -> Result<Option<(String, PathBuf)>> {
-        let resourceex_dir = self.game_root.join("ResourceEx");
-        self.consolidate_installed_by_pattern(
-            &resourceex_dir,
-            "ResourceExample-*.zip",
-            "ResourceExample-v",
-            ".zip",
-            "zip.old",
-        )
+        self.consolidate_installed_by_pattern(InstalledAssetPattern {
+            pattern: RESOURCEEX_ZIP_GLOB,
+            matcher: VersionInfo::is_resourceex_filename,
+            version_from_filename: VersionInfo::resourceex_version_from_filename,
+            backup_suffix: "zip.old",
+        })
     }
 
     fn consolidate_installed_by_pattern(
         &self,
-        dir: &Path,
-        pattern: &str,
-        prefix: &str,
-        suffix: &str,
-        backup_suffix: &str,
+        asset_pattern: InstalledAssetPattern<'_>,
     ) -> Result<Option<(String, PathBuf)>> {
+        let pattern = self.game_root.join(asset_pattern.pattern);
+        let Some(dir) = pattern.parent() else {
+            return Ok(None);
+        };
+
         if !dir.exists() {
             return Ok(None);
         }
 
         let mut parsed = Vec::new();
-        let mut unparsed = Vec::new();
 
-        for path in glob_matches(&dir.join(pattern)).into_iter() {
+        for path in glob_matches_by_filename(&pattern, asset_pattern.matcher) {
             if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
-                if let Some(v) = Self::parse_version(filename, prefix, suffix) {
-                    parsed.push((v, path.clone()));
-                } else {
-                    self.ui.upgrade_warn_unparse_version(filename)?;
-                    unparsed.push(path.clone());
-                }
+                let Some(version) = (asset_pattern.version_from_filename)(filename) else {
+                    return Err(ManagerError::Other(format!(
+                        "升级扫描失败：无法从文件名解析版本：{}",
+                        filename
+                    )));
+                };
+
+                let Some(parsed_version) = Self::parse_numeric_version(&version) else {
+                    return Err(ManagerError::Other(format!(
+                        "升级扫描失败：无法解析版本号：{}",
+                        filename
+                    )));
+                };
+
+                parsed.push((parsed_version, path));
             }
         }
 
-        if parsed.is_empty() && unparsed.is_empty() {
+        if parsed.is_empty() {
             return Ok(None);
         }
 
-        let latest: PathBuf;
-        let latest_version_str: String;
+        parsed.sort_by(|a, b| a.0.cmp(&b.0));
 
-        if !parsed.is_empty() {
-            parsed.sort_by(|a, b| a.0.cmp(&b.0));
+        let Some((latest_version, latest_path)) = parsed.last().cloned() else {
+            return Err(ManagerError::Other(
+                "升级扫描失败：未找到可用的已解析版本".to_string(),
+            ));
+        };
 
-            let (v, p) = parsed.last().unwrap();
-            latest = p.clone();
-            latest_version_str = v.to_string();
+        let to_backup: Vec<PathBuf> = parsed
+            .into_iter()
+            .rev()
+            .skip(1)
+            .map(|(_, path)| path)
+            .collect();
 
-            let to_backup: Vec<PathBuf> =
-                parsed.into_iter().rev().skip(1).map(|(_, p)| p).collect();
+        self.report_backup_results(backup_paths_with_index(
+            &to_backup,
+            asset_pattern.backup_suffix,
+        ))?;
 
-            let results = backup_paths_with_index(&to_backup, backup_suffix);
-            for res in results {
-                match res {
-                    Ok(_backup) => (),
-                    Err(e) => self.ui.upgrade_backup_failed(&format!("{}", e))?,
-                }
-            }
-        } else {
-            if unparsed.is_empty() {
-                return Ok(None);
-            }
-
-            unparsed.sort();
-
-            latest = unparsed.last().unwrap().clone();
-            latest_version_str = latest
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "unknown".to_string());
-
-            let to_backup: Vec<PathBuf> = unparsed.into_iter().rev().skip(1).collect();
-
-            let results = backup_paths_with_index(&to_backup, backup_suffix);
-            for res in results {
-                match res {
-                    Ok(_backup) => (),
-                    Err(e) => self.ui.upgrade_backup_failed(&format!("{}", e))?,
-                }
-            }
-        }
-
-        Ok(Some((latest_version_str, latest)))
+        Ok(Some((latest_version.display, latest_path)))
     }
 
     fn cleanup_old_files(&self) -> Result<()> {
-        let plugins_dir = self.game_root.join("BepInEx").join("plugins");
-        if plugins_dir.exists() {
-            let pattern = plugins_dir.join("MetaMystia-*.dll.old*");
-            let result = remove_glob_files(&pattern);
-            for removed in result.removed.iter() {
-                self.ui.upgrade_deleted(removed)?;
-            }
-            for (path, err) in result.failed.into_iter() {
-                self.ui.upgrade_delete_failed(&path, &format!("{}", err))?;
-            }
-        }
-
-        let resourceex_dir = self.game_root.join("ResourceEx");
-        if resourceex_dir.exists() {
-            let pattern = resourceex_dir.join("ResourceExample-*.zip.old*");
-            let result = remove_glob_files(&pattern);
-            for removed in result.removed.iter() {
-                self.ui.upgrade_deleted(removed)?;
-            }
-            for (path, err) in result.failed.into_iter() {
-                self.ui.upgrade_delete_failed(&path, &format!("{}", err))?;
-            }
-        }
+        self.cleanup_old_files_by_pattern(
+            &self.game_root.join(METAMYSTIA_PLUGIN_OLD_GLOB),
+            VersionInfo::is_canonical_metamystia_backup_filename,
+        )?;
+        self.cleanup_old_files_by_pattern(
+            &self.game_root.join(RESOURCEEX_ZIP_OLD_GLOB),
+            VersionInfo::is_canonical_resourceex_backup_filename,
+        )?;
 
         Ok(())
     }
@@ -199,11 +295,11 @@ impl<'a> Upgrader<'a> {
 
         let dll_needs = dll_opt
             .as_ref()
-            .map(|cur| cur != version_info.latest_dll())
+            .map(|cur| !Self::versions_match(cur, version_info.latest_dll()))
             .unwrap_or(false);
         let res_needs = res_opt
             .as_ref()
-            .map(|cur| cur != version_info.latest_resourceex())
+            .map(|cur| !Self::versions_match(cur, version_info.latest_resourceex()))
             .unwrap_or(false);
 
         Ok((bep_needs, dll_needs, res_needs))
@@ -269,14 +365,15 @@ impl<'a> Upgrader<'a> {
 
         // 检查 MetaMystia DLL 是否需要升级
         let new_dll_version = version_info.latest_dll();
-        let dll_needs_upgrade = current_dll_version != new_dll_version;
+        let dll_needs_upgrade = !Self::versions_match(&current_dll_version, new_dll_version);
         self.ui
             .upgrade_display_current_and_latest_dll(&current_dll_version, new_dll_version)?;
 
         // 检查 ResourceExample ZIP 是否需要升级
         let new_resourceex_version = version_info.latest_resourceex();
         let resourceex_needs_upgrade =
-            (current_resourceex_version != new_resourceex_version) && has_resourceex;
+            !Self::versions_match(&current_resourceex_version, new_resourceex_version)
+                && has_resourceex;
         if has_resourceex {
             self.ui.upgrade_display_current_and_latest_resourceex(
                 &current_resourceex_version,
@@ -396,10 +493,7 @@ impl<'a> Upgrader<'a> {
             )?;
 
             // 更新版本标记文件
-            if let Ok(bep_version) = version_info.bepinex_version() {
-                let version_file = self.game_root.join(BEPINEX_VERSION_FILE);
-                let _ = std::fs::write(&version_file, bep_version.as_bytes());
-            }
+            write_bepinex_version_marker(&self.game_root, &version_info);
 
             self.ui
                 .upgrade_install_success(&self.game_root.join("BepInEx"))?;
@@ -410,23 +504,12 @@ impl<'a> Upgrader<'a> {
         if let Some((temp_path, filename)) = temp_dll_path {
             let plugins_dir = self.game_root.join("BepInEx").join("plugins");
 
-            let old_dll_pattern = plugins_dir.join("MetaMystia-*.dll");
-            let mut to_backup = Vec::new();
-            for old_entry in glob_matches(&old_dll_pattern) {
-                if let Some(old_filename) = old_entry.file_name().and_then(|n| n.to_str())
-                    && (old_filename == filename || old_filename.ends_with(".old"))
-                {
-                    continue;
-                }
-                to_backup.push(old_entry);
-            }
-
-            for res in backup_paths_with_index(&to_backup, "dll.old") {
-                match res {
-                    Ok(_) => {}
-                    Err(e) => self.ui.upgrade_backup_failed(&format!("{}", e))?,
-                }
-            }
+            self.backup_existing_assets(
+                &self.game_root.join(METAMYSTIA_PLUGIN_GLOB),
+                VersionInfo::is_metamystia_filename,
+                &filename,
+                "dll.old",
+            )?;
 
             if !bepinex_needs_upgrade {
                 self.ui.blank_line()?;
@@ -435,30 +518,7 @@ impl<'a> Upgrader<'a> {
             self.ui.upgrade_installing_dll()?;
 
             let new_dll_path = plugins_dir.join(&filename);
-
-            if !plugins_dir.exists() {
-                std::fs::create_dir_all(&plugins_dir).map_err(|e| {
-                    ManagerError::from(std::io::Error::new(
-                        e.kind(),
-                        format!("创建 plugins 目录 {} 失败：{}", plugins_dir.display(), e),
-                    ))
-                })?;
-            }
-
-            let tmp_new = new_dll_path.with_extension("dll.tmp");
-            std::fs::copy(&temp_path, &tmp_new).map_err(|e| {
-                ManagerError::from(std::io::Error::new(
-                    e.kind(),
-                    format!("复制临时文件 {} 失败：{}", tmp_new.display(), e),
-                ))
-            })?;
-            atomic_rename_or_copy(&tmp_new, &new_dll_path).map_err(|e| {
-                ManagerError::from(std::io::Error::other(format!(
-                    "安装新版本 {} 失败：{}",
-                    new_dll_path.display(),
-                    e
-                )))
-            })?;
+            self.install_asset_from_temp(&temp_path, &new_dll_path, "dll.tmp")?;
 
             self.ui.upgrade_install_success(&new_dll_path)?;
             report_event("Upgrade.Installed.DLL", Some(&filename));
@@ -467,23 +527,12 @@ impl<'a> Upgrader<'a> {
         // 7. 安装 ResourceExample ZIP（仅当需要升级时）
         if let Some((temp_path, filename)) = temp_resourceex_path {
             let resourceex_dir = self.game_root.join("ResourceEx");
-            let old_resourceex_pattern = resourceex_dir.join("ResourceExample-*.zip");
-            let mut to_backup = Vec::new();
-            for old_entry in glob_matches(&old_resourceex_pattern) {
-                if let Some(old_filename) = old_entry.file_name().and_then(|n| n.to_str())
-                    && (old_filename == filename || old_filename.ends_with(".old"))
-                {
-                    continue;
-                }
-                to_backup.push(old_entry);
-            }
-
-            for res in backup_paths_with_index(&to_backup, "zip.old") {
-                match res {
-                    Ok(_) => (),
-                    Err(e) => self.ui.upgrade_backup_failed(&format!("{}", e))?,
-                }
-            }
+            self.backup_existing_assets(
+                &self.game_root.join(RESOURCEEX_ZIP_GLOB),
+                VersionInfo::is_resourceex_filename,
+                &filename,
+                "zip.old",
+            )?;
 
             if !bepinex_needs_upgrade && !dll_needs_upgrade {
                 self.ui.blank_line()?;
@@ -492,20 +541,7 @@ impl<'a> Upgrader<'a> {
             self.ui.upgrade_installing_resourceex()?;
 
             let new_zip_path = resourceex_dir.join(&filename);
-            let tmp_new = new_zip_path.with_extension("zip.tmp");
-            std::fs::copy(&temp_path, &tmp_new).map_err(|e| {
-                ManagerError::from(std::io::Error::new(
-                    e.kind(),
-                    format!("复制临时文件 {} 失败：{}", tmp_new.display(), e),
-                ))
-            })?;
-            atomic_rename_or_copy(&tmp_new, &new_zip_path).map_err(|e| {
-                ManagerError::from(std::io::Error::other(format!(
-                    "安装新版本 {} 失败：{}",
-                    new_zip_path.display(),
-                    e
-                )))
-            })?;
+            self.install_asset_from_temp(&temp_path, &new_zip_path, "zip.tmp")?;
 
             self.ui.upgrade_install_success(&new_zip_path)?;
             report_event("Upgrade.Installed.ResourceEx", Some(&filename));

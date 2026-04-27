@@ -26,6 +26,7 @@
     "outpath",
     "PROCESSENTRY",
     "resourceex",
+    "resourceexample",
     "serde",
     "SNAPPROCESS",
     "steamapps",

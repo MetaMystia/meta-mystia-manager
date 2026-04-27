@@ -1,13 +1,24 @@
-use crate::config::{TEMP_DIR_NAME, UninstallMode};
+use crate::config::{
+    BEPINEX_VERSION_FILE, METAMYSTIA_PLUGIN_GLOB, RESOURCEEX_ZIP_GLOB, TEMP_DIR_NAME, UninstallMode,
+};
 use crate::env_check::check_game_running;
 use crate::error::ManagerError;
+use crate::model::VersionInfo;
 use crate::ui::Ui;
 
-use glob::glob;
+use glob::{MatchOptions, glob_with};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+
+fn case_insensitive_match_options() -> MatchOptions {
+    MatchOptions {
+        case_sensitive: false,
+        require_literal_separator: false,
+        require_literal_leading_dot: false,
+    }
+}
 
 fn is_temp_path(path: &Path) -> bool {
     path.components().any(|c| c.as_os_str() == TEMP_DIR_NAME)
@@ -108,6 +119,13 @@ pub fn atomic_rename_or_copy(src: &Path, dst: &Path) -> Result<(), ManagerError>
     }
 }
 
+pub fn write_bepinex_version_marker(game_root: &Path, version_info: &VersionInfo) {
+    if let Ok(bep_version) = version_info.bepinex_version() {
+        let version_file = game_root.join(BEPINEX_VERSION_FILE);
+        let _ = std::fs::write(&version_file, bep_version.as_bytes());
+    }
+}
+
 fn backup_with_index(path: &Path, ext_suffix: &str) -> Result<PathBuf, ManagerError> {
     ensure_game_not_running_for_path(path)?;
 
@@ -148,6 +166,18 @@ fn normalize_path_for_glob(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+fn matches_target_filename(pattern: &str, path: &Path) -> bool {
+    let Some(filename) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+
+    match pattern {
+        METAMYSTIA_PLUGIN_GLOB => VersionInfo::is_metamystia_filename(filename),
+        RESOURCEEX_ZIP_GLOB => VersionInfo::is_resourceex_filename(filename),
+        _ => true,
+    }
+}
+
 pub struct RemoveGlobResult {
     pub removed: Vec<PathBuf>,
     pub failed: Vec<(PathBuf, ManagerError)>,
@@ -159,7 +189,7 @@ pub fn remove_glob_files(pattern: &Path) -> RemoveGlobResult {
     let mut failed = Vec::new();
 
     let pattern_str = normalize_path_for_glob(pattern);
-    if let Ok(entries) = glob(&pattern_str) {
+    if let Ok(entries) = glob_with(&pattern_str, case_insensitive_match_options()) {
         for entry in entries.flatten() {
             if let Err(e) = ensure_game_not_running_for_path(&entry) {
                 failed.push((entry, e));
@@ -184,6 +214,34 @@ pub fn remove_glob_files(pattern: &Path) -> RemoveGlobResult {
     RemoveGlobResult { removed, failed }
 }
 
+/// 根据 glob 模式获取匹配的路径列表，并通过 matcher 进行额外过滤
+pub fn glob_matches_filtered<F>(pattern: &Path, matcher: F) -> Vec<PathBuf>
+where
+    F: Fn(&Path) -> bool,
+{
+    let mut matches = Vec::new();
+    let s = normalize_path_for_glob(pattern);
+
+    if let Ok(entries) = glob_with(&s, case_insensitive_match_options()) {
+        for entry in entries.flatten() {
+            if entry.exists() && matcher(&entry) {
+                matches.push(entry);
+            }
+        }
+    }
+
+    matches
+}
+
+/// 根据 glob 模式获取匹配的路径列表，并通过 matcher 进行额外过滤（仅对文件名部分进行过滤）
+pub fn glob_matches_by_filename(pattern: &Path, matcher: fn(&str) -> bool) -> Vec<PathBuf> {
+    glob_matches_filtered(pattern, |path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(matcher)
+    })
+}
+
 /// 备份一组路径（使用 backup_with_index）
 pub fn backup_paths_with_index(
     paths: &[PathBuf],
@@ -197,18 +255,7 @@ pub fn backup_paths_with_index(
 
 /// 根据 glob 模式获取匹配的路径列表
 pub fn glob_matches(pattern: &Path) -> Vec<PathBuf> {
-    let mut matches = Vec::new();
-    let s = normalize_path_for_glob(pattern);
-
-    if let Ok(entries) = glob(&s) {
-        for entry in entries.flatten() {
-            if entry.exists() {
-                matches.push(entry);
-            }
-        }
-    }
-
-    matches
+    glob_matches_filtered(pattern, |_| true)
 }
 
 #[derive(Clone)]
@@ -242,15 +289,10 @@ fn scan_target(base: &Path, pattern: &str, is_directory: bool, existing_files: &
     let path_str = normalize_path_for_glob(&target_path);
 
     if path_str.contains('*') {
-        if let Ok(entries) = glob(&path_str) {
-            for entry in entries.flatten() {
-                if entry.exists()
-                    && ((is_directory && entry.is_dir()) || (!is_directory && entry.is_file()))
-                {
-                    existing_files.push(entry);
-                }
-            }
-        }
+        existing_files.extend(glob_matches_filtered(&target_path, |entry| {
+            ((is_directory && entry.is_dir()) || (!is_directory && entry.is_file()))
+                && matches_target_filename(pattern, entry)
+        }));
     } else if target_path.exists() {
         let is_dir = target_path.is_dir();
         if is_dir == is_directory {
@@ -296,123 +338,46 @@ pub fn execute_deletion(files: &[PathBuf], ui: &dyn Ui) -> Vec<DeletionResult> {
 
 /// 删除单个文件
 fn delete_file(path: &Path) -> DeletionResult {
-    if let Err(e) = ensure_game_not_running_for_path(path) {
-        return DeletionResult {
-            path: path.to_path_buf(),
-            status: DeletionStatus::Failed(Arc::new(e)),
-        };
-    }
-
-    if !path.exists() {
-        return DeletionResult {
-            path: path.to_path_buf(),
-            status: DeletionStatus::Skipped,
-        };
-    }
-
-    match std::fs::remove_file(path) {
-        Ok(_) => {
-            if path.exists() {
-                DeletionResult {
-                    path: path.to_path_buf(),
-                    status: DeletionStatus::Failed(Arc::new(ManagerError::Other(
-                        "执行删除后文件仍存在".to_string(),
-                    ))),
-                }
-            } else {
-                DeletionResult {
-                    path: path.to_path_buf(),
-                    status: DeletionStatus::Success,
-                }
-            }
-        }
-        Err(e) => {
-            // 先检测是否为“文件被占用”类错误
-            if let ManagerError::FileInUse(_) = map_io_error_to_uninstall_error(&e, path) {
-                return DeletionResult {
-                    path: path.to_path_buf(),
-                    status: DeletionStatus::Failed(Arc::new(ManagerError::FileInUse(
-                        path.display().to_string(),
-                    ))),
-                };
-            }
-
-            // 若为权限错误，尝试清除只读属性并重试一次
-            if e.kind() == std::io::ErrorKind::PermissionDenied
-                && let Ok(metadata) = std::fs::metadata(path)
-            {
-                let perms = ensure_owner_writable(&metadata);
-                let _ = std::fs::set_permissions(path, perms);
-                if std::fs::remove_file(path).is_ok() {
-                    return DeletionResult {
-                        path: path.to_path_buf(),
-                        status: DeletionStatus::Success,
-                    };
-                }
-            }
-
-            let error = match e.kind() {
-                std::io::ErrorKind::PermissionDenied => {
-                    ManagerError::PermissionDenied(path.display().to_string())
-                }
-                std::io::ErrorKind::NotFound => {
-                    return DeletionResult {
-                        path: path.to_path_buf(),
-                        status: DeletionStatus::Skipped,
-                    };
-                }
-                _ => map_io_error_to_uninstall_error(&e, path),
-            };
-
-            DeletionResult {
-                path: path.to_path_buf(),
-                status: DeletionStatus::Failed(Arc::new(error)),
-            }
-        }
-    }
+    delete_path(
+        path,
+        |path| std::fs::remove_file(path),
+        "执行删除后文件仍存在",
+    )
 }
 
 /// 删除目录
 fn delete_directory(path: &Path) -> DeletionResult {
+    delete_path(
+        path,
+        |path| std::fs::remove_dir_all(path),
+        "执行删除后文件夹仍存在",
+    )
+}
+
+fn delete_path<F>(path: &Path, remove: F, still_exists_message: &str) -> DeletionResult
+where
+    F: Fn(&Path) -> std::io::Result<()>,
+{
     if let Err(e) = ensure_game_not_running_for_path(path) {
-        return DeletionResult {
-            path: path.to_path_buf(),
-            status: DeletionStatus::Failed(Arc::new(e)),
-        };
+        return deletion_failed(path, e);
     }
 
     if !path.exists() {
-        return DeletionResult {
-            path: path.to_path_buf(),
-            status: DeletionStatus::Skipped,
-        };
+        return deletion_skipped(path);
     }
 
-    match std::fs::remove_dir_all(path) {
+    match remove(path) {
         Ok(_) => {
             if path.exists() {
-                DeletionResult {
-                    path: path.to_path_buf(),
-                    status: DeletionStatus::Failed(Arc::new(ManagerError::Other(
-                        "执行删除后文件夹仍存在".to_string(),
-                    ))),
-                }
+                deletion_failed(path, ManagerError::Other(still_exists_message.to_string()))
             } else {
-                DeletionResult {
-                    path: path.to_path_buf(),
-                    status: DeletionStatus::Success,
-                }
+                deletion_success(path)
             }
         }
         Err(e) => {
             // 先检测是否为“文件/目录被占用”类错误
             if let ManagerError::FileInUse(_) = map_io_error_to_uninstall_error(&e, path) {
-                return DeletionResult {
-                    path: path.to_path_buf(),
-                    status: DeletionStatus::Failed(Arc::new(ManagerError::FileInUse(
-                        path.display().to_string(),
-                    ))),
-                };
+                return deletion_failed(path, ManagerError::FileInUse(path.display().to_string()));
             }
 
             // 权限错误时尝试清除只读并重试一次
@@ -421,11 +386,8 @@ fn delete_directory(path: &Path) -> DeletionResult {
             {
                 let perms = ensure_owner_writable(&metadata);
                 let _ = std::fs::set_permissions(path, perms);
-                if std::fs::remove_dir_all(path).is_ok() {
-                    return DeletionResult {
-                        path: path.to_path_buf(),
-                        status: DeletionStatus::Success,
-                    };
+                if remove(path).is_ok() {
+                    return deletion_success(path);
                 }
             }
 
@@ -434,19 +396,34 @@ fn delete_directory(path: &Path) -> DeletionResult {
                     ManagerError::PermissionDenied(path.display().to_string())
                 }
                 std::io::ErrorKind::NotFound => {
-                    return DeletionResult {
-                        path: path.to_path_buf(),
-                        status: DeletionStatus::Skipped,
-                    };
+                    return deletion_skipped(path);
                 }
                 _ => map_io_error_to_uninstall_error(&e, path),
             };
 
-            DeletionResult {
-                path: path.to_path_buf(),
-                status: DeletionStatus::Failed(Arc::new(error)),
-            }
+            deletion_failed(path, error)
         }
+    }
+}
+
+fn deletion_success(path: &Path) -> DeletionResult {
+    DeletionResult {
+        path: path.to_path_buf(),
+        status: DeletionStatus::Success,
+    }
+}
+
+fn deletion_skipped(path: &Path) -> DeletionResult {
+    DeletionResult {
+        path: path.to_path_buf(),
+        status: DeletionStatus::Skipped,
+    }
+}
+
+fn deletion_failed(path: &Path, error: ManagerError) -> DeletionResult {
+    DeletionResult {
+        path: path.to_path_buf(),
+        status: DeletionStatus::Failed(Arc::new(error)),
     }
 }
 

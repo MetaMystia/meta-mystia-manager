@@ -3,6 +3,10 @@ pub const GAME_PROCESS_NAME: &str = "Touhou Mystia Izakaya.exe";
 pub const GAME_STEAM_APP_ID: u32 = 1_584_090;
 pub const TEMP_DIR_NAME: &str = concat!(".", env!("CARGO_PKG_NAME"), "-temp");
 pub const BEPINEX_VERSION_FILE: &str = "BepInEx/.mmm-bepinex-version";
+pub const METAMYSTIA_PLUGIN_GLOB: &str = "BepInEx/plugins/MetaMystia-v*.dll";
+pub const RESOURCEEX_ZIP_GLOB: &str = "ResourceEx/ResourceExample-v*.zip";
+pub const METAMYSTIA_PLUGIN_OLD_GLOB: &str = "BepInEx/plugins/MetaMystia-v*.dll.old*";
+pub const RESOURCEEX_ZIP_OLD_GLOB: &str = "ResourceEx/ResourceExample-v*.zip.old*";
 pub const USER_AGENT: &str = concat!(
     env!("CARGO_PKG_NAME"),
     "/",
@@ -28,8 +32,8 @@ pub enum UninstallMode {
 
 impl UninstallMode {
     const LIGHT_TARGETS: &'static [(&'static str, bool)] = &[
-        ("BepInEx/plugins/MetaMystia-*.dll", false),
-        ("ResourceEx/ResourceExample-*.zip", false),
+        (METAMYSTIA_PLUGIN_GLOB, false),
+        (RESOURCEEX_ZIP_GLOB, false),
     ];
 
     const FULL_TARGETS: &'static [(&'static str, bool)] = &[

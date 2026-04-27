@@ -44,7 +44,6 @@ serde_json = "1.0"
 
 # 文件系统操作
 glob = "0.3"
-semver = "1.0"
 steamlocate = "2.0.1"
 
 # ZIP 解压

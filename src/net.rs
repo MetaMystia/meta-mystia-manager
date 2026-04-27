@@ -14,6 +14,12 @@ use windows_sys::Win32::System::Registry::{
     RegQueryValueExW,
 };
 
+#[derive(Debug)]
+pub enum JsonRequestError {
+    HttpStatus(u16),
+    Other(ManagerError),
+}
+
 /// 重试执行操作
 ///
 /// # 参数
@@ -104,42 +110,98 @@ pub fn handle_ureq_error(e: ureq::Error, ui: &dyn Ui, op_desc: &str) -> ManagerE
     }
 }
 
-/// 使用重试机制获取并解析 JSON 数据
+/// 使用重试机制获取 JSON 响应，并在遇到特定 HTTP 状态码时停止重试
 ///
 /// # 参数
 /// - `cfg`: 重试配置，`None` 表示使用默认的网络配置
-pub fn get_json_with_retry<T: DeserializeOwned>(
+/// - `stop_statuses`: 遇到这些 HTTP 状态码时停止重试，并返回 `JsonRequestError::HttpStatus`
+pub fn get_json_with_retry_stopping_on_status<T: DeserializeOwned>(
     agent: &ureq::Agent,
     ui: &dyn Ui,
     url: &str,
     accept_header: Option<&str>,
     op_desc: &str,
     cfg: Option<RetryConfig>,
-) -> Result<T> {
-    with_retry(ui, op_desc, cfg, || {
+    stop_statuses: &[u16],
+) -> std::result::Result<T, JsonRequestError> {
+    let cfg = cfg.unwrap_or_else(RetryConfig::network);
+
+    if cfg.attempts == 0 {
+        return Err(JsonRequestError::Other(ManagerError::Other(
+            "重试配置无效：attempts 必须至少为 1".to_string(),
+        )));
+    }
+
+    for attempt in 0..cfg.attempts {
         let mut req = agent.get(url);
         if let Some(h) = accept_header {
             req = req.set("Accept", h);
         }
 
-        let resp = req.call().map_err(|e| handle_ureq_error(e, ui, op_desc))?;
+        match req.call() {
+            Ok(resp) => {
+                let text = resp.into_string().map_err(|e| {
+                    report_event(
+                        "Network.ReadFailed",
+                        Some(&format!("{};err={}", op_desc, e)),
+                    );
+                    JsonRequestError::Other(ManagerError::NetworkError(format!(
+                        "读取响应失败：{}",
+                        e
+                    )))
+                })?;
 
-        let text = resp.into_string().map_err(|e| {
-            report_event(
-                "Network.ReadFailed",
-                Some(&format!("{};err={}", op_desc, e)),
-            );
-            ManagerError::NetworkError(format!("读取响应失败：{}", e))
-        })?;
+                return serde_json::from_str(&text).map_err(|e| {
+                    report_event(
+                        "Network.JsonParseFailed",
+                        Some(&format!("{};err={}", op_desc, e)),
+                    );
+                    JsonRequestError::Other(ManagerError::NetworkError(format!(
+                        "解析 JSON 失败：{}",
+                        e
+                    )))
+                });
+            }
+            Err(ureq::Error::Status(code, _)) if stop_statuses.contains(&code) => {
+                return Err(JsonRequestError::HttpStatus(code));
+            }
+            Err(err) => {
+                let err = handle_ureq_error(err, ui, op_desc);
 
-        serde_json::from_str(&text).map_err(|e| {
-            report_event(
-                "Network.JsonParseFailed",
-                Some(&format!("{};err={}", op_desc, e)),
-            );
-            ManagerError::NetworkError(format!("解析 JSON 失败：{}", e))
-        })
-    })
+                let raw = (cfg.base_delay_secs as f64) * cfg.multiplier.powi(attempt as i32);
+                let delay_secs = raw.min(cfg.max_delay_secs as f64).ceil() as u64;
+
+                ui.network_retrying(
+                    op_desc,
+                    delay_secs,
+                    attempt + 1,
+                    cfg.attempts,
+                    &err.to_string(),
+                )
+                .map_err(JsonRequestError::Other)?;
+                report_event(
+                    "Network.Retry",
+                    Some(&format!(
+                        "{};attempt={};delay={}",
+                        op_desc,
+                        attempt + 1,
+                        delay_secs
+                    )),
+                );
+
+                if attempt < cfg.attempts - 1 {
+                    sleep(Duration::from_secs(delay_secs));
+                } else {
+                    report_event("Network.RetryFailed", Some(op_desc));
+                    return Err(JsonRequestError::Other(err));
+                }
+            }
+        }
+    }
+
+    Err(JsonRequestError::Other(ManagerError::Other(
+        "重试流程意外结束".to_string(),
+    )))
 }
 
 /// 使用重试机制获取响应
