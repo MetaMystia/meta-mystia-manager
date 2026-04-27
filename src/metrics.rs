@@ -95,11 +95,12 @@ static CACHED_AGENT: OnceLock<ureq::Agent> = OnceLock::new();
 
 fn get_agent() -> &'static ureq::Agent {
     CACHED_AGENT.get_or_init(|| {
-        let tls = TlsConnector::new().expect("TLS init failed");
         let mut builder = ureq::AgentBuilder::new()
-            .tls_connector(Arc::new(tls))
             .timeout(DEFAULT_TIMEOUT)
             .user_agent(USER_AGENT);
+        if let Ok(tls) = TlsConnector::new() {
+            builder = builder.tls_connector(Arc::new(tls));
+        }
         if let Some(proxy) = read_system_proxy()
             && let Ok(p) = ureq::Proxy::new(&proxy)
         {
