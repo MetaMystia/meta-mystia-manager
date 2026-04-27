@@ -22,11 +22,6 @@ impl Extractor {
         })
     }
 
-    /// 解压文件到指定目录
-    pub fn extract_zip_safe(zip_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>> {
-        Self::extract_zip_safe_with_exclusions(zip_path, dest_dir, &[])
-    }
-
     /// 解压文件到指定目录（支持排除路径）
     pub fn extract_zip_safe_with_exclusions(
         zip_path: &Path,
@@ -194,11 +189,7 @@ impl Extractor {
             Some(&zip_path.display().to_string()),
         );
 
-        let res = if exclude_patterns.is_empty() {
-            Self::extract_zip_safe(zip_path, game_root)
-        } else {
-            Self::extract_zip_safe_with_exclusions(zip_path, game_root, exclude_patterns)
-        };
+        let res = Self::extract_zip_safe_with_exclusions(zip_path, game_root, exclude_patterns);
 
         match res {
             Ok(_) => {
@@ -216,6 +207,24 @@ impl Extractor {
                 Err(e)
             }
         }
+    }
+
+    fn copy_to_destination_atomically(src: &Path, dest: &Path, temp_extension: &str) -> Result<()> {
+        let tmp_dest = dest.with_extension(temp_extension);
+        std::fs::copy(src, &tmp_dest).map_err(|e| {
+            ManagerError::from(std::io::Error::new(
+                e.kind(),
+                format!("复制文件 {} 失败：{}", src.display(), e),
+            ))
+        })?;
+
+        atomic_rename_or_copy(&tmp_dest, dest).map_err(|e| {
+            ManagerError::from(std::io::Error::other(format!(
+                "安装 {} 失败：{}",
+                dest.display(),
+                e
+            )))
+        })
     }
 
     /// 安装 MetaMystia DLL 到 BepInEx/plugins/ 目录
@@ -245,14 +254,7 @@ impl Extractor {
             Some(&dll_path.display().to_string()),
         );
 
-        let tmp_dest = dest.with_extension("dll.tmp");
-        std::fs::copy(dll_path, &tmp_dest).map_err(|e| {
-            ManagerError::from(std::io::Error::new(
-                e.kind(),
-                format!("复制文件 {} 失败：{}", dll_path.display(), e),
-            ))
-        })?;
-        match atomic_rename_or_copy(&tmp_dest, &dest) {
+        match Self::copy_to_destination_atomically(dll_path, &dest, "dll.tmp") {
             Ok(_) => {
                 report_event(
                     "Deploy.MetaMystia.Success",
@@ -260,11 +262,7 @@ impl Extractor {
                 );
                 Ok(())
             }
-            Err(e) => Err(ManagerError::from(std::io::Error::other(format!(
-                "安装 {} 失败：{}",
-                dest.display(),
-                e
-            )))),
+            Err(e) => Err(e),
         }
     }
 
@@ -291,14 +289,7 @@ impl Extractor {
             Some(&zip_path.display().to_string()),
         );
 
-        let tmp_dest = dest.with_extension("zip.tmp");
-        std::fs::copy(zip_path, &tmp_dest).map_err(|e| {
-            ManagerError::from(std::io::Error::new(
-                e.kind(),
-                format!("复制文件 {} 失败：{}", zip_path.display(), e),
-            ))
-        })?;
-        match atomic_rename_or_copy(&tmp_dest, &dest) {
+        match Self::copy_to_destination_atomically(zip_path, &dest, "zip.tmp") {
             Ok(_) => {
                 report_event(
                     "Deploy.ResourceEx.Success",
@@ -306,11 +297,7 @@ impl Extractor {
                 );
                 Ok(())
             }
-            Err(e) => Err(ManagerError::from(std::io::Error::other(format!(
-                "安装 {} 失败：{}",
-                dest.display(),
-                e
-            )))),
+            Err(e) => Err(e),
         }
     }
 }
