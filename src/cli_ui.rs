@@ -1,5 +1,5 @@
 use crate::config::{OperationMode, UninstallMode};
-use crate::error::Result;
+use crate::error::{ManagerError, Result};
 use crate::model::VersionInfo;
 use crate::ui::Ui;
 
@@ -16,6 +16,17 @@ pub struct CliUI {
 impl CliUI {
     pub fn new(quiet: bool) -> Self {
         Self { quiet }
+    }
+
+    fn fixed_choice(&self, choice: bool) -> Result<bool> {
+        Ok(choice)
+    }
+
+    fn unsupported_interaction<T>(&self, action: &str) -> Result<T> {
+        Err(ManagerError::Ui(format!(
+            "CLI UI 不支持交互操作：{}",
+            action
+        )))
     }
 
     fn stderr(&self, msg: &str) {
@@ -65,7 +76,7 @@ impl Ui for CliUI {
     }
 
     fn select_operation_mode(&self) -> Result<OperationMode> {
-        unreachable!()
+        self.unsupported_interaction("select_operation_mode")
     }
 
     fn blank_line(&self) -> Result<()> {
@@ -102,7 +113,7 @@ impl Ui for CliUI {
     }
 
     fn path_confirm_use_steam_found(&self) -> Result<bool> {
-        Ok(true)
+        self.fixed_choice(true)
     }
 
     fn install_display_step(&self, step: usize, description: &str) -> Result<()> {
@@ -133,15 +144,15 @@ impl Ui for CliUI {
     }
 
     fn install_confirm_overwrite(&self) -> Result<bool> {
-        Ok(true)
+        self.fixed_choice(true)
     }
 
     fn install_ask_install_resourceex(&self) -> Result<bool> {
-        unreachable!()
+        self.unsupported_interaction("install_ask_install_resourceex")
     }
 
     fn install_ask_show_bepinex_console(&self) -> Result<bool> {
-        unreachable!()
+        self.unsupported_interaction("install_ask_show_bepinex_console")
     }
 
     fn install_downloads_completed(&self) -> Result<()> {
@@ -315,7 +326,7 @@ impl Ui for CliUI {
     }
 
     fn uninstall_select_mode(&self) -> Result<UninstallMode> {
-        unreachable!()
+        self.unsupported_interaction("uninstall_select_mode")
     }
 
     fn uninstall_no_files_found(&self) -> Result<()> {
@@ -329,7 +340,7 @@ impl Ui for CliUI {
     }
 
     fn uninstall_confirm_deletion(&self) -> Result<bool> {
-        Ok(true)
+        self.fixed_choice(true)
     }
 
     fn uninstall_files_in_use_warning(&self) -> Result<()> {
@@ -351,7 +362,7 @@ impl Ui for CliUI {
     }
 
     fn uninstall_ask_elevate_permission(&self) -> Result<bool> {
-        Ok(true)
+        self.fixed_choice(true)
     }
 
     fn uninstall_restarting_elevated(&self) -> Result<()> {
@@ -360,7 +371,7 @@ impl Ui for CliUI {
     }
 
     fn uninstall_ask_retry_failures(&self) -> Result<bool> {
-        Ok(true)
+        self.fixed_choice(true)
     }
 
     fn uninstall_retrying_failed_items(&self) -> Result<()> {
@@ -484,7 +495,7 @@ impl Ui for CliUI {
     }
 
     fn download_ask_continue_after_release_notes(&self) -> Result<bool> {
-        Ok(true)
+        self.fixed_choice(true)
     }
 
     fn download_switch_to_fallback(&self, reason: &str) -> Result<()> {
@@ -535,7 +546,7 @@ impl Ui for CliUI {
             "Manager update available: {} -> {}",
             current_version, latest_version
         ));
-        Ok(true)
+        self.fixed_choice(true)
     }
 
     fn manager_update_starting(&self) -> Result<()> {
@@ -554,7 +565,7 @@ impl Ui for CliUI {
     }
 
     fn select_version_ask_select(&self, _component: &str) -> Result<bool> {
-        Ok(false)
+        self.fixed_choice(false)
     }
 
     fn select_version_from_list(&self, _component: &str, _versions: &[String]) -> Result<usize> {

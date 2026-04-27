@@ -30,6 +30,23 @@ impl ConsoleUI {
             next_id: AtomicUsize::new(1),
         }
     }
+
+    fn confirm_with_event(
+        &self,
+        prompt: impl Into<String>,
+        default: bool,
+        event: &str,
+    ) -> Result<bool> {
+        let choice = Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt(prompt.into())
+            .default(default)
+            .interact_on_opt(&Term::stdout())?
+            .unwrap_or(false);
+
+        report_event(event, Some(if choice { "yes" } else { "no" }));
+
+        Ok(choice)
+    }
 }
 
 impl Ui for ConsoleUI {
@@ -180,18 +197,11 @@ impl Ui for ConsoleUI {
     }
 
     fn path_confirm_use_steam_found(&self) -> Result<bool> {
-        let confirm = Confirm::with_theme(&ColorfulTheme::default())
-            .with_prompt(" 是否将此路径作为运行目录并继续？")
-            .default(true)
-            .interact_on_opt(&Term::stdout())?;
-        let choice = confirm.unwrap_or(false);
-
-        report_event(
+        self.confirm_with_event(
+            " 是否将此路径作为运行目录并继续？",
+            true,
             "UI.SteamPath.Choice",
-            Some(if choice { "yes" } else { "no" }),
-        );
-
-        Ok(choice)
+        )
     }
 
     fn install_display_step(&self, step: usize, description: &str) -> Result<()> {
@@ -253,18 +263,7 @@ impl Ui for ConsoleUI {
     }
 
     fn install_confirm_overwrite(&self) -> Result<bool> {
-        let confirm = Confirm::with_theme(&ColorfulTheme::default())
-            .with_prompt(" 是否继续安装？")
-            .default(false)
-            .interact_on_opt(&Term::stdout())?;
-        let choice = confirm.unwrap_or(false);
-
-        report_event(
-            "UI.Install.Confirm",
-            Some(if choice { "yes" } else { "no" }),
-        );
-
-        Ok(choice)
+        self.confirm_with_event(" 是否继续安装？", false, "UI.Install.Confirm")
     }
 
     fn install_ask_install_resourceex(&self) -> Result<bool> {
@@ -277,35 +276,21 @@ impl Ui for ConsoleUI {
         println!("更多介绍：https://doc.meta-mystia.izakaya.cc/resource_ex/use_resource-ex.html");
         println!();
 
-        let confirm = Confirm::with_theme(&ColorfulTheme::default())
-            .with_prompt(" 是否安装 ResourceExample ZIP？")
-            .default(true)
-            .interact_on_opt(&Term::stdout())?;
-        let choice = confirm.unwrap_or(false);
-
-        report_event(
+        self.confirm_with_event(
+            " 是否安装 ResourceExample ZIP？",
+            true,
             "UI.Install.ResourceEx.Choice",
-            Some(if choice { "yes" } else { "no" }),
-        );
-
-        Ok(choice)
+        )
     }
 
     fn install_ask_show_bepinex_console(&self) -> Result<bool> {
         println!();
 
-        let confirm = Confirm::with_theme(&ColorfulTheme::default())
-            .with_prompt(" 是否在游戏启动时弹出 BepInEx 的控制台窗口用于显示日志？")
-            .default(false)
-            .interact_on_opt(&Term::stdout())?;
-        let choice = confirm.unwrap_or(false);
-
-        report_event(
+        self.confirm_with_event(
+            " 是否在游戏启动时弹出 BepInEx 的控制台窗口用于显示日志？",
+            false,
             "UI.Install.BepInExConsole.Choice",
-            Some(if choice { "yes" } else { "no" }),
-        );
-
-        Ok(choice)
+        )
     }
 
     fn install_downloads_completed(&self) -> Result<()> {
@@ -562,18 +547,7 @@ impl Ui for ConsoleUI {
     }
 
     fn uninstall_confirm_deletion(&self) -> Result<bool> {
-        let confirm = Confirm::with_theme(&ColorfulTheme::default())
-            .with_prompt(" 是否继续当前操作？")
-            .default(false)
-            .interact_on_opt(&Term::stdout())?;
-        let choice = confirm.unwrap_or(false);
-
-        report_event(
-            "UI.Uninstall.Confirm.Choice",
-            Some(if choice { "yes" } else { "no" }),
-        );
-
-        Ok(choice)
+        self.confirm_with_event(" 是否继续当前操作？", false, "UI.Uninstall.Confirm.Choice")
     }
 
     fn uninstall_files_in_use_warning(&self) -> Result<()> {
@@ -608,18 +582,11 @@ impl Ui for ConsoleUI {
         );
         println!();
 
-        let confirm = Confirm::with_theme(&ColorfulTheme::default())
-            .with_prompt(" 是否以管理员权限重新运行？")
-            .default(false)
-            .interact_on_opt(&Term::stdout())?;
-        let choice = confirm.unwrap_or(false);
-
-        report_event(
+        self.confirm_with_event(
+            " 是否以管理员权限重新运行？",
+            false,
             "UI.Uninstall.Elevate.Choice",
-            Some(if choice { "yes" } else { "no" }),
-        );
-
-        Ok(choice)
+        )
     }
 
     fn uninstall_restarting_elevated(&self) -> Result<()> {
@@ -631,18 +598,7 @@ impl Ui for ConsoleUI {
     fn uninstall_ask_retry_failures(&self) -> Result<bool> {
         println!();
 
-        let confirm = Confirm::with_theme(&ColorfulTheme::default())
-            .with_prompt(" 是否重试失败的项目？")
-            .default(false)
-            .interact_on_opt(&Term::stdout())?;
-        let choice = confirm.unwrap_or(false);
-
-        report_event(
-            "UI.Uninstall.Retry.Choice",
-            Some(if choice { "yes" } else { "no" }),
-        );
-
-        Ok(choice)
+        self.confirm_with_event(" 是否重试失败的项目？", false, "UI.Uninstall.Retry.Choice")
     }
 
     fn uninstall_retrying_failed_items(&self) -> Result<()> {
@@ -850,18 +806,11 @@ impl Ui for ConsoleUI {
     fn download_ask_continue_after_release_notes(&self) -> Result<bool> {
         println!();
 
-        let confirm = Confirm::with_theme(&ColorfulTheme::default())
-            .with_prompt(" 以上内容为发行说明，是否继续当前操作？")
-            .default(false)
-            .interact_on_opt(&Term::stdout())?;
-        let choice = confirm.unwrap_or(false);
-
-        report_event(
+        self.confirm_with_event(
+            " 以上内容为发行说明，是否继续当前操作？",
+            false,
             "UI.Download.GitHubReleaseNotes.Choice",
-            Some(if choice { "yes" } else { "no" }),
-        );
-
-        Ok(choice)
+        )
     }
 
     fn download_switch_to_fallback(&self, reason: &str) -> Result<()> {
@@ -930,18 +879,9 @@ impl Ui for ConsoleUI {
         );
         println!();
 
-        let confirm = Confirm::with_theme(&ColorfulTheme::default())
-            .with_prompt(" 是否立即升级？")
-            .default(true)
-            .interact_on_opt(&Term::stdout())?;
-        let choice = confirm.unwrap_or(false);
+        let choice = self.confirm_with_event(" 是否立即升级？", true, "UI.SelfUpdate.Choice")?;
 
         println!();
-
-        report_event(
-            "UI.SelfUpdate.Choice",
-            Some(if choice { "yes" } else { "no" }),
-        );
 
         Ok(choice)
     }
@@ -971,18 +911,11 @@ impl Ui for ConsoleUI {
     fn select_version_ask_select(&self, component: &str) -> Result<bool> {
         println!();
 
-        let confirm = Confirm::with_theme(&ColorfulTheme::default())
-            .with_prompt(format!(" 是否需要安装旧版本的 {}？", component))
-            .default(false)
-            .interact_on_opt(&Term::stdout())?;
-        let choice = confirm.unwrap_or(false);
-
-        report_event(
+        self.confirm_with_event(
+            format!(" 是否需要安装旧版本的 {}？", component),
+            false,
             &format!("UI.SelectHistoricalVersion.Choice.{}", component),
-            Some(if choice { "yes" } else { "no" }),
-        );
-
-        Ok(choice)
+        )
     }
 
     fn select_version_from_list(&self, component: &str, versions: &[String]) -> Result<usize> {
