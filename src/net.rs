@@ -1,11 +1,12 @@
-use crate::config::RetryConfig;
+use crate::config::{RetryConfig, USER_AGENT};
 use crate::error::{ManagerError, Result};
 use crate::metrics::report_event;
 use crate::ui::Ui;
+use crate::win32::dword_len;
 
 use serde::de::DeserializeOwned;
 use std::{
-    ffi::OsString, mem::size_of, os::windows::ffi::OsStringExt, ptr::null_mut, thread::sleep,
+    env, ffi::OsString, mem::size_of, os::windows::ffi::OsStringExt, ptr::null_mut, thread::sleep,
     time::Duration,
 };
 use ureq::{Body, http::Response};
@@ -44,15 +45,14 @@ where
                     return Err(e);
                 }
 
-                let raw = (cfg.base_delay_secs as f64) * cfg.multiplier.powi(attempt as i32);
-                let delay_secs = raw.min(cfg.max_delay_secs as f64).ceil() as u64;
+                let delay = cfg.delay(attempt);
 
                 ui.network_retrying(
                     op_desc,
-                    delay_secs,
+                    delay.as_secs(),
                     attempt + 1,
                     cfg.attempts,
-                    &format!("{}", e),
+                    &format!("{e}"),
                 )?;
                 report_event(
                     "Network.Retry",
@@ -60,12 +60,12 @@ where
                         "{};attempt={};delay={}",
                         op_desc,
                         attempt + 1,
-                        delay_secs
+                        delay.as_secs()
                     )),
                 );
 
                 if attempt < cfg.attempts - 1 {
-                    sleep(Duration::from_secs(delay_secs));
+                    sleep(delay);
                 } else {
                     report_event("Network.RetryFailed", Some(op_desc));
                     return Err(e);
@@ -93,7 +93,7 @@ fn rate_limited_error(retry_after: Option<u64>, ui: &dyn Ui, op_desc: &str) -> M
         let _ = ui.network_rate_limited(secs);
         report_event(
             "Network.RateLimited",
-            Some(&format!("{};retry_after={}", op_desc, secs)),
+            Some(&format!("{op_desc};retry_after={secs}")),
         );
         sleep(Duration::from_secs(secs));
     } else {
@@ -127,19 +127,11 @@ pub fn check_response_status(
 
     report_event(
         "Network.HttpError",
-        Some(&format!("{};status={}", op_desc, code)),
+        Some(&format!("{op_desc};status={code}")),
     );
     Some(ManagerError::NetworkError(format!(
-        "{}返回错误：HTTP {}",
-        op_desc, code
+        "{op_desc}返回错误：HTTP {code}"
     )))
-}
-
-/// 将 ureq 传输层错误转换为 ManagerError
-///
-/// Agent 已关闭 `http_status_as_error`，4xx/5xx 一律由 [`check_response_status`] 判定。
-pub fn handle_ureq_error(e: ureq::Error) -> ManagerError {
-    ManagerError::NetworkError(format!("请求失败：{}", e))
 }
 
 /// 使用重试机制获取 JSON 响应，并在遇到特定 HTTP 状态码时停止重试
@@ -177,42 +169,35 @@ pub fn get_json_with_retry_stopping_on_status<T: DeserializeOwned>(
                     return Err(JsonRequestError::HttpStatus(status));
                 }
 
-                match check_response_status(&resp, ui, op_desc) {
-                    Some(err) => err,
-                    None => {
-                        let text = resp.into_body().read_to_string().map_err(|e| {
-                            report_event(
-                                "Network.ReadFailed",
-                                Some(&format!("{};err={}", op_desc, e)),
-                            );
-                            JsonRequestError::Other(ManagerError::NetworkError(format!(
-                                "读取响应失败：{}",
-                                e
-                            )))
-                        })?;
+                if let Some(err) = check_response_status(&resp, ui, op_desc) {
+                    err
+                } else {
+                    let text = resp.into_body().read_to_string().map_err(|e| {
+                        report_event("Network.ReadFailed", Some(&format!("{op_desc};err={e}")));
+                        JsonRequestError::Other(ManagerError::NetworkError(format!(
+                            "读取响应失败：{e}"
+                        )))
+                    })?;
 
-                        return serde_json::from_str(&text).map_err(|e| {
-                            report_event(
-                                "Network.JsonParseFailed",
-                                Some(&format!("{};err={}", op_desc, e)),
-                            );
-                            JsonRequestError::Other(ManagerError::NetworkError(format!(
-                                "解析 JSON 失败：{}",
-                                e
-                            )))
-                        });
-                    }
+                    return serde_json::from_str(&text).map_err(|e| {
+                        report_event(
+                            "Network.JsonParseFailed",
+                            Some(&format!("{op_desc};err={e}")),
+                        );
+                        JsonRequestError::Other(ManagerError::NetworkError(format!(
+                            "解析 JSON 失败：{e}"
+                        )))
+                    });
                 }
             }
-            Err(err) => handle_ureq_error(err),
+            Err(err) => ManagerError::from(err),
         };
 
-        let raw = (cfg.base_delay_secs as f64) * cfg.multiplier.powi(attempt as i32);
-        let delay_secs = raw.min(cfg.max_delay_secs as f64).ceil() as u64;
+        let delay = cfg.delay(attempt);
 
         ui.network_retrying(
             op_desc,
-            delay_secs,
+            delay.as_secs(),
             attempt + 1,
             cfg.attempts,
             &err.to_string(),
@@ -224,12 +209,12 @@ pub fn get_json_with_retry_stopping_on_status<T: DeserializeOwned>(
                 "{};attempt={};delay={}",
                 op_desc,
                 attempt + 1,
-                delay_secs
+                delay.as_secs()
             )),
         );
 
         if attempt < cfg.attempts - 1 {
-            sleep(Duration::from_secs(delay_secs));
+            sleep(delay);
         } else {
             report_event("Network.RetryFailed", Some(op_desc));
             return Err(JsonRequestError::Other(err));
@@ -264,7 +249,7 @@ pub fn build_agent(
         .timeout_global(global_timeout)
         // 4xx/5xx 交由 check_response_status 判定，便于读取 Retry-After
         .http_status_as_error(false)
-        .user_agent(crate::config::USER_AGENT);
+        .user_agent(USER_AGENT);
 
     if let Some(proxy) = read_system_proxy()
         && let Ok(p) = ureq::Proxy::new(&proxy)
@@ -287,7 +272,7 @@ pub fn get_response_with_retry(
     cfg: Option<RetryConfig>,
 ) -> Result<Response<Body>> {
     with_retry(ui, op_desc, cfg, || {
-        let resp = agent.get(url).call().map_err(handle_ureq_error)?;
+        let resp = agent.get(url).call().map_err(ManagerError::from)?;
 
         if let Some(err) = check_response_status(&resp, ui, op_desc) {
             return Err(err);
@@ -297,13 +282,13 @@ pub fn get_response_with_retry(
     })
 }
 
-/// 读取系统代理设置，供构建 ureq::Agent 时使用。
-/// ureq 自身仅读取环境变量（HTTP_PROXY 等），不读取 Windows 注册表系统代理，
+/// 读取系统代理设置，供构建 `ureq::Agent` 时使用。
+/// ureq `自身仅读取环境变量（HTTP_PROXY` 等），不读取 Windows 注册表系统代理，
 /// 此函数优先读取环境变量，再回落到注册表。
 /// 返回形如 `"http://host:port"` 的字符串，可直接传入 `ureq::Proxy::new`
 pub fn read_system_proxy() -> Option<String> {
     for var in &["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
-        if let Ok(val) = std::env::var(var)
+        if let Ok(val) = env::var(var)
             && !val.is_empty()
         {
             return Some(val);
@@ -321,21 +306,28 @@ fn read_windows_registry_proxy() -> Option<String> {
             .collect();
 
         let mut hkey: HKEY = null_mut();
-        if RegOpenKeyExW(HKEY_CURRENT_USER, subkey.as_ptr(), 0, KEY_READ, &mut hkey) != 0 {
+        if RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            subkey.as_ptr(),
+            0,
+            KEY_READ,
+            &raw mut hkey,
+        ) != 0
+        {
             return None;
         }
 
         let enable_name: Vec<u16> = "ProxyEnable\0".encode_utf16().collect();
         let mut enable: u32 = 0;
-        let mut size = size_of::<u32>() as u32;
+        let mut size = dword_len(size_of::<u32>());
         let mut kind: u32 = 0;
         RegQueryValueExW(
             hkey,
             enable_name.as_ptr(),
             null_mut(),
-            &mut kind,
-            &mut enable as *mut u32 as *mut u8,
-            &mut size,
+            &raw mut kind,
+            (&raw mut enable).cast::<u8>(),
+            &raw mut size,
         );
 
         if kind != REG_DWORD || enable == 0 {
@@ -345,15 +337,15 @@ fn read_windows_registry_proxy() -> Option<String> {
 
         let server_name: Vec<u16> = "ProxyServer\0".encode_utf16().collect();
         let mut buf = vec![0u16; 512];
-        let mut buf_size = (buf.len() * 2) as u32;
+        let mut buf_size = dword_len(buf.len() * 2);
         kind = 0;
         let ret = RegQueryValueExW(
             hkey,
             server_name.as_ptr(),
             null_mut(),
-            &mut kind,
-            buf.as_mut_ptr() as *mut u8,
-            &mut buf_size,
+            &raw mut kind,
+            buf.as_mut_ptr().cast::<u8>(),
+            &raw mut buf_size,
         );
         RegCloseKey(hkey);
 
@@ -375,12 +367,12 @@ fn read_windows_registry_proxy() -> Option<String> {
             let find = |prefix: &str| -> Option<String> {
                 s.split(';').find_map(|part| {
                     let part = part.trim();
-                    part.strip_prefix(prefix).map(|v| v.to_string())
+                    part.strip_prefix(prefix).map(ToString::to_string)
                 })
             };
             find("https=")
                 .or_else(|| find("http="))
-                .unwrap_or(s.clone())
+                .unwrap_or_else(|| s.clone())
         } else {
             s
         };
@@ -388,7 +380,7 @@ fn read_windows_registry_proxy() -> Option<String> {
         if proxy_addr.contains("://") {
             Some(proxy_addr)
         } else {
-            Some(format!("http://{}", proxy_addr))
+            Some(format!("http://{proxy_addr}"))
         }
     }
 }

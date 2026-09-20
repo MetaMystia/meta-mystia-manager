@@ -2,11 +2,13 @@ use crate::config::{GAME_EXECUTABLE, GAME_PROCESS_NAME, GAME_STEAM_APP_ID};
 use crate::error::{ManagerError, Result};
 use crate::metrics::report_event;
 use crate::ui::Ui;
+use crate::win32::dword_len;
 
 use std::{
+    env, io,
     mem::{size_of, zeroed},
     path::PathBuf,
-    sync::{Mutex, OnceLock},
+    sync::{Mutex, OnceLock, PoisonError},
     time::{Duration, Instant},
 };
 use steamlocate::SteamDir;
@@ -18,11 +20,11 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
 struct SnapshotHandle(HANDLE);
 
 impl SnapshotHandle {
-    fn new(handle: HANDLE) -> Self {
+    const fn new(handle: HANDLE) -> Self {
         Self(handle)
     }
 
-    fn as_raw(&self) -> HANDLE {
+    const fn as_raw(&self) -> HANDLE {
         self.0
     }
 }
@@ -57,7 +59,7 @@ pub fn check_game_directory(ui: &dyn Ui) -> Result<PathBuf> {
         }
     }
 
-    let current_dir = std::env::current_dir()?;
+    let current_dir = env::current_dir()?;
     let game_exe = current_dir.join(GAME_EXECUTABLE);
     if game_exe.is_file() {
         report_event(
@@ -77,21 +79,17 @@ const CACHE_DURATION: Duration = Duration::from_secs(1);
 
 /// 检查游戏进程是否正在运行
 pub fn check_game_running() -> Result<bool> {
-    let cache =
-        GAME_RUNNING_CACHE.get_or_init(|| Mutex::new((false, Instant::now() - CACHE_DURATION)));
+    let cache = GAME_RUNNING_CACHE
+        .get_or_init(|| Mutex::new((false, Instant::now().checked_sub(CACHE_DURATION).unwrap())));
 
-    let mut guard = match cache.lock() {
-        Ok(g) => g,
-        Err(e) => e.into_inner(),
-    };
-    let (cached_result, last_check) = *guard;
+    let (cached_result, last_check) = *cache.lock().unwrap_or_else(PoisonError::into_inner);
 
     if last_check.elapsed() < CACHE_DURATION {
         return Ok(cached_result);
     }
 
     let result = check_game_running_impl()?;
-    *guard = (result, Instant::now());
+    *cache.lock().unwrap_or_else(PoisonError::into_inner) = (result, Instant::now());
 
     Ok(result)
 }
@@ -100,31 +98,29 @@ fn check_game_running_impl() -> Result<bool> {
     unsafe {
         let raw_snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         if raw_snapshot == INVALID_HANDLE_VALUE {
-            let e = std::io::Error::last_os_error();
+            let e = io::Error::last_os_error();
             report_event(
                 "Env.GameRunning.CheckFailed.CreateToolhelp32Snapshot",
-                Some(&format!("{}", e)),
+                Some(&format!("{e}")),
             );
             return Err(ManagerError::ProcessListError(format!(
-                "无法获取进程列表：{}",
-                e
+                "无法获取进程列表：{e}"
             )));
         }
         let snapshot_handle = SnapshotHandle::new(raw_snapshot);
         let snapshot = snapshot_handle.as_raw();
 
         let mut entry: PROCESSENTRY32W = zeroed();
-        entry.dwSize = size_of::<PROCESSENTRY32W>() as u32;
+        entry.dwSize = dword_len(size_of::<PROCESSENTRY32W>());
 
-        if Process32FirstW(snapshot, &mut entry) == 0 {
-            let e = std::io::Error::last_os_error();
+        if Process32FirstW(snapshot, &raw mut entry) == 0 {
+            let e = io::Error::last_os_error();
             report_event(
                 "Env.GameRunning.CheckFailed.Process32FirstW",
-                Some(&format!("{}", e)),
+                Some(&format!("{e}")),
             );
             return Err(ManagerError::ProcessListError(format!(
-                "读取进程列表失败：{}",
-                e
+                "读取进程列表失败：{e}"
             )));
         }
 
@@ -144,7 +140,7 @@ fn check_game_running_impl() -> Result<bool> {
                 return Ok(true);
             }
 
-            if Process32NextW(snapshot, &mut entry) == 0 {
+            if Process32NextW(snapshot, &raw mut entry) == 0 {
                 break;
             }
         }

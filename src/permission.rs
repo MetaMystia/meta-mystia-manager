@@ -1,8 +1,14 @@
 use crate::error::{ManagerError, Result};
 use crate::metrics::report_event;
+use crate::win32::dword_len;
 
 use std::{
-    mem::size_of, os::windows::process::CommandExt, path::PathBuf, process::Command, ptr::null_mut,
+    env, fs, io,
+    mem::size_of,
+    os::windows::process::CommandExt,
+    path::PathBuf,
+    process::{self, Command},
+    ptr::null_mut,
 };
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 use windows_sys::Win32::Security::{
@@ -15,11 +21,11 @@ use windows_sys::Win32::System::Threading::{
 struct TokenHandle(HANDLE);
 
 impl TokenHandle {
-    fn new(handle: HANDLE) -> Self {
+    const fn new(handle: HANDLE) -> Self {
         Self(handle)
     }
 
-    fn raw(&self) -> HANDLE {
+    const fn raw(&self) -> HANDLE {
         self.0
     }
 }
@@ -35,24 +41,24 @@ impl Drop for TokenHandle {
 struct TempScript(PathBuf);
 
 impl TempScript {
-    fn new(path: PathBuf) -> Self {
+    const fn new(path: PathBuf) -> Self {
         Self(path)
     }
 }
 
 impl Drop for TempScript {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        let _ = fs::remove_file(&self.0);
     }
 }
 
 /// 检查当前进程是否具有管理员权限
-pub fn is_elevated() -> Result<bool> {
+pub fn is_elevated() -> bool {
     unsafe {
         let mut token: HANDLE = null_mut();
 
-        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
-            return Ok(false);
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) == 0 {
+            return false;
         }
 
         let token_handle = TokenHandle::new(token);
@@ -63,23 +69,23 @@ pub fn is_elevated() -> Result<bool> {
         let result = GetTokenInformation(
             token_handle.raw(),
             TokenElevation,
-            &mut elevation as *mut TOKEN_ELEVATION as *mut _,
-            size_of::<TOKEN_ELEVATION>() as u32,
-            &mut return_length,
+            (&raw mut elevation).cast(),
+            dword_len(size_of::<TOKEN_ELEVATION>()),
+            &raw mut return_length,
         );
 
         if result != 0 {
-            Ok(elevation.TokenIsElevated != 0)
+            elevation.TokenIsElevated != 0
         } else {
-            Ok(false)
+            false
         }
     }
 }
 
 /// 以管理员权限重新启动程序
 pub fn elevate_and_restart() -> Result<()> {
-    let current_dir = std::env::current_dir()?;
-    let exe_path = std::env::current_exe()?;
+    let current_dir = env::current_dir()?;
+    let exe_path = env::current_exe()?;
 
     // 创建一个临时 PowerShell 脚本来执行 Start-Process -Verb RunAs
     let escape = |s: &str| s.replace('"', "\"\"");
@@ -87,15 +93,14 @@ pub fn elevate_and_restart() -> Result<()> {
     let exe_escaped = escape(&exe_path.display().to_string());
 
     let script = format!(
-        "Start-Process -FilePath \"{}\" -WorkingDirectory \"{}\" -Verb RunAs",
-        exe_escaped, dir_escaped
+        "Start-Process -FilePath \"{exe_escaped}\" -WorkingDirectory \"{dir_escaped}\" -Verb RunAs"
     );
 
-    let mut script_path = std::env::temp_dir();
-    script_path.push(format!("meta_mystia_elevate_{}.ps1", std::process::id()));
+    let mut script_path = env::temp_dir();
+    script_path.push(format!("meta_mystia_elevate_{}.ps1", process::id()));
 
-    std::fs::write(&script_path, script.as_bytes()).map_err(|e| {
-        ManagerError::from(std::io::Error::new(
+    fs::write(&script_path, script.as_bytes()).map_err(|e| {
+        ManagerError::from(io::Error::new(
             e.kind(),
             format!("写入提升脚本 {} 失败：{}", script_path.display(), e),
         ))

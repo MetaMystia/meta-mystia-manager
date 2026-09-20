@@ -3,8 +3,9 @@ use crate::metrics::report_event;
 use crate::shutdown::register_cleanup;
 
 use std::{
+    fs, io,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock, PoisonError},
 };
 
 type RefCounter = Arc<Mutex<usize>>;
@@ -21,10 +22,7 @@ static REGISTERED_PATHS: OnceLock<Mutex<PathRegistry>> = OnceLock::new();
 impl DirGuard {
     fn new(path: PathBuf) -> Self {
         let m = REGISTERED_PATHS.get_or_init(|| Mutex::new(Vec::new()));
-        let mut guard = match m.lock() {
-            Ok(g) => g,
-            Err(e) => e.into_inner(),
-        };
+        let mut guard = m.lock().unwrap_or_else(PoisonError::into_inner);
 
         if let Some((_, counter)) = guard.iter().find(|(p, _)| p == &path) {
             let counter = counter.clone();
@@ -39,11 +37,12 @@ impl DirGuard {
 
         register_cleanup(move || {
             if path_clone.exists() {
-                let _ = std::fs::remove_dir_all(&path_clone);
+                let _ = fs::remove_dir_all(&path_clone);
             }
         });
 
         guard.push((path.clone(), counter.clone()));
+        drop(guard);
 
         Self { path, counter }
     }
@@ -51,16 +50,13 @@ impl DirGuard {
 
 impl Drop for DirGuard {
     fn drop(&mut self) {
-        let should_delete = match self.counter.lock() {
-            Ok(mut count) => {
-                *count -= 1;
-                *count == 0
-            }
-            Err(_) => true,
-        };
+        let should_delete = self.counter.lock().map_or(true, |mut count| {
+            *count -= 1;
+            *count == 0
+        });
 
         if should_delete && self.path.exists() {
-            let _ = std::fs::remove_dir_all(&self.path);
+            let _ = fs::remove_dir_all(&self.path);
             if let Some(m) = REGISTERED_PATHS.get()
                 && let Ok(mut guard) = m.lock()
             {
@@ -70,7 +66,7 @@ impl Drop for DirGuard {
     }
 }
 
-pub fn create_temp_dir_with_guard(base: &Path) -> std::io::Result<(PathBuf, DirGuard)> {
+pub fn create_temp_dir_with_guard(base: &Path) -> io::Result<(PathBuf, DirGuard)> {
     let temp_dir = base.join(TEMP_DIR_NAME);
 
     if let Some(m) = REGISTERED_PATHS.get()
@@ -81,7 +77,7 @@ pub fn create_temp_dir_with_guard(base: &Path) -> std::io::Result<(PathBuf, DirG
     }
 
     if temp_dir.exists()
-        && let Err(e) = std::fs::remove_dir_all(&temp_dir)
+        && let Err(e) = fs::remove_dir_all(&temp_dir)
     {
         report_event(
             "TempDir.CleanupFailed",
@@ -89,7 +85,7 @@ pub fn create_temp_dir_with_guard(base: &Path) -> std::io::Result<(PathBuf, DirG
         );
     }
 
-    if let Err(e) = std::fs::create_dir_all(&temp_dir) {
+    if let Err(e) = fs::create_dir_all(&temp_dir) {
         report_event(
             "TempDir.CreateFailed",
             Some(&format!("{};err={}", temp_dir.display(), e)),

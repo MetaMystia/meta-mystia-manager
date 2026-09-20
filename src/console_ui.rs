@@ -10,9 +10,10 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::{
     cmp::min,
     collections::HashMap,
+    io,
     path::{Path, PathBuf},
     sync::{
-        Mutex,
+        Mutex, PoisonError,
         atomic::{AtomicUsize, Ordering},
     },
 };
@@ -31,12 +32,7 @@ impl ConsoleUI {
         }
     }
 
-    fn confirm_with_event(
-        &self,
-        prompt: impl Into<String>,
-        default: bool,
-        event: &str,
-    ) -> Result<bool> {
+    fn confirm_with_event(prompt: impl Into<String>, default: bool, event: &str) -> Result<bool> {
         let choice = Confirm::with_theme(&ColorfulTheme::default())
             .with_prompt(prompt.into())
             .default(default)
@@ -160,13 +156,13 @@ impl Ui for ConsoleUI {
         println!("{}", style("按回车（Enter）键退出...").dim());
 
         let mut line = String::new();
-        std::io::stdin().read_line(&mut line)?;
+        io::stdin().read_line(&mut line)?;
 
         Ok(())
     }
 
     fn message(&self, text: &str) -> Result<()> {
-        println!("{}", text);
+        println!("{text}");
         Ok(())
     }
 
@@ -197,7 +193,7 @@ impl Ui for ConsoleUI {
     }
 
     fn path_confirm_use_steam_found(&self) -> Result<bool> {
-        self.confirm_with_event(
+        Self::confirm_with_event(
             " 是否将此路径作为运行目录并继续？",
             true,
             "UI.SteamPath.Choice",
@@ -208,7 +204,7 @@ impl Ui for ConsoleUI {
         println!();
         println!(
             "{} {}",
-            style(format!("[{}/4]", step)).cyan().bold(),
+            style(format!("[{step}/4]")).cyan().bold(),
             style(description).cyan()
         );
         println!();
@@ -263,7 +259,7 @@ impl Ui for ConsoleUI {
     }
 
     fn install_confirm_overwrite(&self) -> Result<bool> {
-        self.confirm_with_event(" 是否继续安装？", false, "UI.Install.Confirm")
+        Self::confirm_with_event(" 是否继续安装？", false, "UI.Install.Confirm")
     }
 
     fn install_ask_install_resourceex(&self) -> Result<bool> {
@@ -276,7 +272,7 @@ impl Ui for ConsoleUI {
         println!("更多介绍：https://doc.meta-mystia.izakaya.cc/resource_ex/use_resource-ex.html");
         println!();
 
-        self.confirm_with_event(
+        Self::confirm_with_event(
             " 是否安装 ResourceExample ZIP？",
             true,
             "UI.Install.ResourceEx.Choice",
@@ -286,7 +282,7 @@ impl Ui for ConsoleUI {
     fn install_ask_show_bepinex_console(&self) -> Result<bool> {
         println!();
 
-        self.confirm_with_event(
+        Self::confirm_with_event(
             " 是否在游戏启动时弹出 BepInEx 的控制台窗口用于显示日志？",
             false,
             "UI.Install.BepInExConsole.Choice",
@@ -306,13 +302,10 @@ impl Ui for ConsoleUI {
 
     fn install_cleanup_result(&self, success_count: usize, failed_count: usize) -> Result<()> {
         if failed_count > 0 {
-            println!(
-                "旧版本删除完成（成功：{}，失败：{}）",
-                success_count, failed_count
-            );
+            println!("旧版本删除完成（成功：{success_count}，失败：{failed_count}）");
             println!("{}", style("  部分文件删除失败，将继续安装").yellow());
         } else {
-            println!("旧版本删除完成（清理 {} 项）", success_count);
+            println!("旧版本删除完成（清理 {success_count} 项）");
         }
 
         Ok(())
@@ -343,7 +336,7 @@ impl Ui for ConsoleUI {
     }
 
     fn upgrade_backup_failed(&self, err: &str) -> Result<()> {
-        println!("{}", style(format!("备份失败：{}", err)).yellow());
+        println!("{}", style(format!("备份失败：{err}")).yellow());
         Ok(())
     }
 
@@ -417,7 +410,7 @@ impl Ui for ConsoleUI {
     }
 
     fn upgrade_detected_new_dll(&self, current: &str, new: &str) -> Result<()> {
-        println!("发现新版本 MetaMystia DLL：v{} -> v{}", current, new);
+        println!("发现新版本 MetaMystia DLL：v{current} -> v{new}");
         Ok(())
     }
 
@@ -542,7 +535,7 @@ impl Ui for ConsoleUI {
     }
 
     fn uninstall_confirm_deletion(&self) -> Result<bool> {
-        self.confirm_with_event(" 是否继续当前操作？", false, "UI.Uninstall.Confirm.Choice")
+        Self::confirm_with_event(" 是否继续当前操作？", false, "UI.Uninstall.Confirm.Choice")
     }
 
     fn uninstall_files_in_use_warning(&self) -> Result<()> {
@@ -562,10 +555,7 @@ impl Ui for ConsoleUI {
         attempts: usize,
     ) -> Result<()> {
         println!();
-        println!(
-            "等待 {} 秒后重试被占用文件（重试 {}/{}）...",
-            delay_secs, attempt, attempts
-        );
+        println!("等待 {delay_secs} 秒后重试被占用文件（重试 {attempt}/{attempts}）...");
         Ok(())
     }
 
@@ -577,7 +567,7 @@ impl Ui for ConsoleUI {
         );
         println!();
 
-        self.confirm_with_event(
+        Self::confirm_with_event(
             " 是否以管理员权限重新运行？",
             false,
             "UI.Uninstall.Elevate.Choice",
@@ -593,7 +583,7 @@ impl Ui for ConsoleUI {
     fn uninstall_ask_retry_failures(&self) -> Result<bool> {
         println!();
 
-        self.confirm_with_event(" 是否重试失败的项目？", false, "UI.Uninstall.Retry.Choice")
+        Self::confirm_with_event(" 是否重试失败的项目？", false, "UI.Uninstall.Retry.Choice")
     }
 
     fn uninstall_retrying_failed_items(&self) -> Result<()> {
@@ -667,54 +657,51 @@ impl Ui for ConsoleUI {
 
     fn download_start(&self, filename: &str, total: Option<u64>) -> Result<usize> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let pb = if let Some(size) = total {
-            let pb = ProgressBar::new(size);
-            let style = match ProgressStyle::default_bar()
-                .template("{msg}\n[{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
-            {
-                Ok(s) => s.progress_chars("#>-"),
-                Err(_) => ProgressStyle::default_bar(),
-            };
-            pb.set_style(style);
-            pb.set_message(format!("下载：{}", filename));
-            pb
-        } else {
-            let pb = ProgressBar::new_spinner();
-            pb.set_message(format!("下载：{}", filename));
-            pb
-        };
+        let pb = total.map_or_else(
+            || {
+                let pb = ProgressBar::new_spinner();
+                pb.set_message(format!("下载：{filename}"));
+                pb
+            },
+            |size| {
+                let pb = ProgressBar::new(size);
+                let style = ProgressStyle::default_bar()
+                    .template("{msg}\n[{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+                    .map_or_else(
+                        |_| ProgressStyle::default_bar(),
+                        |style| style.progress_chars("#>-"),
+                    );
+                pb.set_style(style);
+                pb.set_message(format!("下载：{filename}"));
+                pb
+            },
+        );
 
-        let mut guard = match self.bars.lock() {
-            Ok(g) => g,
-            Err(e) => e.into_inner(),
-        };
+        let mut guard = self.bars.lock().unwrap_or_else(PoisonError::into_inner);
         guard.insert(id, pb);
+        drop(guard);
 
         Ok(id)
     }
 
     fn download_update(&self, id: usize, downloaded: u64) -> Result<()> {
-        let guard = match self.bars.lock() {
-            Ok(g) => g,
-            Err(e) => e.into_inner(),
-        };
+        let guard = self.bars.lock().unwrap_or_else(PoisonError::into_inner);
 
         if let Some(pb) = guard.get(&id) {
             pb.set_position(downloaded);
         }
+        drop(guard);
 
         Ok(())
     }
 
     fn download_finish(&self, id: usize, message: &str) -> Result<()> {
-        let mut guard = match self.bars.lock() {
-            Ok(g) => g,
-            Err(e) => e.into_inner(),
-        };
+        let mut guard = self.bars.lock().unwrap_or_else(PoisonError::into_inner);
 
         if let Some(pb) = guard.remove(&id) {
             pb.finish_with_message(message.to_string());
         }
+        drop(guard);
 
         Ok(())
     }
@@ -725,7 +712,7 @@ impl Ui for ConsoleUI {
     }
 
     fn download_version_info_failed(&self, err: &str) -> Result<()> {
-        println!("{}", style(format!("获取版本信息失败：{}", err)).yellow());
+        println!("{}", style(format!("获取版本信息失败：{err}")).yellow());
         Ok(())
     }
 
@@ -738,8 +725,7 @@ impl Ui for ConsoleUI {
         println!(
             "{}",
             style(format!(
-                "版本信息解析失败：{}，response snippet：{}",
-                err, snippet
+                "版本信息解析失败：{err}，response snippet：{snippet}"
             ))
             .yellow()
         );
@@ -752,7 +738,7 @@ impl Ui for ConsoleUI {
     }
 
     fn download_share_code_failed(&self, err: &str) -> Result<()> {
-        println!("{}", style(format!("获取下载链接失败：{}", err)).yellow());
+        println!("{}", style(format!("获取下载链接失败：{err}")).yellow());
         Ok(())
     }
 
@@ -767,7 +753,7 @@ impl Ui for ConsoleUI {
     }
 
     fn download_found_github_asset(&self, name: &str) -> Result<()> {
-        println!("找到文件：{}", name);
+        println!("找到文件：{name}");
         Ok(())
     }
 
@@ -783,7 +769,7 @@ impl Ui for ConsoleUI {
         body: &str,
     ) -> Result<()> {
         println!();
-        println!("{}", style(format!("发行说明：{}（{}）", name, tag)).cyan());
+        println!("{}", style(format!("发行说明：{name}（{tag}）")).cyan());
         println!("{}", "-".repeat(60));
 
         let trimmed = body.trim();
@@ -801,7 +787,7 @@ impl Ui for ConsoleUI {
     fn download_ask_continue_after_release_notes(&self) -> Result<bool> {
         println!();
 
-        self.confirm_with_event(
+        Self::confirm_with_event(
             " 以上内容为发行说明，是否继续当前操作？",
             false,
             "UI.Download.GitHubReleaseNotes.Choice",
@@ -840,12 +826,11 @@ impl Ui for ConsoleUI {
         println!(
             "{}",
             style(format!(
-                "{}失败，{} 秒后重试...（重试 {}/{}）",
-                op_desc, delay_secs, attempt, attempts
+                "{op_desc}失败，{delay_secs} 秒后重试...（重试 {attempt}/{attempts}）"
             ))
             .yellow()
         );
-        println!("{}", style(format!("错误：{}", err)).yellow());
+        println!("{}", style(format!("错误：{err}")).yellow());
         println!(
             "{}",
             style("提醒：若重试次数耗尽后仍失败，将自动切换至备用源继续当前操作，请耐心等待。")
@@ -858,8 +843,7 @@ impl Ui for ConsoleUI {
         println!(
             "{}",
             style(format!(
-                "检测到限流，服务器指定 Retry-After={} 秒，将等待后重试...",
-                secs
+                "检测到限流，服务器指定 Retry-After={secs} 秒，将等待后重试..."
             ))
             .yellow()
         );
@@ -874,7 +858,7 @@ impl Ui for ConsoleUI {
         );
         println!();
 
-        let choice = self.confirm_with_event(" 是否立即升级？", true, "UI.SelfUpdate.Choice")?;
+        let choice = Self::confirm_with_event(" 是否立即升级？", true, "UI.SelfUpdate.Choice")?;
 
         println!();
 
@@ -890,7 +874,7 @@ impl Ui for ConsoleUI {
 
     fn manager_update_failed(&self, err: &str) -> Result<()> {
         println!();
-        println!("{}", style(format!("升级失败：{}", err)).red());
+        println!("{}", style(format!("升级失败：{err}")).red());
         println!("请手动下载并升级管理工具。");
         println!();
         Ok(())
@@ -906,10 +890,10 @@ impl Ui for ConsoleUI {
     fn select_version_ask_select(&self, component: &str) -> Result<bool> {
         println!();
 
-        self.confirm_with_event(
-            format!(" 是否需要安装旧版本的 {}？", component),
+        Self::confirm_with_event(
+            format!(" 是否需要安装旧版本的 {component}？"),
             false,
-            &format!("UI.SelectHistoricalVersion.Choice.{}", component),
+            &format!("UI.SelectHistoricalVersion.Choice.{component}"),
         )
     }
 
@@ -922,7 +906,7 @@ impl Ui for ConsoleUI {
             println!();
             println!(
                 "{}",
-                style(format!("可用的 {} 版本：", component)).cyan().bold()
+                style(format!("可用的 {component} 版本：")).cyan().bold()
             );
             println!();
 
@@ -1013,7 +997,6 @@ impl Ui for ConsoleUI {
                         ))
                         .yellow()
                     );
-                    continue;
                 }
             }
         }
@@ -1028,7 +1011,7 @@ impl Ui for ConsoleUI {
         println!();
         println!(
             "{}",
-            style(format!("错误：{} 版本 {} 不可用", component, version)).red()
+            style(format!("错误：{component} 版本 {version} 不可用")).red()
         );
 
         let display_count = min(10, available.len());
@@ -1101,7 +1084,7 @@ fn print_markdown(text: &str) {
 
         let digit_count = trimmed_line
             .chars()
-            .take_while(|c| c.is_ascii_digit())
+            .take_while(char::is_ascii_digit)
             .count();
         if digit_count > 0
             && let Some(rest) = trimmed_line[digit_count..].strip_prefix(". ")
@@ -1123,118 +1106,123 @@ fn print_markdown(text: &str) {
     }
 }
 
-fn render_inline(s: &str) -> String {
-    let b = s.as_bytes();
-    let n = b.len();
-    let mut result = String::with_capacity(n + 32);
-    let mut i = 0;
+/// 渲染行内 Markdown：`` `代码` ``、`~~删除线~~`、`***粗斜体***`、`**粗体**`、`*斜体*`、`[文本](链接)`
+#[allow(
+    clippy::too_many_lines,
+    reason = "按标记逐项线性解析，拆开反而难以对照"
+)]
+fn render_inline(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let len = bytes.len();
+    let mut result = String::with_capacity(len + 32);
+    let mut idx = 0;
 
-    while i < n {
-        match b[i] {
+    while idx < len {
+        match bytes[idx] {
             b'`' => {
-                let start = i + 1;
-                if let Some(p) = b[start..].iter().position(|&c| c == b'`') {
-                    let end = start + p;
-                    result.push_str(&format!("{}", style(&s[start..end]).yellow()));
-                    i = end + 1;
+                let start = idx + 1;
+                if let Some(offset) = bytes[start..].iter().position(|&c| c == b'`') {
+                    let end = start + offset;
+                    result.push_str(&style(&text[start..end]).yellow().to_string());
+                    idx = end + 1;
                 } else {
                     result.push('`');
-                    i += 1;
+                    idx += 1;
                 }
             }
-            b'~' if b.get(i + 1) == Some(&b'~') => {
-                let start = i + 2;
-                if let Some(p) = b[start..].windows(2).position(|w| w == b"~~") {
-                    let end = start + p;
-                    result.push_str(&format!("{}", style(&s[start..end]).strikethrough()));
-                    i = end + 2;
+            b'~' if bytes.get(idx + 1) == Some(&b'~') => {
+                let start = idx + 2;
+                if let Some(offset) = bytes[start..].windows(2).position(|w| w == b"~~") {
+                    let end = start + offset;
+                    result.push_str(&style(&text[start..end]).strikethrough().to_string());
+                    idx = end + 2;
                 } else {
                     result.push_str("~~");
-                    i += 2;
+                    idx += 2;
                 }
             }
-            b'*' if b.get(i + 1) == Some(&b'*') && b.get(i + 2) == Some(&b'*') => {
-                let start = i + 3;
-                if let Some(p) = b[start..].windows(3).position(|w| w == b"***") {
-                    let end = start + p;
-                    result.push_str(&format!("{}", style(&s[start..end]).bold().italic()));
-                    i = end + 3;
+            b'*' if bytes.get(idx + 1) == Some(&b'*') && bytes.get(idx + 2) == Some(&b'*') => {
+                let start = idx + 3;
+                if let Some(offset) = bytes[start..].windows(3).position(|w| w == b"***") {
+                    let end = start + offset;
+                    result.push_str(&style(&text[start..end]).bold().italic().to_string());
+                    idx = end + 3;
                 } else {
                     result.push_str("***");
-                    i += 3;
+                    idx += 3;
                 }
             }
-            b'*' if b.get(i + 1) == Some(&b'*') => {
-                let start = i + 2;
-                if let Some(p) = b[start..].windows(2).position(|w| w == b"**") {
-                    let end = start + p;
-                    result.push_str(&format!("{}", style(&s[start..end]).bold()));
-                    i = end + 2;
+            b'*' if bytes.get(idx + 1) == Some(&b'*') => {
+                let start = idx + 2;
+                if let Some(offset) = bytes[start..].windows(2).position(|w| w == b"**") {
+                    let end = start + offset;
+                    result.push_str(&style(&text[start..end]).bold().to_string());
+                    idx = end + 2;
                 } else {
                     result.push_str("**");
-                    i += 2;
+                    idx += 2;
                 }
             }
-            b'_' if b.get(i + 1) == Some(&b'_') => {
-                let start = i + 2;
-                if let Some(p) = b[start..].windows(2).position(|w| w == b"__") {
-                    let end = start + p;
-                    result.push_str(&format!("{}", style(&s[start..end]).bold()));
-                    i = end + 2;
+            b'_' if bytes.get(idx + 1) == Some(&b'_') => {
+                let start = idx + 2;
+                if let Some(offset) = bytes[start..].windows(2).position(|w| w == b"__") {
+                    let end = start + offset;
+                    result.push_str(&style(&text[start..end]).bold().to_string());
+                    idx = end + 2;
                 } else {
                     result.push_str("__");
-                    i += 2;
+                    idx += 2;
                 }
             }
             b'*' => {
-                let start = i + 1;
-                if let Some(p) = b[start..].iter().position(|&c| c == b'*') {
-                    let end = start + p;
+                let start = idx + 1;
+                if let Some(offset) = bytes[start..].iter().position(|&c| c == b'*') {
+                    let end = start + offset;
                     if end > start {
-                        result.push_str(&format!("{}", style(&s[start..end]).italic()));
-                        i = end + 1;
+                        result.push_str(&style(&text[start..end]).italic().to_string());
+                        idx = end + 1;
                     } else {
                         result.push('*');
-                        i += 1;
+                        idx += 1;
                     }
                 } else {
                     result.push('*');
-                    i += 1;
+                    idx += 1;
                 }
             }
             b'[' => {
-                let text_start = i + 1;
-                if let Some(cb) = b[text_start..].iter().position(|&c| c == b']') {
-                    let text_end = text_start + cb;
+                let text_start = idx + 1;
+                if let Some(offset) = bytes[text_start..].iter().position(|&c| c == b']') {
+                    let text_end = text_start + offset;
                     let after = text_end + 1;
-                    if b.get(after) == Some(&b'(')
-                        && let Some(cp) = b[after + 1..].iter().position(|&c| c == b')')
+                    if bytes.get(after) == Some(&b'(')
+                        && let Some(url_offset) = bytes[after + 1..].iter().position(|&c| c == b')')
                     {
                         let url_start = after + 1;
-                        let url_end = url_start + cp;
+                        let url_end = url_start + url_offset;
                         result.push('[');
-                        result.push_str(&render_inline(&s[text_start..text_end]));
+                        result.push_str(&render_inline(&text[text_start..text_end]));
                         result.push_str("](");
-                        result.push_str(&s[url_start..url_end]);
+                        result.push_str(&text[url_start..url_end]);
                         result.push(')');
-                        i = url_end + 1;
+                        idx = url_end + 1;
                         continue;
                     }
                 }
                 result.push('[');
-                i += 1;
+                idx += 1;
             }
-            c if c >= 0x80 => {
-                if let Some(ch) = s[i..].chars().next() {
+            byte if byte >= 0x80 => {
+                if let Some(ch) = text[idx..].chars().next() {
                     result.push(ch);
-                    i += ch.len_utf8();
+                    idx += ch.len_utf8();
                 } else {
                     break;
                 }
             }
-            c => {
-                result.push(c as char);
-                i += 1;
+            byte => {
+                result.push(byte as char);
+                idx += 1;
             }
         }
     }

@@ -24,6 +24,6 @@ fn main() {
     }
 
     if let Err(e) = res.compile() {
-        eprintln!("[build.rs] failed to compile Windows resources: {}", e);
+        eprintln!("[build.rs] failed to compile Windows resources: {e}");
     }
 }

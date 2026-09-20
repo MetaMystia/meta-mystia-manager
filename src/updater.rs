@@ -5,7 +5,12 @@ use crate::model::VersionInfo;
 use crate::temp_dir::create_temp_dir_with_guard;
 use crate::ui::Ui;
 
-use std::{os::windows::process::CommandExt, path::Path, process::Command};
+use std::{
+    env, fs, io,
+    os::windows::process::CommandExt,
+    path::Path,
+    process::{self, Command},
+};
 use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
 pub fn perform_self_update(
@@ -23,24 +28,24 @@ pub fn perform_self_update(
     let temp_path = temp_dir.join(&filename);
 
     if let Err(e) = downloader.download_manager(version_info, &temp_path) {
-        ui.manager_update_failed(&format!("下载失败：{}", e))?;
-        report_event("SelfUpdate.Failed.Download", Some(&format!("{}", e)));
+        ui.manager_update_failed(&format!("下载失败：{e}"))?;
+        report_event("SelfUpdate.Failed.Download", Some(&format!("{e}")));
         return Err(e);
     }
 
     // 2. 复制到运行目录
-    let exe_path = std::env::current_exe()?;
+    let exe_path = env::current_exe()?;
     let run_dir = exe_path
         .parent()
         .ok_or_else(|| ManagerError::Other("无法确定运行目录".to_string()))?;
     let target_path = run_dir.join(&filename);
 
-    match std::fs::copy(&temp_path, &target_path) {
+    match fs::copy(&temp_path, &target_path) {
         Ok(_) => {}
         Err(e) => {
             ui.manager_prompt_manual_update()?;
-            report_event("SelfUpdate.Failed.Copy", Some(&format!("{}", e)));
-            return Err(ManagerError::from(std::io::Error::new(
+            report_event("SelfUpdate.Failed.Copy", Some(&format!("{e}")));
+            return Err(ManagerError::from(io::Error::new(
                 e.kind(),
                 format!("复制到运行目录 {} 失败：{}", target_path.display(), e),
             )));
@@ -48,23 +53,19 @@ pub fn perform_self_update(
     }
 
     // 3. 生成升级脚本
-    let script_name = format!(
-        "{}-updater_{}.ps1",
-        env!("CARGO_PKG_NAME"),
-        std::process::id()
-    );
-    let script_path = std::env::temp_dir().join(&script_name);
+    let script_name = format!("{}-updater_{}.ps1", env!("CARGO_PKG_NAME"), process::id());
+    let script_path = env::temp_dir().join(&script_name);
 
     let script = generate_powershell_script(
         &exe_path.to_string_lossy(),
         &target_path.to_string_lossy(),
-        std::process::id(),
+        process::id(),
         auto_launch,
     );
 
-    std::fs::write(&script_path, script.as_bytes()).map_err(|e| {
-        report_event("SelfUpdate.Failed.ScriptWrite", Some(&format!("{}", e)));
-        ManagerError::from(std::io::Error::new(
+    fs::write(&script_path, script.as_bytes()).map_err(|e| {
+        report_event("SelfUpdate.Failed.ScriptWrite", Some(&format!("{e}")));
+        ManagerError::from(io::Error::new(
             e.kind(),
             format!("写入升级脚本 {} 失败：{}", script_path.display(), e),
         ))

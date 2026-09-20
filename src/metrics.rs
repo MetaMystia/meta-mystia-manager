@@ -1,10 +1,10 @@
-use crate::error::Result;
 use crate::net::build_agent;
 use crate::shutdown::SHUTDOWN_TIMEOUT;
 
 use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
 use std::{
     collections::HashMap,
+    env,
     process::Command,
     sync::{
         Mutex, OnceLock,
@@ -26,7 +26,7 @@ fn build_tracking_url(user_id: &str, params: &HashMap<&str, String>) -> String {
         ("uid".to_string(), user_id.to_string()),
     ];
 
-    for (k, v) in params.iter() {
+    for (k, v) in params {
         base.push((k.to_string(), v.clone()));
     }
 
@@ -36,7 +36,7 @@ fn build_tracking_url(user_id: &str, params: &HashMap<&str, String>) -> String {
         .collect::<Vec<_>>()
         .join("&");
 
-    format!("{}?{}", TRACKING_ENDPOINT, q)
+    format!("{TRACKING_ENDPOINT}?{q}")
 }
 
 fn read_machine_guid() -> Option<String> {
@@ -80,9 +80,9 @@ pub fn get_user_id() -> String {
                 return md5_hex(&guid);
             }
 
-            let hostname = std::env::var("COMPUTERNAME").unwrap_or_default();
-            let username = std::env::var("USERNAME").unwrap_or_default();
-            let combined = format!("{}|{}", hostname, username);
+            let hostname = env::var("COMPUTERNAME").unwrap_or_default();
+            let username = env::var("USERNAME").unwrap_or_default();
+            let combined = format!("{hostname}|{username}");
 
             md5_hex(&combined)
         })
@@ -91,10 +91,10 @@ pub fn get_user_id() -> String {
 
 static CACHED_AGENT: OnceLock<ureq::Agent> = OnceLock::new();
 
-fn send_with_client(url: String) {
+fn send_with_client(url: &str) {
     let _ = CACHED_AGENT
         .get_or_init(|| build_agent(None, Some(DEFAULT_TIMEOUT)))
-        .get(&url)
+        .get(url)
         .call();
 }
 
@@ -117,7 +117,7 @@ fn start_tracking_worker() -> Sender<String> {
 
     let handle = spawn(move || {
         for url in rx {
-            send_with_client(url);
+            send_with_client(&url);
         }
     });
     let worker = TrackingWorker {
@@ -141,7 +141,7 @@ fn start_tracking_worker() -> Sender<String> {
 fn send_tracking_request(url: String) {
     let sender = start_tracking_worker();
     if let Err(e) = sender.send(url) {
-        spawn(move || send_with_client(e.0));
+        spawn(move || send_with_client(&e.0));
     }
 }
 
@@ -153,16 +153,12 @@ fn join_handle_with_timeout(h: JoinHandle<()>, timeout: Duration) -> bool {
         let _ = tx.send(());
     });
 
-    match rx.recv_timeout(timeout) {
-        Ok(_) => true,
-        Err(RecvTimeoutError::Timeout) => false,
-        Err(_) => true,
-    }
+    !matches!(rx.recv_timeout(timeout), Err(RecvTimeoutError::Timeout))
 }
 
-pub fn shutdown(timeout: Option<Duration>) -> Result<()> {
+pub fn shutdown(timeout: Option<Duration>) {
     let Some(m) = TRACKING_WORKER.get() else {
-        return Ok(());
+        return;
     };
 
     let to = timeout.unwrap_or(SHUTDOWN_TIMEOUT);
@@ -175,8 +171,6 @@ pub fn shutdown(timeout: Option<Duration>) -> Result<()> {
         drop(guard);
         let _ = join_handle_with_timeout(worker.handle, to);
     }
-
-    Ok(())
 }
 
 pub fn report_event(action: &str, name: Option<&str>) {

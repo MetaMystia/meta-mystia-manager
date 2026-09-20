@@ -14,6 +14,7 @@ use crate::ui::Ui;
 
 use std::{
     collections::HashSet,
+    fs, io,
     path::{Path, PathBuf},
 };
 
@@ -25,13 +26,13 @@ pub struct Installer<'a> {
 }
 
 impl<'a> Installer<'a> {
-    pub fn new(game_root: PathBuf, ui: &'a dyn Ui) -> Result<Self> {
-        let downloader = Downloader::new(ui)?;
-        Ok(Self {
+    pub fn new(game_root: PathBuf, ui: &'a dyn Ui) -> Self {
+        let downloader = Downloader::new(ui);
+        Self {
             game_root,
             downloader,
             ui,
-        })
+        }
     }
 
     /// 检查是否已安装 MetaMystia DLL
@@ -80,7 +81,7 @@ impl<'a> Installer<'a> {
         // 1. 删除 BepInEx 目录下的所有项目（跳过 plugins）
         let bepinex_dir = game_root.join("BepInEx");
         if bepinex_dir.exists() {
-            for entry in std::fs::read_dir(&bepinex_dir).map_err(ManagerError::from)? {
+            for entry in fs::read_dir(&bepinex_dir).map_err(ManagerError::from)? {
                 let entry = entry.map_err(ManagerError::from)?;
                 let path = entry.path();
                 let name = entry.file_name();
@@ -144,6 +145,10 @@ impl<'a> Installer<'a> {
     }
 
     /// 执行安装流程
+    #[allow(
+        clippy::too_many_lines,
+        reason = "安装流程按步骤线性推进，拆分步骤会让上下文参数来回传递"
+    )]
     pub fn install(
         &self,
         cleanup_before_deploy: bool,
@@ -200,8 +205,7 @@ impl<'a> Installer<'a> {
                 self.ui
                     .select_version_not_available("MetaMystia DLL", v, &version_info.dlls)?;
                 return Err(ManagerError::Other(format!(
-                    "Specified MetaMystia DLL version \"{}\" is not available",
-                    v
+                    "Specified MetaMystia DLL version \"{v}\" is not available"
                 )));
             };
             matched
@@ -231,8 +235,7 @@ impl<'a> Installer<'a> {
                         &version_info.zips,
                     )?;
                     return Err(ManagerError::Other(format!(
-                        "Specified ResourceEx ZIP version \"{}\" is not available",
-                        v
+                        "Specified ResourceEx ZIP version \"{v}\" is not available"
                     )));
                 };
                 Some(matched)
@@ -253,30 +256,22 @@ impl<'a> Installer<'a> {
             Some(&format!(
                 "dll={};resourceex={}",
                 dll_version,
-                resourceex_version.as_ref().unwrap_or(&"none".to_string())
+                resourceex_version.as_deref().unwrap_or("none")
             )),
         );
 
         // 显示 GitHub Release Notes（获取所选版本的发行说明）
-        match self
+        if let Ok(Some(_)) = self
             .downloader
             .fetch_and_display_github_release_notes(Some(&dll_version))
+            && !self.ui.download_ask_continue_after_release_notes()?
         {
-            Ok(Some(_)) => {
-                if !self.ui.download_ask_continue_after_release_notes()? {
-                    return Err(ManagerError::UserCancelled);
-                }
-            }
-            Ok(None) => {}
-            Err(_) => {}
+            return Err(ManagerError::UserCancelled);
         }
 
         // 3. 创建临时下载目录
         let (temp_dir, _temp_guard) = create_temp_dir_with_guard(&self.game_root).map_err(|e| {
-            ManagerError::from(std::io::Error::new(
-                e.kind(),
-                format!("创建临时目录失败：{}", e),
-            ))
+            ManagerError::from(io::Error::new(e.kind(), format!("创建临时目录失败：{e}")))
         })?;
 
         // 4. 下载文件
@@ -313,7 +308,7 @@ impl<'a> Installer<'a> {
             self.ui.install_cleanup_result(success, failed)?;
             report_event(
                 "Install.Cleanup",
-                Some(&format!("success:{};failed:{}", success, failed)),
+                Some(&format!("success:{success};failed:{failed}")),
             );
         }
 
@@ -341,8 +336,8 @@ impl<'a> Installer<'a> {
         // 写入默认配置（如果不存在）
         let bepinex_config_dir = self.game_root.join("BepInEx").join("config");
         if !bepinex_config_dir.exists() {
-            std::fs::create_dir_all(&bepinex_config_dir).map_err(|e| {
-                ManagerError::from(std::io::Error::new(
+            fs::create_dir_all(&bepinex_config_dir).map_err(|e| {
+                ManagerError::from(io::Error::new(
                     e.kind(),
                     format!(
                         "创建 BepInEx 配置目录 {} 失败：{}",
@@ -386,8 +381,8 @@ UnityBaseLibrariesSource = https://url.izakaya.cc/unity-library
         if !bepinex_cfg.is_empty() {
             let bepinex_tmp_cfg = bepinex_cfg_path.with_extension("cfg.tmp");
 
-            std::fs::write(&bepinex_tmp_cfg, bepinex_cfg.as_bytes()).map_err(|e| {
-                ManagerError::from(std::io::Error::new(
+            fs::write(&bepinex_tmp_cfg, bepinex_cfg.as_bytes()).map_err(|e| {
+                ManagerError::from(io::Error::new(
                     e.kind(),
                     format!(
                         "写入 BepInEx 临时配置文件 {} 失败：{}",
@@ -398,12 +393,12 @@ UnityBaseLibrariesSource = https://url.izakaya.cc/unity-library
             })?;
 
             match atomic_rename_or_copy(&bepinex_tmp_cfg, &bepinex_cfg_path) {
-                Ok(_) => {
-                    let _ = std::fs::remove_file(&bepinex_tmp_cfg);
+                Ok(()) => {
+                    let _ = fs::remove_file(&bepinex_tmp_cfg);
                 }
                 Err(e) => {
-                    let _ = std::fs::remove_file(&bepinex_tmp_cfg);
-                    return Err(ManagerError::from(std::io::Error::other(format!(
+                    let _ = fs::remove_file(&bepinex_tmp_cfg);
+                    return Err(ManagerError::from(io::Error::other(format!(
                         "写入 BepInEx 配置文件 {} 失败：{}",
                         bepinex_cfg_path.display(),
                         e

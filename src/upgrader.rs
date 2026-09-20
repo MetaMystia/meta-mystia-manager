@@ -16,6 +16,7 @@ use crate::ui::Ui;
 
 use std::{
     cmp::Ordering,
+    fs, io,
     path::{Path, PathBuf},
 };
 
@@ -32,6 +33,13 @@ struct InstalledAssetPattern<'a> {
     backup_suffix: &'a str,
 }
 
+/// 文件名是否带有 `.old` 备份后缀（不区分大小写）
+fn is_old_backup(filename: &str) -> bool {
+    Path::new(filename)
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("old"))
+}
+
 impl Ord for ParsedVersion {
     fn cmp(&self, other: &Self) -> Ordering {
         let max_len = self.parts.len().max(other.parts.len());
@@ -40,9 +48,9 @@ impl Ord for ParsedVersion {
             let left = *self.parts.get(index).unwrap_or(&0);
             let right = *other.parts.get(index).unwrap_or(&0);
 
-            match left.cmp(&right) {
-                Ordering::Equal => continue,
-                non_eq => return non_eq,
+            let ordering = left.cmp(&right);
+            if ordering != Ordering::Equal {
+                return ordering;
             }
         }
 
@@ -64,19 +72,19 @@ pub struct Upgrader<'a> {
 }
 
 impl<'a> Upgrader<'a> {
-    pub fn new(game_root: PathBuf, ui: &'a dyn Ui) -> Result<Self> {
-        let downloader = Downloader::new(ui)?;
-        Ok(Self {
+    pub fn new(game_root: PathBuf, ui: &'a dyn Ui) -> Self {
+        let downloader = Downloader::new(ui);
+        Self {
             game_root,
             downloader,
             ui,
-        })
+        }
     }
 
     fn report_backup_results(&self, results: Vec<Result<PathBuf>>) -> Result<()> {
         for res in results {
             if let Err(e) = res {
-                self.ui.upgrade_backup_failed(&format!("{}", e))?;
+                self.ui.upgrade_backup_failed(&format!("{e}"))?;
             }
         }
 
@@ -90,11 +98,11 @@ impl<'a> Upgrader<'a> {
     ) -> Result<()> {
         for entry in glob_matches_by_filename(pattern, matcher) {
             let result = remove_glob_files(&entry);
-            for removed in result.removed.iter() {
+            for removed in &result.removed {
                 self.ui.upgrade_deleted(removed)?;
             }
-            for (path, err) in result.failed.into_iter() {
-                self.ui.upgrade_delete_failed(&path, &format!("{}", err))?;
+            for (path, err) in result.failed {
+                self.ui.upgrade_delete_failed(&path, &format!("{err}"))?;
             }
         }
 
@@ -126,7 +134,7 @@ impl<'a> Upgrader<'a> {
 
         for old_entry in glob_matches_by_filename(pattern, matcher) {
             if let Some(old_filename) = old_entry.file_name().and_then(|name| name.to_str())
-                && (old_filename == current_filename || old_filename.ends_with(".old"))
+                && (old_filename == current_filename || is_old_backup(old_filename))
             {
                 continue;
             }
@@ -138,7 +146,6 @@ impl<'a> Upgrader<'a> {
     }
 
     fn install_asset_from_temp(
-        &self,
         temp_path: &Path,
         destination: &Path,
         temp_extension: &str,
@@ -146,8 +153,8 @@ impl<'a> Upgrader<'a> {
         if let Some(parent) = destination.parent()
             && !parent.exists()
         {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                ManagerError::from(std::io::Error::new(
+            fs::create_dir_all(parent).map_err(|e| {
+                ManagerError::from(io::Error::new(
                     e.kind(),
                     format!("创建目录 {} 失败：{}", parent.display(), e),
                 ))
@@ -155,15 +162,15 @@ impl<'a> Upgrader<'a> {
         }
 
         let tmp_new = destination.with_extension(temp_extension);
-        std::fs::copy(temp_path, &tmp_new).map_err(|e| {
-            ManagerError::from(std::io::Error::new(
+        fs::copy(temp_path, &tmp_new).map_err(|e| {
+            ManagerError::from(io::Error::new(
                 e.kind(),
                 format!("复制临时文件 {} 失败：{}", tmp_new.display(), e),
             ))
         })?;
 
         atomic_rename_or_copy(&tmp_new, destination).map_err(|e| {
-            ManagerError::from(std::io::Error::other(format!(
+            ManagerError::from(io::Error::other(format!(
                 "安装新版本 {} 失败：{}",
                 destination.display(),
                 e
@@ -172,7 +179,7 @@ impl<'a> Upgrader<'a> {
     }
 
     fn consolidate_installed_dlls(&self) -> Result<Option<(String, PathBuf)>> {
-        self.consolidate_installed_by_pattern(InstalledAssetPattern {
+        self.consolidate_installed_by_pattern(&InstalledAssetPattern {
             pattern: METAMYSTIA_PLUGIN_GLOB,
             matcher: VersionInfo::is_metamystia_filename,
             version_from_filename: VersionInfo::metamystia_version_from_filename,
@@ -181,7 +188,7 @@ impl<'a> Upgrader<'a> {
     }
 
     fn consolidate_installed_resourceex(&self) -> Result<Option<(String, PathBuf)>> {
-        self.consolidate_installed_by_pattern(InstalledAssetPattern {
+        self.consolidate_installed_by_pattern(&InstalledAssetPattern {
             pattern: RESOURCEEX_ZIP_GLOB,
             matcher: VersionInfo::is_resourceex_filename,
             version_from_filename: VersionInfo::resourceex_version_from_filename,
@@ -191,7 +198,7 @@ impl<'a> Upgrader<'a> {
 
     fn consolidate_installed_by_pattern(
         &self,
-        asset_pattern: InstalledAssetPattern<'_>,
+        asset_pattern: &InstalledAssetPattern<'_>,
     ) -> Result<Option<(String, PathBuf)>> {
         let pattern = self.game_root.join(asset_pattern.pattern);
         let Some(dir) = pattern.parent() else {
@@ -208,15 +215,13 @@ impl<'a> Upgrader<'a> {
             if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
                 let Some(version) = (asset_pattern.version_from_filename)(filename) else {
                     return Err(ManagerError::Other(format!(
-                        "升级扫描失败：无法从文件名解析版本：{}",
-                        filename
+                        "升级扫描失败：无法从文件名解析版本：{filename}"
                     )));
                 };
 
                 let Some(parsed_version) = Self::parse_numeric_version(&version) else {
                     return Err(ManagerError::Other(format!(
-                        "升级扫描失败：无法解析版本号：{}",
-                        filename
+                        "升级扫描失败：无法解析版本号：{filename}"
                     )));
                 };
 
@@ -273,7 +278,7 @@ impl<'a> Upgrader<'a> {
 
     fn read_bepinex_version(&self) -> Option<String> {
         let version_file = self.game_root.join(BEPINEX_VERSION_FILE);
-        std::fs::read_to_string(&version_file)
+        fs::read_to_string(&version_file)
             .ok()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
@@ -283,29 +288,25 @@ impl<'a> Upgrader<'a> {
     pub fn has_updates(&self, version_info: &VersionInfo) -> Result<(bool, bool, bool)> {
         let bep_needs = version_info
             .bepinex_version()
-            .ok()
-            .map(|latest| {
-                self.read_bepinex_version()
-                    .map(|cur| cur != latest)
-                    .unwrap_or(true)
-            })
-            .unwrap_or(false);
+            .is_ok_and(|latest| self.read_bepinex_version().is_none_or(|cur| cur != latest));
 
         let (dll_opt, res_opt) = self.get_installed_versions()?;
 
         let dll_needs = dll_opt
             .as_ref()
-            .map(|cur| !Self::versions_match(cur, version_info.latest_dll()))
-            .unwrap_or(false);
+            .is_some_and(|cur| !Self::versions_match(cur, version_info.latest_dll()));
         let res_needs = res_opt
             .as_ref()
-            .map(|cur| !Self::versions_match(cur, version_info.latest_resourceex()))
-            .unwrap_or(false);
+            .is_some_and(|cur| !Self::versions_match(cur, version_info.latest_resourceex()));
 
         Ok((bep_needs, dll_needs, res_needs))
     }
 
     /// 执行升级
+    #[allow(
+        clippy::too_many_lines,
+        reason = "升级流程按步骤线性推进，拆分步骤会让上下文参数来回传递"
+    )]
     pub fn upgrade(&self) -> Result<()> {
         report_event("Upgrade.Start", None);
 
@@ -314,13 +315,10 @@ impl<'a> Upgrader<'a> {
 
         let current_bepinex_version = self.read_bepinex_version();
         let (dll_opt, res_opt) = self.get_installed_versions()?;
-        let current_dll_version = match dll_opt {
-            Some(v) => v,
-            None => {
-                return Err(ManagerError::Other(
-                    "未找到已安装的 MetaMystia Mod，请先使用安装功能。".to_string(),
-                ));
-            }
+        let Some(current_dll_version) = dll_opt else {
+            return Err(ManagerError::Other(
+                "未找到已安装的 MetaMystia Mod，请先使用安装功能。".to_string(),
+            ));
         };
         let current_resourceex_version = res_opt.unwrap_or_default();
 
@@ -346,16 +344,10 @@ impl<'a> Upgrader<'a> {
         report_event("Upgrade.VersionInfo", Some(&version_info.to_string()));
 
         // 检查 BepInEx 是否需要升级
-        let new_bepinex_version = version_info.bepinex_version().ok().map(|s| s.to_string());
+        let new_bepinex_version = version_info.bepinex_version().ok().map(ToString::to_string);
         let bepinex_needs_upgrade = new_bepinex_version
             .as_ref()
-            .map(|new_ver| {
-                current_bepinex_version
-                    .as_ref()
-                    .map(|cur| cur != new_ver)
-                    .unwrap_or(true)
-            })
-            .unwrap_or(false);
+            .is_some_and(|new_ver| current_bepinex_version.as_ref() != Some(new_ver));
         if let Some(ref new_ver) = new_bepinex_version {
             self.ui.upgrade_display_current_and_latest_bepinex(
                 current_bepinex_version.as_deref().unwrap_or("未知"),
@@ -397,17 +389,12 @@ impl<'a> Upgrader<'a> {
                 .upgrade_detected_new_dll(&current_dll_version, new_dll_version)?;
 
             // 显示 GitHub Release Notes（获取新版本的发行说明）
-            match self
+            if let Ok(Some(_)) = self
                 .downloader
                 .fetch_and_display_github_release_notes(Some(new_dll_version))
+                && !self.ui.download_ask_continue_after_release_notes()?
             {
-                Ok(Some(_)) => {
-                    if !self.ui.download_ask_continue_after_release_notes()? {
-                        return Err(ManagerError::UserCancelled);
-                    }
-                }
-                Ok(None) => {}
-                Err(_) => {}
+                return Err(ManagerError::UserCancelled);
             }
         } else {
             self.ui.upgrade_dll_already_latest()?;
@@ -431,10 +418,7 @@ impl<'a> Upgrader<'a> {
         // 4. 下载新版本
 
         let (temp_dir, _temp_guard) = create_temp_dir_with_guard(&self.game_root).map_err(|e| {
-            ManagerError::from(std::io::Error::new(
-                e.kind(),
-                format!("创建临时目录失败：{}", e),
-            ))
+            ManagerError::from(io::Error::new(e.kind(), format!("创建临时目录失败：{e}")))
         })?;
 
         // 下载 BepInEx（仅当需要升级时）
@@ -518,7 +502,7 @@ impl<'a> Upgrader<'a> {
             self.ui.upgrade_installing_dll()?;
 
             let new_dll_path = plugins_dir.join(&filename);
-            self.install_asset_from_temp(&temp_path, &new_dll_path, "dll.tmp")?;
+            Self::install_asset_from_temp(&temp_path, &new_dll_path, "dll.tmp")?;
 
             self.ui.upgrade_install_success(&new_dll_path)?;
             report_event("Upgrade.Installed.DLL", Some(&filename));
@@ -541,7 +525,7 @@ impl<'a> Upgrader<'a> {
             self.ui.upgrade_installing_resourceex()?;
 
             let new_zip_path = resourceex_dir.join(&filename);
-            self.install_asset_from_temp(&temp_path, &new_zip_path, "zip.tmp")?;
+            Self::install_asset_from_temp(&temp_path, &new_zip_path, "zip.tmp")?;
 
             self.ui.upgrade_install_success(&new_zip_path)?;
             report_event("Upgrade.Installed.ResourceEx", Some(&filename));

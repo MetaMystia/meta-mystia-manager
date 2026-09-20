@@ -8,11 +8,12 @@ use crate::ui::Ui;
 
 use glob::{MatchOptions, glob_with};
 use std::{
+    fs, io,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
-fn case_insensitive_match_options() -> MatchOptions {
+const fn case_insensitive_match_options() -> MatchOptions {
     MatchOptions {
         case_sensitive: false,
         require_literal_separator: false,
@@ -35,7 +36,7 @@ fn ensure_game_not_running_for_path(path: &Path) -> Result<(), ManagerError> {
     Ok(())
 }
 
-fn ensure_owner_writable(metadata: &std::fs::Metadata) -> std::fs::Permissions {
+fn ensure_owner_writable(metadata: &fs::Metadata) -> fs::Permissions {
     let mut perms = metadata.permissions();
 
     #[cfg(unix)]
@@ -57,8 +58,8 @@ fn ensure_owner_writable(metadata: &std::fs::Metadata) -> std::fs::Permissions {
 #[cfg(windows)]
 const ERROR_SHARING_VIOLATION: i32 = 32;
 
-/// 将 io::Error 映射为更具体的 UninstallError
-pub fn map_io_error_to_uninstall_error(err: &std::io::Error, path: &Path) -> ManagerError {
+/// 将 `io::Error` 映射为更具体的 `UninstallError`
+pub fn map_io_error_to_uninstall_error(err: &io::Error, path: &Path) -> ManagerError {
     #[cfg(windows)]
     if let Some(code) = err.raw_os_error()
         && code == ERROR_SHARING_VIOLATION
@@ -66,7 +67,7 @@ pub fn map_io_error_to_uninstall_error(err: &std::io::Error, path: &Path) -> Man
         return ManagerError::FileInUse(path.display().to_string());
     }
 
-    ManagerError::from(std::io::Error::new(err.kind(), err.to_string()))
+    ManagerError::from(io::Error::new(err.kind(), err.to_string()))
 }
 
 /// 原子重命名或回退到 copy + remove
@@ -74,21 +75,21 @@ pub fn atomic_rename_or_copy(src: &Path, dst: &Path) -> Result<(), ManagerError>
     ensure_game_not_running_for_path(dst)?;
 
     if let Some(parent) = dst.parent() {
-        std::fs::create_dir_all(parent).map_err(ManagerError::from)?;
+        fs::create_dir_all(parent).map_err(ManagerError::from)?;
     }
 
-    match std::fs::rename(src, dst) {
-        Ok(_) => Ok(()),
+    match fs::rename(src, dst) {
+        Ok(()) => Ok(()),
         Err(rename_err) => {
             let mut tmp_path = dst.with_extension("tmp");
             let mut tmp_idx = 0;
             while tmp_path.exists() {
                 tmp_idx += 1;
-                tmp_path = dst.with_extension(format!("tmp{}", tmp_idx));
+                tmp_path = dst.with_extension(format!("tmp{tmp_idx}"));
             }
 
-            std::fs::copy(src, &tmp_path).map_err(|e| {
-                ManagerError::from(std::io::Error::other(format!(
+            fs::copy(src, &tmp_path).map_err(|e| {
+                ManagerError::from(io::Error::other(format!(
                     "重命名 {} 失败：{}；复制到临时文件 {} 失败：{}",
                     src.display(),
                     rename_err,
@@ -97,18 +98,18 @@ pub fn atomic_rename_or_copy(src: &Path, dst: &Path) -> Result<(), ManagerError>
                 )))
             })?;
 
-            if let Ok(f) = std::fs::OpenOptions::new().read(true).open(&tmp_path) {
+            if let Ok(f) = fs::OpenOptions::new().read(true).open(&tmp_path) {
                 let _ = f.sync_all();
             }
 
-            match std::fs::rename(&tmp_path, dst) {
-                Ok(_) => {
-                    let _ = std::fs::remove_file(src);
+            match fs::rename(&tmp_path, dst) {
+                Ok(()) => {
+                    let _ = fs::remove_file(src);
                     Ok(())
                 }
                 Err(e) => {
-                    let _ = std::fs::remove_file(&tmp_path);
-                    Err(ManagerError::from(std::io::Error::other(format!(
+                    let _ = fs::remove_file(&tmp_path);
+                    Err(ManagerError::from(io::Error::other(format!(
                         "重命名或替换目标 {} 失败：{}",
                         dst.display(),
                         e
@@ -122,7 +123,7 @@ pub fn atomic_rename_or_copy(src: &Path, dst: &Path) -> Result<(), ManagerError>
 pub fn write_bepinex_version_marker(game_root: &Path, version_info: &VersionInfo) {
     if let Ok(bep_version) = version_info.bepinex_version() {
         let version_file = game_root.join(BEPINEX_VERSION_FILE);
-        let _ = std::fs::write(&version_file, bep_version.as_bytes());
+        let _ = fs::write(&version_file, bep_version.as_bytes());
     }
 }
 
@@ -130,8 +131,8 @@ fn backup_with_index(path: &Path, ext_suffix: &str) -> Result<PathBuf, ManagerEr
     ensure_game_not_running_for_path(path)?;
 
     if !path.exists() {
-        return Err(ManagerError::from(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
+        return Err(ManagerError::from(io::Error::new(
+            io::ErrorKind::NotFound,
             format!("源路径不存在：{}", path.display()),
         )));
     }
@@ -141,7 +142,7 @@ fn backup_with_index(path: &Path, ext_suffix: &str) -> Result<PathBuf, ManagerEr
         let backup = if idx == 0 {
             path.with_extension(ext_suffix)
         } else {
-            path.with_extension(format!("{}.{}", ext_suffix, idx))
+            path.with_extension(format!("{ext_suffix}.{idx}"))
         };
 
         if backup.exists() {
@@ -150,7 +151,7 @@ fn backup_with_index(path: &Path, ext_suffix: &str) -> Result<PathBuf, ManagerEr
         }
 
         match atomic_rename_or_copy(path, &backup) {
-            Ok(_) => return Ok(backup),
+            Ok(()) => return Ok(backup),
             Err(e) => {
                 if backup.exists() {
                     idx += 1;
@@ -198,13 +199,13 @@ pub fn remove_glob_files(pattern: &Path) -> RemoveGlobResult {
 
             if entry.exists() {
                 let res = if entry.is_dir() {
-                    std::fs::remove_dir_all(&entry)
+                    fs::remove_dir_all(&entry)
                 } else {
-                    std::fs::remove_file(&entry)
+                    fs::remove_file(&entry)
                 };
 
                 match res {
-                    Ok(_) => removed.push(entry),
+                    Ok(()) => removed.push(entry),
                     Err(e) => failed.push((entry, ManagerError::from(e))),
                 }
             }
@@ -219,18 +220,18 @@ pub fn glob_matches_filtered<F>(pattern: &Path, matcher: F) -> Vec<PathBuf>
 where
     F: Fn(&Path) -> bool,
 {
-    let mut matches = Vec::new();
+    let mut matched_paths = Vec::new();
     let s = normalize_path_for_glob(pattern);
 
     if let Ok(entries) = glob_with(&s, case_insensitive_match_options()) {
         for entry in entries.flatten() {
             if entry.exists() && matcher(&entry) {
-                matches.push(entry);
+                matched_paths.push(entry);
             }
         }
     }
 
-    matches
+    matched_paths
 }
 
 /// 根据 glob 模式获取匹配的路径列表，并通过 matcher 进行额外过滤（仅对文件名部分进行过滤）
@@ -242,7 +243,7 @@ pub fn glob_matches_by_filename(pattern: &Path, matcher: fn(&str) -> bool) -> Ve
     })
 }
 
-/// 备份一组路径（使用 backup_with_index）
+/// 备份一组路径（使用 `backup_with_index`）
 pub fn backup_paths_with_index(
     paths: &[PathBuf],
     ext_suffix: &str,
@@ -338,25 +339,21 @@ pub fn execute_deletion(files: &[PathBuf], ui: &dyn Ui) -> Vec<DeletionResult> {
 
 /// 删除单个文件
 fn delete_file(path: &Path) -> DeletionResult {
-    delete_path(
-        path,
-        |path| std::fs::remove_file(path),
-        "执行删除后文件仍存在",
-    )
+    delete_path(path, |path| fs::remove_file(path), "执行删除后文件仍存在")
 }
 
 /// 删除目录
 fn delete_directory(path: &Path) -> DeletionResult {
     delete_path(
         path,
-        |path| std::fs::remove_dir_all(path),
+        |path| fs::remove_dir_all(path),
         "执行删除后文件夹仍存在",
     )
 }
 
 fn delete_path<F>(path: &Path, remove: F, still_exists_message: &str) -> DeletionResult
 where
-    F: Fn(&Path) -> std::io::Result<()>,
+    F: Fn(&Path) -> io::Result<()>,
 {
     if let Err(e) = ensure_game_not_running_for_path(path) {
         return deletion_failed(path, e);
@@ -367,7 +364,7 @@ where
     }
 
     match remove(path) {
-        Ok(_) => {
+        Ok(()) => {
             if path.exists() {
                 deletion_failed(path, ManagerError::Other(still_exists_message.to_string()))
             } else {
@@ -381,21 +378,21 @@ where
             }
 
             // 权限错误时尝试清除只读并重试一次
-            if e.kind() == std::io::ErrorKind::PermissionDenied
-                && let Ok(metadata) = std::fs::metadata(path)
+            if e.kind() == io::ErrorKind::PermissionDenied
+                && let Ok(metadata) = fs::metadata(path)
             {
                 let perms = ensure_owner_writable(&metadata);
-                let _ = std::fs::set_permissions(path, perms);
+                let _ = fs::set_permissions(path, perms);
                 if remove(path).is_ok() {
                     return deletion_success(path);
                 }
             }
 
             let error = match e.kind() {
-                std::io::ErrorKind::PermissionDenied => {
+                io::ErrorKind::PermissionDenied => {
                     ManagerError::PermissionDenied(path.display().to_string())
                 }
-                std::io::ErrorKind::NotFound => {
+                io::ErrorKind::NotFound => {
                     return deletion_skipped(path);
                 }
                 _ => map_io_error_to_uninstall_error(&e, path),

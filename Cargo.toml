@@ -5,6 +5,9 @@ authors = ["AnYiEE <i@anyi.in>"]
 edition = "2024"
 description = "A manager for MetaMystia Mod (https://github.com/MetaMikuAI/MetaMystia). Repository: https://github.com/AnYiEE/meta-mystia-manager"
 license = "AGPL-3.0-only"
+categories = ["command-line-utilities"]
+keywords = ["touhou", "mod-manager", "bepinex", "metamystia"]
+repository = "https://github.com/AnYiEE/meta-mystia-manager"
 
 [profile.release]
 codegen-units = 1
@@ -60,6 +63,13 @@ thiserror = "2.0"
 [build-dependencies]
 thunk-rs = { version = "0.3", features = ["win7"], default-features = false }
 winres = "0.1"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+multiple_crate_versions = { level = "allow", priority = 1 } # 非 Windows 平台的 native-tls 会引入 openssl（依赖 syn 2），本项目只构建 Windows
 
 [[bin]]
 name = "meta-mystia-manager"

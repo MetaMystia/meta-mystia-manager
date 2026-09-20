@@ -2,8 +2,58 @@ use crate::error::{ManagerError, Result};
 use crate::file_ops::atomic_rename_or_copy;
 use crate::metrics::report_event;
 
-use std::path::{Component, Path, PathBuf};
+use std::{
+    fs, io,
+    path::{Component, Path, PathBuf},
+};
 use zip::ZipArchive;
+
+/// 把 ZIP 条目内容写入目标路径（先写临时文件再原子替换）
+fn write_entry_to_file(entry: &mut impl io::Read, outpath: &Path) -> Result<()> {
+    if let Some(parent) = outpath.parent() {
+        fs::create_dir_all(parent).map_err(|e| {
+            ManagerError::from(io::Error::new(
+                e.kind(),
+                format!("创建父目录 {} 失败：{}", parent.display(), e),
+            ))
+        })?;
+    }
+
+    let mut tmp_path = outpath.with_extension("tmp");
+    let mut tmp_idx = 0;
+    while tmp_path.exists() {
+        tmp_idx += 1;
+        tmp_path = outpath.with_extension(format!("tmp{tmp_idx}"));
+    }
+
+    let mut tmp_file = fs::File::create(&tmp_path).map_err(|e| {
+        ManagerError::from(io::Error::new(
+            e.kind(),
+            format!("创建临时文件 {} 失败：{}", tmp_path.display(), e),
+        ))
+    })?;
+
+    if let Err(e) = io::copy(entry, &mut tmp_file) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(ManagerError::from(io::Error::new(
+            e.kind(),
+            format!("写入临时文件 {} 失败：{}", tmp_path.display(), e),
+        )));
+    }
+
+    if let Err(e) = atomic_rename_or_copy(&tmp_path, outpath) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(ManagerError::from(io::Error::other(format!(
+            "重命名或复制临时文件 {} 失败：{}",
+            tmp_path.display(),
+            e
+        ))));
+    }
+
+    let _ = fs::remove_file(&tmp_path);
+
+    Ok(())
+}
 
 /// 文件解压器
 pub struct Extractor;
@@ -30,10 +80,10 @@ impl Extractor {
     ) -> Result<Vec<PathBuf>> {
         report_event("Extract.Start", Some(&zip_path.display().to_string()));
 
-        let file = match std::fs::File::open(zip_path) {
+        let file = match fs::File::open(zip_path) {
             Ok(f) => f,
             Err(e) => {
-                return Err(ManagerError::from(std::io::Error::new(
+                return Err(ManagerError::from(io::Error::new(
                     e.kind(),
                     format!("打开 ZIP 文件 {} 失败：{}", zip_path.display(), e),
                 )));
@@ -47,7 +97,7 @@ impl Extractor {
                     "Extract.Failed.OpenArchive",
                     Some(&format!("{};err={}", zip_path.display(), e)),
                 );
-                return Err(ManagerError::ExtractFailed(format!("读取 ZIP 失败：{}", e)));
+                return Err(ManagerError::ExtractFailed(format!("读取 ZIP 失败：{e}")));
             }
         };
 
@@ -57,23 +107,21 @@ impl Extractor {
             let mut file = archive.by_index(i).map_err(|e| {
                 report_event(
                     "Extract.Entry.Failed.ReadEntry",
-                    Some(&format!("index:{};err={}", i, e)),
+                    Some(&format!("index:{i};err={e}")),
                 );
-                ManagerError::ExtractFailed(format!("读取条目失败（index {}）：{}", i, e))
+                ManagerError::ExtractFailed(format!("读取条目失败（index {i}）：{e}"))
             })?;
 
-            let file_path = match file.enclosed_name() {
-                Some(p) => p.to_path_buf(),
-                None => {
-                    report_event(
-                        "Extract.Entry.Failed.UnsafeEnclosedName",
-                        Some(&format!("index:{}", i)),
-                    );
-                    return Err(ManagerError::ExtractFailed(format!(
-                        "条目 {} 包含不安全的文件路径",
-                        i
-                    )));
-                }
+            let file_path = if let Some(p) = file.enclosed_name() {
+                p.clone()
+            } else {
+                report_event(
+                    "Extract.Entry.Failed.UnsafeEnclosedName",
+                    Some(&format!("index:{i}")),
+                );
+                return Err(ManagerError::ExtractFailed(format!(
+                    "条目 {i} 包含不安全的文件路径"
+                )));
             };
 
             if !Self::is_safe_path(&file_path) {
@@ -112,61 +160,15 @@ impl Extractor {
             let outpath = dest_dir.join(&file_path);
 
             if file.name().ends_with('/') {
-                std::fs::create_dir_all(&outpath).map_err(|e| {
-                    ManagerError::from(std::io::Error::new(
+                fs::create_dir_all(&outpath).map_err(|e| {
+                    ManagerError::from(io::Error::new(
                         e.kind(),
                         format!("创建目录 {} 失败：{}", outpath.display(), e),
                     ))
                 })?;
             } else {
-                if let Some(p) = outpath.parent() {
-                    std::fs::create_dir_all(p).map_err(|e| {
-                        ManagerError::from(std::io::Error::new(
-                            e.kind(),
-                            format!("创建父目录 {} 失败：{}", p.display(), e),
-                        ))
-                    })?;
-                }
-
-                let mut tmp_path = outpath.with_extension("tmp");
-
-                let mut tmp_idx = 0;
-                while tmp_path.exists() {
-                    tmp_idx += 1;
-                    tmp_path = outpath.with_extension(format!("tmp{}", tmp_idx));
-                }
-
-                let mut tmp_file = match std::fs::File::create(&tmp_path) {
-                    Ok(f) => f,
-                    Err(e) => {
-                        return Err(ManagerError::from(std::io::Error::new(
-                            e.kind(),
-                            format!("创建临时文件 {} 失败：{}", tmp_path.display(), e),
-                        )));
-                    }
-                };
-
-                if let Err(e) = std::io::copy(&mut file, &mut tmp_file) {
-                    return Err(ManagerError::from(std::io::Error::new(
-                        e.kind(),
-                        format!("写入临时文件 {} 失败：{}", tmp_path.display(), e),
-                    )));
-                }
-
-                match atomic_rename_or_copy(&tmp_path, &outpath) {
-                    Ok(_) => {
-                        let _ = std::fs::remove_file(&tmp_path);
-                        extracted_files.push(outpath);
-                    }
-                    Err(e) => {
-                        let _ = std::fs::remove_file(&tmp_path);
-                        return Err(ManagerError::from(std::io::Error::other(format!(
-                            "重命名或复制临时文件 {} 失败：{}",
-                            tmp_path.display(),
-                            e
-                        ))));
-                    }
-                }
+                write_entry_to_file(&mut file, &outpath)?;
+                extracted_files.push(outpath);
             }
         }
 
@@ -211,15 +213,15 @@ impl Extractor {
 
     fn copy_to_destination_atomically(src: &Path, dest: &Path, temp_extension: &str) -> Result<()> {
         let tmp_dest = dest.with_extension(temp_extension);
-        std::fs::copy(src, &tmp_dest).map_err(|e| {
-            ManagerError::from(std::io::Error::new(
+        fs::copy(src, &tmp_dest).map_err(|e| {
+            ManagerError::from(io::Error::new(
                 e.kind(),
                 format!("复制文件 {} 失败：{}", src.display(), e),
             ))
         })?;
 
         atomic_rename_or_copy(&tmp_dest, dest).map_err(|e| {
-            ManagerError::from(std::io::Error::other(format!(
+            ManagerError::from(io::Error::other(format!(
                 "安装 {} 失败：{}",
                 dest.display(),
                 e
@@ -255,7 +257,7 @@ impl Extractor {
         );
 
         match Self::copy_to_destination_atomically(dll_path, &dest, "dll.tmp") {
-            Ok(_) => {
+            Ok(()) => {
                 report_event(
                     "Deploy.MetaMystia.Success",
                     Some(&dest.display().to_string()),
@@ -271,8 +273,8 @@ impl Extractor {
         let resourceex_dir = game_root.join("ResourceEx");
 
         if !resourceex_dir.exists() {
-            std::fs::create_dir_all(&resourceex_dir).map_err(|e| {
-                ManagerError::from(std::io::Error::new(
+            fs::create_dir_all(&resourceex_dir).map_err(|e| {
+                ManagerError::from(io::Error::new(
                     e.kind(),
                     format!("创建目录 {} 失败：{}", resourceex_dir.display(), e),
                 ))
@@ -290,7 +292,7 @@ impl Extractor {
         );
 
         match Self::copy_to_destination_atomically(zip_path, &dest, "zip.tmp") {
-            Ok(_) => {
+            Ok(()) => {
                 report_event(
                     "Deploy.ResourceEx.Success",
                     Some(&dest.display().to_string()),

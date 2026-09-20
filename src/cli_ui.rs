@@ -13,29 +13,24 @@ pub struct CliUI {
     quiet: bool,
 }
 
+/// 输出到 stderr（不区分 quiet）
+fn stderr(msg: &str) {
+    eprintln!("{msg}");
+}
+
+/// CLI 模式下不支持的交互操作
+fn unsupported_interaction<T>(action: &str) -> Result<T> {
+    Err(ManagerError::Ui(format!("CLI not supported interaction: {action}")))
+}
+
 impl CliUI {
-    pub fn new(quiet: bool) -> Self {
+    pub const fn new(quiet: bool) -> Self {
         Self { quiet }
-    }
-
-    fn fixed_choice(&self, choice: bool) -> Result<bool> {
-        Ok(choice)
-    }
-
-    fn unsupported_interaction<T>(&self, action: &str) -> Result<T> {
-        Err(ManagerError::Ui(format!(
-            "CLI UI 不支持交互操作：{}",
-            action
-        )))
-    }
-
-    fn stderr(&self, msg: &str) {
-        eprintln!("{}", msg);
     }
 
     fn stdout(&self, msg: &str) {
         if !self.quiet {
-            println!("{}", msg);
+            println!("{msg}");
         }
     }
 }
@@ -47,13 +42,13 @@ impl Ui for CliUI {
 
     fn display_version(&self, manager_version: Option<&str>) -> Result<()> {
         if let Some(version) = manager_version {
-            self.stdout(&format!("Manager latest version: {}", version));
+            self.stdout(&format!("Manager latest version: {version}"));
         }
         Ok(())
     }
 
     fn display_game_running_warning(&self) -> Result<()> {
-        self.stderr("Game is currently running. Please close the game and try again.");
+        stderr("Game is currently running. Please close the game and try again.");
         Ok(())
     }
 
@@ -76,7 +71,7 @@ impl Ui for CliUI {
     }
 
     fn select_operation_mode(&self) -> Result<OperationMode> {
-        self.unsupported_interaction("select_operation_mode")
+        unsupported_interaction("select_operation_mode")
     }
 
     fn blank_line(&self) -> Result<()> {
@@ -93,12 +88,12 @@ impl Ui for CliUI {
     }
 
     fn warn(&self, text: &str) -> Result<()> {
-        self.stderr(&format!("Warning: {}", text));
+        stderr(&format!("Warning: {text}"));
         Ok(())
     }
 
     fn error(&self, text: &str) -> Result<()> {
-        self.stderr(&format!("Error: {}", text));
+        stderr(&format!("Error: {text}"));
         Ok(())
     }
 
@@ -113,11 +108,11 @@ impl Ui for CliUI {
     }
 
     fn path_confirm_use_steam_found(&self) -> Result<bool> {
-        self.fixed_choice(true)
+        Ok(true)
     }
 
     fn install_display_step(&self, step: usize, description: &str) -> Result<()> {
-        self.stdout(&format!("[Step {}] {}", step, description));
+        self.stdout(&format!("[Step {step}] {description}"));
         Ok(())
     }
 
@@ -144,15 +139,15 @@ impl Ui for CliUI {
     }
 
     fn install_confirm_overwrite(&self) -> Result<bool> {
-        self.fixed_choice(true)
+        Ok(true)
     }
 
     fn install_ask_install_resourceex(&self) -> Result<bool> {
-        self.unsupported_interaction("install_ask_install_resourceex")
+        unsupported_interaction("install_ask_install_resourceex")
     }
 
     fn install_ask_show_bepinex_console(&self) -> Result<bool> {
-        self.unsupported_interaction("install_ask_show_bepinex_console")
+        unsupported_interaction("install_ask_show_bepinex_console")
     }
 
     fn install_downloads_completed(&self) -> Result<()> {
@@ -166,8 +161,7 @@ impl Ui for CliUI {
 
     fn install_cleanup_result(&self, success_count: usize, failed_count: usize) -> Result<()> {
         self.stdout(&format!(
-            "Cleanup: {} succeeded, {} failed.",
-            success_count, failed_count
+            "Cleanup: {success_count} succeeded, {failed_count} failed."
         ));
         Ok(())
     }
@@ -183,7 +177,7 @@ impl Ui for CliUI {
     }
 
     fn upgrade_backup_failed(&self, err: &str) -> Result<()> {
-        self.stderr(&format!("Backup failed: {}", err));
+        stderr(&format!("Backup failed: {err}"));
         Ok(())
     }
 
@@ -193,7 +187,7 @@ impl Ui for CliUI {
     }
 
     fn upgrade_delete_failed(&self, path: &Path, err: &str) -> Result<()> {
-        self.stderr(&format!("Failed to delete {}: {}", path.display(), err));
+        stderr(&format!("Failed to delete {}: {}", path.display(), err));
         Ok(())
     }
 
@@ -212,17 +206,13 @@ impl Ui for CliUI {
         current: &str,
         latest: &str,
     ) -> Result<()> {
-        self.stdout(&format!(
-            "BepInEx - Current: {}, Latest: {}",
-            current, latest
-        ));
+        self.stdout(&format!("BepInEx - Current: {current}, Latest: {latest}"));
         Ok(())
     }
 
     fn upgrade_display_current_and_latest_dll(&self, current: &str, latest: &str) -> Result<()> {
         self.stdout(&format!(
-            "MetaMystia DLL - Current: {}, Latest: {}",
-            current, latest
+            "MetaMystia DLL - Current: {current}, Latest: {latest}"
         ));
         Ok(())
     }
@@ -233,8 +223,7 @@ impl Ui for CliUI {
         latest: &str,
     ) -> Result<()> {
         self.stdout(&format!(
-            "ResourceExample ZIP - Current: {}, Latest: {}",
-            current, latest
+            "ResourceExample ZIP - Current: {current}, Latest: {latest}"
         ));
         Ok(())
     }
@@ -256,8 +245,7 @@ impl Ui for CliUI {
 
     fn upgrade_detected_new_dll(&self, current: &str, new: &str) -> Result<()> {
         self.stdout(&format!(
-            "New MetaMystia DLL version available: {} -> {}",
-            current, new
+            "New MetaMystia DLL version available: {current} -> {new}"
         ));
         Ok(())
     }
@@ -318,7 +306,7 @@ impl Ui for CliUI {
     }
 
     fn uninstall_select_mode(&self) -> Result<UninstallMode> {
-        self.unsupported_interaction("uninstall_select_mode")
+        unsupported_interaction("uninstall_select_mode")
     }
 
     fn uninstall_no_files_found(&self) -> Result<()> {
@@ -332,11 +320,11 @@ impl Ui for CliUI {
     }
 
     fn uninstall_confirm_deletion(&self) -> Result<bool> {
-        self.fixed_choice(true)
+        Ok(true)
     }
 
     fn uninstall_files_in_use_warning(&self) -> Result<()> {
-        self.stderr("Warning: Some files are in use, will retry.");
+        stderr("Warning: Some files are in use, will retry.");
         Ok(())
     }
 
@@ -347,14 +335,13 @@ impl Ui for CliUI {
         attempts: usize,
     ) -> Result<()> {
         self.stdout(&format!(
-            "Waiting {} seconds before retry {}/{}...",
-            delay_secs, attempt, attempts
+            "Waiting {delay_secs} seconds before retry {attempt}/{attempts}..."
         ));
         Ok(())
     }
 
     fn uninstall_ask_elevate_permission(&self) -> Result<bool> {
-        self.fixed_choice(true)
+        Ok(true)
     }
 
     fn uninstall_restarting_elevated(&self) -> Result<()> {
@@ -363,7 +350,7 @@ impl Ui for CliUI {
     }
 
     fn uninstall_ask_retry_failures(&self) -> Result<bool> {
-        self.fixed_choice(true)
+        Ok(true)
     }
 
     fn uninstall_retrying_failed_items(&self) -> Result<()> {
@@ -376,22 +363,22 @@ impl Ui for CliUI {
     }
 
     fn deletion_display_progress(&self, current: usize, total: usize, path: &str) -> Result<()> {
-        self.stdout(&format!("[{}/{}] Deleting: {}", current, total, path));
+        self.stdout(&format!("[{current}/{total}] Deleting: {path}"));
         Ok(())
     }
 
     fn deletion_display_success(&self, path: &str) -> Result<()> {
-        self.stdout(&format!("Deleted: {}", path));
+        self.stdout(&format!("Deleted: {path}"));
         Ok(())
     }
 
     fn deletion_display_failure(&self, path: &str, error: &str) -> Result<()> {
-        self.stderr(&format!("Failed to delete {}: {}", path, error));
+        stderr(&format!("Failed to delete {path}: {error}"));
         Ok(())
     }
 
     fn deletion_display_skipped(&self, path: &str) -> Result<()> {
-        self.stdout(&format!("Skipped: {}", path));
+        self.stdout(&format!("Skipped: {path}"));
         Ok(())
     }
 
@@ -402,17 +389,16 @@ impl Ui for CliUI {
         skipped_count: usize,
     ) -> Result<()> {
         self.stdout(&format!(
-            "Summary: {} succeeded, {} failed, {} skipped.",
-            success_count, failed_count, skipped_count
+            "Summary: {success_count} succeeded, {failed_count} failed, {skipped_count} skipped."
         ));
         Ok(())
     }
 
     fn download_start(&self, filename: &str, total: Option<u64>) -> Result<usize> {
         if let Some(size) = total {
-            self.stdout(&format!("Downloading {} ({} bytes)...", filename, size));
+            self.stdout(&format!("Downloading {filename} ({size} bytes)..."));
         } else {
-            self.stdout(&format!("Downloading {}...", filename));
+            self.stdout(&format!("Downloading {filename}..."));
         }
         Ok(0)
     }
@@ -432,7 +418,7 @@ impl Ui for CliUI {
     }
 
     fn download_version_info_failed(&self, err: &str) -> Result<()> {
-        self.stderr(&format!("Failed to fetch version info: {}", err));
+        stderr(&format!("Failed to fetch version info: {err}"));
         Ok(())
     }
 
@@ -441,9 +427,8 @@ impl Ui for CliUI {
     }
 
     fn download_version_info_parse_failed(&self, err: &str, snippet: &str) -> Result<()> {
-        self.stderr(&format!(
-            "Failed to parse version info: {}\nSnippet: {}",
-            err, snippet
+        stderr(&format!(
+            "Failed to parse version info: {err}\nSnippet: {snippet}"
         ));
         Ok(())
     }
@@ -454,7 +439,7 @@ impl Ui for CliUI {
     }
 
     fn download_share_code_failed(&self, err: &str) -> Result<()> {
-        self.stderr(&format!("Failed to fetch share code: {}", err));
+        stderr(&format!("Failed to fetch share code: {err}"));
         Ok(())
     }
 
@@ -468,12 +453,12 @@ impl Ui for CliUI {
     }
 
     fn download_found_github_asset(&self, name: &str) -> Result<()> {
-        self.stdout(&format!("Found GitHub asset: {}", name));
+        self.stdout(&format!("Found GitHub asset: {name}"));
         Ok(())
     }
 
     fn download_github_dll_not_found(&self) -> Result<()> {
-        self.stderr("MetaMystia DLL not found on GitHub.");
+        stderr("MetaMystia DLL not found on GitHub.");
         Ok(())
     }
 
@@ -487,11 +472,11 @@ impl Ui for CliUI {
     }
 
     fn download_ask_continue_after_release_notes(&self) -> Result<bool> {
-        self.fixed_choice(true)
+        Ok(true)
     }
 
     fn download_switch_to_fallback(&self, reason: &str) -> Result<()> {
-        self.stdout(&format!("Switching to fallback source: {}", reason));
+        self.stdout(&format!("Switching to fallback source: {reason}"));
         Ok(())
     }
 
@@ -506,9 +491,8 @@ impl Ui for CliUI {
     }
 
     fn download_bepinex_primary_failed(&self, err: &str) -> Result<()> {
-        self.stderr(&format!(
-            "Failed to download BepInEx from primary source: {}",
-            err
+        stderr(&format!(
+            "Failed to download BepInEx from primary source: {err}"
         ));
         Ok(())
     }
@@ -522,23 +506,21 @@ impl Ui for CliUI {
         err: &str,
     ) -> Result<()> {
         self.stdout(&format!(
-            "Retrying {} ({}/{}) after {} seconds: {}",
-            op_desc, attempt, attempts, delay_secs, err
+            "Retrying {op_desc} ({attempt}/{attempts}) after {delay_secs} seconds: {err}"
         ));
         Ok(())
     }
 
     fn network_rate_limited(&self, secs: u64) -> Result<()> {
-        self.stdout(&format!("Rate limited, waiting {} seconds...", secs));
+        self.stdout(&format!("Rate limited, waiting {secs} seconds..."));
         Ok(())
     }
 
     fn manager_ask_self_update(&self, current_version: &str, latest_version: &str) -> Result<bool> {
         self.stdout(&format!(
-            "Manager update available: {} -> {}",
-            current_version, latest_version
+            "Manager update available: {current_version} -> {latest_version}"
         ));
-        self.fixed_choice(true)
+        Ok(true)
     }
 
     fn manager_update_starting(&self) -> Result<()> {
@@ -547,17 +529,17 @@ impl Ui for CliUI {
     }
 
     fn manager_update_failed(&self, err: &str) -> Result<()> {
-        self.stderr(&format!("Manager self-update failed: {}", err));
+        stderr(&format!("Manager self-update failed: {err}"));
         Ok(())
     }
 
     fn manager_prompt_manual_update(&self) -> Result<()> {
-        self.stderr("Please update the manager manually.");
+        stderr("Please update the manager manually.");
         Ok(())
     }
 
     fn select_version_ask_select(&self, _component: &str) -> Result<bool> {
-        self.fixed_choice(false)
+        Ok(false)
     }
 
     fn select_version_from_list(&self, _component: &str, _versions: &[String]) -> Result<usize> {
@@ -570,9 +552,8 @@ impl Ui for CliUI {
         version: &str,
         available: &[String],
     ) -> Result<()> {
-        self.stderr(&format!(
-            "Error: {} version \"{}\" is not available",
-            component, version
+        stderr(&format!(
+            "Error: {component} version \"{version}\" is not available"
         ));
 
         let display_count = min(10, available.len());
@@ -582,7 +563,7 @@ impl Ui for CliUI {
             "Latest 10 available versions:"
         };
 
-        self.stderr(&format!(
+        stderr(&format!(
             "{} {}",
             header,
             available[..display_count].join(", ")

@@ -111,7 +111,7 @@ pub trait Ui: Send + Sync {
     // 下载相关
     /// 开始一个下载任务，返回一个用于后续更新的 id
     fn download_start(&self, filename: &str, total: Option<u64>) -> Result<usize>;
-    /// 更新下载进度（传入 download_start 返回的 id）
+    /// 更新下载进度（传入 `download_start` 返回的 id）
     fn download_update(&self, id: usize, downloaded: u64) -> Result<()>;
     /// 完成下载任务（并显示完成信息）
     fn download_finish(&self, id: usize, message: &str) -> Result<()>;

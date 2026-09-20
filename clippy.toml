@@ -1,0 +1,3 @@
+# `clippy::doc_markdown` 会把驼峰命名的专有名词当成代码标识符要求加反引号，
+# 这里把它们加入白名单（`..` 表示保留 clippy 默认词表）。
+doc-valid-idents = ["BepInEx", "MetaMystia", "ResourceExample", "ResourceEx", ".."]

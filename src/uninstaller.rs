@@ -1,14 +1,31 @@
 use crate::config::{RetryConfig, UninstallMode};
 use crate::error::{ManagerError, Result};
 use crate::file_ops::{
-    DeletionStatus, count_results, execute_deletion, extract_failed_files, scan_existing_files,
+    DeletionResult, DeletionStatus, count_results, execute_deletion, extract_failed_files,
+    scan_existing_files,
 };
 use crate::metrics::report_event;
 use crate::permission::{elevate_and_restart, is_elevated};
 use crate::shutdown::run_shutdown;
 use crate::ui::Ui;
 
-use std::{collections::HashSet, path::PathBuf, thread::sleep, time::Duration};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    process,
+    thread::sleep,
+};
+
+/// 该路径是否仍因文件被占用而删除失败
+fn failed_in_use(results: &[DeletionResult], path: &Path) -> bool {
+    results
+        .iter()
+        .find(|r| r.path == path)
+        .is_some_and(|r| match &r.status {
+            DeletionStatus::Failed(err) => matches!(&**err, ManagerError::FileInUse(_)),
+            _ => false,
+        })
+}
 
 /// 卸载管理器
 pub struct Uninstaller<'a> {
@@ -17,8 +34,8 @@ pub struct Uninstaller<'a> {
 }
 
 impl<'a> Uninstaller<'a> {
-    pub fn new(game_root: PathBuf, ui: &'a dyn Ui) -> Result<Self> {
-        Ok(Self { game_root, ui })
+    pub const fn new(game_root: PathBuf, ui: &'a dyn Ui) -> Self {
+        Self { game_root, ui }
     }
 
     /// 执行卸载流程
@@ -26,11 +43,7 @@ impl<'a> Uninstaller<'a> {
         report_event("Uninstall.Start", None);
 
         // 1. 选择卸载模式（如果 mode 存在则使用，否则询问用户）
-        let mode = if let Some(m) = mode {
-            m
-        } else {
-            self.ui.uninstall_select_mode()?
-        };
+        let mode = mode.map_or_else(|| self.ui.uninstall_select_mode(), Ok)?;
         let mode_desc = mode.description();
         report_event("Uninstall.ModeSelected", Some(mode_desc));
 
@@ -54,7 +67,7 @@ impl<'a> Uninstaller<'a> {
         report_event("Uninstall.Confirmed", Some(mode_desc));
 
         // 5. 检查当前权限状态
-        let is_elevated = is_elevated()?;
+        let is_elevated = is_elevated();
 
         // 6. 执行删除操作
         let mut all_results = execute_deletion(&existing_files, self.ui);
@@ -85,51 +98,10 @@ impl<'a> Uninstaller<'a> {
                 }
             }
 
-            if !in_use_failures.is_empty() {
-                self.ui.uninstall_files_in_use_warning()?;
-
-                let cfg = RetryConfig::uninstall();
-                let mut still_in_use = in_use_failures.clone();
-
-                for attempt in 0..cfg.attempts {
-                    if still_in_use.is_empty() {
-                        break;
-                    }
-
-                    let raw = (cfg.base_delay_secs as f64) * cfg.multiplier.powi(attempt as i32);
-                    let delay_secs = raw.min(cfg.max_delay_secs as f64).ceil() as u64;
-
-                    self.ui
-                        .uninstall_wait_before_retry(delay_secs, attempt + 1, cfg.attempts)?;
-
-                    sleep(Duration::from_secs(delay_secs));
-
-                    let retry_results = execute_deletion(&still_in_use, self.ui);
-
-                    all_results.retain(|r| !still_in_use.contains(&r.path));
-                    all_results.extend(retry_results.clone());
-
-                    still_in_use = extract_failed_files(&all_results)
-                        .into_iter()
-                        .filter(|p| {
-                            if let Some(r) = all_results.iter().find(|r| &r.path == p) {
-                                match &r.status {
-                                    DeletionStatus::Failed(err) => {
-                                        matches!(&**err, ManagerError::FileInUse(_))
-                                    }
-                                    _ => false,
-                                }
-                            } else {
-                                false
-                            }
-                        })
-                        .collect();
-                }
-
-                let failed_files_after_in_use = extract_failed_files(&all_results);
-                if failed_files_after_in_use.is_empty() {
-                    break;
-                }
+            if !in_use_failures.is_empty()
+                && self.retry_in_use_files(&in_use_failures, &mut all_results)?
+            {
+                break;
             }
 
             let has_permission_issue = all_results.iter().any(|r| match &r.status {
@@ -141,7 +113,7 @@ impl<'a> Uninstaller<'a> {
                 elevate_and_restart()?;
                 self.ui.uninstall_restarting_elevated()?;
                 run_shutdown();
-                std::process::exit(0);
+                process::exit(0);
             }
 
             if !self.ui.uninstall_ask_retry_failures()? {
@@ -180,11 +152,47 @@ impl<'a> Uninstaller<'a> {
         report_event(
             "Uninstall.Finished",
             Some(&format!(
-                "success:{};failed:{};skipped:{}",
-                success, failed, skipped
+                "success:{success};failed:{failed};skipped:{skipped}"
             )),
         );
 
         Ok(())
+    }
+
+    /// 对「文件被占用」的失败项按退避策略重试删除
+    ///
+    /// 返回是否已无任何失败项。
+    fn retry_in_use_files(
+        &self,
+        files: &[PathBuf],
+        all_results: &mut Vec<DeletionResult>,
+    ) -> Result<bool> {
+        self.ui.uninstall_files_in_use_warning()?;
+
+        let cfg = RetryConfig::uninstall();
+        let mut still_in_use = files.to_vec();
+
+        for attempt in 0..cfg.attempts {
+            if still_in_use.is_empty() {
+                break;
+            }
+
+            let delay = cfg.delay(attempt);
+            self.ui
+                .uninstall_wait_before_retry(delay.as_secs(), attempt + 1, cfg.attempts)?;
+            sleep(delay);
+
+            let retry_results = execute_deletion(&still_in_use, self.ui);
+
+            all_results.retain(|r| !still_in_use.contains(&r.path));
+            all_results.extend(retry_results);
+
+            still_in_use = extract_failed_files(all_results)
+                .into_iter()
+                .filter(|p| failed_in_use(all_results, p))
+                .collect();
+        }
+
+        Ok(extract_failed_files(all_results).is_empty())
     }
 }

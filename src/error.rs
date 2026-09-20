@@ -1,5 +1,6 @@
 use crate::metrics::report_event;
 
+use std::io;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -35,7 +36,7 @@ pub enum ManagerError {
     InvalidVersionInfo,
 
     #[error("IO 错误：{0}")]
-    Io(#[source] std::io::Error),
+    Io(#[source] io::Error),
 
     #[error("UI 错误：{0}")]
     Ui(String),
@@ -51,15 +52,22 @@ impl From<dialoguer::Error> for ManagerError {
     fn from(err: dialoguer::Error) -> Self {
         let s = err.to_string();
         report_event("Error.From.Ui", Some(&s));
-        ManagerError::Ui(s)
+        Self::Ui(s)
     }
 }
 
-impl From<std::io::Error> for ManagerError {
-    fn from(err: std::io::Error) -> Self {
+impl From<ureq::Error> for ManagerError {
+    /// 传输层错误；4xx/5xx 由 `net::check_response_status` 处理，不会走到这里
+    fn from(err: ureq::Error) -> Self {
+        Self::NetworkError(format!("请求失败：{err}"))
+    }
+}
+
+impl From<io::Error> for ManagerError {
+    fn from(err: io::Error) -> Self {
         let s = err.to_string();
         report_event("Error.From.Io", Some(&s));
-        ManagerError::Io(err)
+        Self::Io(err)
     }
 }
 

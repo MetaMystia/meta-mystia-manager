@@ -3,7 +3,10 @@ use crate::metrics::report_event;
 
 use serde::Deserialize;
 
-use std::collections::HashSet;
+use std::{
+    collections::HashSet,
+    fmt::{Display, Formatter},
+};
 
 #[derive(Clone, Deserialize)]
 pub struct VersionInfo {
@@ -65,7 +68,7 @@ impl VersionInfo {
         let parts = Self::strict_numeric_version_parts(&version)?;
 
         match parts.as_slice() {
-            [major, minor, patch] => Some(format!("{}.{}.{}", major, minor, patch)),
+            [major, minor, patch] => Some(format!("{major}.{minor}.{patch}")),
             _ => None,
         }
     }
@@ -158,7 +161,7 @@ impl VersionInfo {
 
     fn matches_backup_filename(filename: &str, suffix: &str, matcher: fn(&str) -> bool) -> bool {
         let lower = filename.trim().to_ascii_lowercase();
-        let marker = format!("{}.old", suffix);
+        let marker = format!("{suffix}.old");
         let Some((base, tail)) = lower.split_once(&marker) else {
             return false;
         };
@@ -173,7 +176,7 @@ impl VersionInfo {
             }
         }
 
-        let original = format!("{}{}", base, suffix);
+        let original = format!("{base}{suffix}");
         matcher(&original)
     }
 
@@ -194,7 +197,7 @@ impl VersionInfo {
         self.bep_in_ex
             .split('#')
             .nth(1)
-            .map(|s| s.trim())
+            .map(str::trim)
             .ok_or_else(|| {
                 report_event("Model.VersionInfo.Invalid", Some("bepinex_filename"));
                 ManagerError::InvalidVersionInfo
@@ -206,7 +209,7 @@ impl VersionInfo {
         self.bep_in_ex
             .split('#')
             .next()
-            .map(|s| s.trim())
+            .map(str::trim)
             .ok_or_else(|| {
                 report_event("Model.VersionInfo.Invalid", Some("bepinex_version"));
                 ManagerError::InvalidVersionInfo
@@ -217,14 +220,14 @@ impl VersionInfo {
     pub fn metamystia_filename(version: &str) -> String {
         let version = Self::normalize_canonical_version(version)
             .unwrap_or_else(|| Self::normalize_version(version));
-        format!("MetaMystia-v{}.dll", version)
+        format!("MetaMystia-v{version}.dll")
     }
 
     /// ResourceExample ZIP 文件名
     pub fn resourceex_filename(version: &str) -> String {
         let version = Self::normalize_canonical_version(version)
             .unwrap_or_else(|| Self::normalize_version(version));
-        format!("ResourceExample-v{}.zip", version)
+        format!("ResourceExample-v{version}.zip")
     }
 
     /// MetaMystia Manager 可执行文件名
@@ -233,14 +236,14 @@ impl VersionInfo {
     }
 }
 
-impl std::fmt::Display for VersionInfo {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for VersionInfo {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
             "BepInEx: {}, dll: {}, zip: {}",
             self.bep_in_ex.trim(),
-            self.dlls.first().map(|s| s.trim()).unwrap_or(""),
-            self.zips.first().map(|s| s.trim()).unwrap_or("")
+            self.dlls.first().map_or("", |s| s.trim()),
+            self.zips.first().map_or("", |s| s.trim())
         )
     }
 }

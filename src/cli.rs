@@ -11,6 +11,10 @@ use std::path::PathBuf;
     ArgGroup::new("operation")
         .args(&["install", "upgrade", "uninstall"])
 ))]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "命令行开关，每个布尔字段对应一个 flag"
+)]
 pub struct Cli {
     /// Specify the game root directory path (default: auto-detect or current directory).
     #[arg(short = 'p', long = "path", value_name = "PATH")]
@@ -73,8 +77,8 @@ pub enum UninstallModeArg {
 impl From<UninstallModeArg> for UninstallMode {
     fn from(mode: UninstallModeArg) -> Self {
         match mode {
-            UninstallModeArg::Light => UninstallMode::Light,
-            UninstallModeArg::Full => UninstallMode::Full,
+            UninstallModeArg::Light => Self::Light,
+            UninstallModeArg::Full => Self::Full,
         }
     }
 }
@@ -103,7 +107,7 @@ pub enum CliOperation {
 }
 
 impl Cli {
-    /// 将命令行参数转换为 CliConfig
+    /// 将命令行参数转换为 `CliConfig`
     pub fn to_config(&self) -> Option<CliConfig> {
         let operation = if self.install {
             Some(CliOperation::Install(InstallConfig {

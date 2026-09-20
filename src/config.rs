@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 pub const GAME_EXECUTABLE: &str = "Touhou Mystia Izakaya.exe";
 pub const GAME_PROCESS_NAME: &str = "Touhou Mystia Izakaya.exe";
 pub const GAME_STEAM_APP_ID: u32 = 1_584_090;
@@ -47,20 +49,18 @@ impl UninstallMode {
     ];
 
     /// 获取卸载模式描述
-    pub fn description(&self) -> &str {
+    pub const fn description(&self) -> &str {
         match self {
-            UninstallMode::Light => {
-                "仅移除 MetaMystia 相关文件（保留 BepInEx 框架和其他 Mod 相关文件）"
-            }
-            UninstallMode::Full => "移除所有和 Mod 有关的文件（还原为原版游戏）",
+            Self::Light => "仅移除 MetaMystia 相关文件（保留 BepInEx 框架和其他 Mod 相关文件）",
+            Self::Full => "移除所有和 Mod 有关的文件（还原为原版游戏）",
         }
     }
 
     /// 获取卸载目标列表（模式字符串，是否为目录）
-    pub fn targets(self) -> &'static [(&'static str, bool)] {
+    pub const fn targets(self) -> &'static [(&'static str, bool)] {
         match self {
-            UninstallMode::Light => Self::LIGHT_TARGETS,
-            UninstallMode::Full => Self::FULL_TARGETS,
+            Self::Light => Self::LIGHT_TARGETS,
+            Self::Full => Self::FULL_TARGETS,
         }
     }
 }
@@ -106,5 +106,21 @@ impl RetryConfig {
             multiplier: 2.0,
             max_delay_secs: 60,
         }
+    }
+
+    /// 第 `attempt` 次重试（从 0 开始）前的等待时长
+    ///
+    /// 即 `base_delay_secs * multiplier^attempt`，并以 `max_delay_secs` 为上限。
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "退避时长最多几十秒，f64 足以精确表示"
+    )]
+    pub fn delay(&self, attempt: usize) -> Duration {
+        let exponent = i32::try_from(attempt).unwrap_or(i32::MAX);
+        let secs = (self.base_delay_secs as f64 * self.multiplier.powi(exponent))
+            .min(self.max_delay_secs as f64)
+            .ceil();
+
+        Duration::from_secs_f64(secs)
     }
 }

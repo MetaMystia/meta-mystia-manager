@@ -3,10 +3,11 @@ use crate::metrics;
 use std::{
     mem::take,
     panic::{AssertUnwindSafe, catch_unwind},
+    process,
     sync::{
         Mutex, Once, OnceLock,
         atomic::{AtomicBool, Ordering},
-        mpsc::{RecvTimeoutError, channel},
+        mpsc::channel,
     },
     thread::spawn,
     time::{Duration, Instant},
@@ -35,7 +36,7 @@ unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> i32 {
             | CTRL_SHUTDOWN_EVENT
     ) {
         run_shutdown();
-        std::process::exit(0);
+        process::exit(0);
     } else {
         0
     }
@@ -81,18 +82,16 @@ pub fn run_shutdown() {
     metrics::report_event("Shutdown", None);
 
     let to = SHUTDOWN_TIMEOUT;
-    let callbacks: Vec<CleanupCallback> = if let Some(m) = CALLBACKS.get() {
+    let callbacks: Vec<CleanupCallback> = CALLBACKS.get().map_or_else(Vec::new, |m| {
         let mut guard = match m.lock() {
             Ok(g) => g,
             Err(e) => e.into_inner(),
         };
         take(&mut *guard).into_iter().flatten().collect()
-    } else {
-        Vec::new()
-    };
+    });
 
     if callbacks.is_empty() {
-        let _ = metrics::shutdown(Some(to));
+        metrics::shutdown(Some(to));
         return;
     }
 
@@ -115,29 +114,18 @@ pub fn run_shutdown() {
     let mut completed = 0;
 
     while completed < total {
-        let now = Instant::now();
-        if now >= deadline {
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
             break;
-        }
+        };
 
-        let remaining = deadline - now;
         match rx.recv_timeout(remaining) {
             Ok(_idx) => completed += 1,
-            Err(RecvTimeoutError::Timeout) => {
-                break;
-            }
-            Err(_) => {
-                break;
-            }
+            Err(_) => break,
         }
     }
 
     let elapsed = start.elapsed();
-    let remaining = if elapsed >= to {
-        Duration::from_secs(0)
-    } else {
-        to - elapsed
-    };
+    let remaining = to.checked_sub(elapsed).unwrap_or(Duration::ZERO);
 
-    let _ = metrics::shutdown(Some(remaining));
+    metrics::shutdown(Some(remaining));
 }
