@@ -286,14 +286,23 @@ impl<'a> Installer<'a> {
         // 下载 MetaMystia DLL
         let dll_path = temp_dir.join(VersionInfo::metamystia_filename(&dll_version));
         let try_github = VersionInfo::versions_match(&dll_version, version_info.latest_dll());
-        self.downloader
-            .download_metamystia(&share_code, &dll_version, &dll_path, try_github)?;
+        self.downloader.download_metamystia(
+            &share_code,
+            &dll_version,
+            &dll_path,
+            version_info.paths.dll.as_deref(),
+            try_github,
+        )?;
 
         // 下载 ResourceExample ZIP
         let resourceex_path = if let Some(ref version) = resourceex_version {
             let path = temp_dir.join(VersionInfo::resourceex_filename(version));
-            self.downloader
-                .download_resourceex(&share_code, version, &path)?;
+            self.downloader.download_resourceex(
+                &share_code,
+                version,
+                &path,
+                version_info.paths.zip.as_deref(),
+            )?;
             Some(path)
         } else {
             None

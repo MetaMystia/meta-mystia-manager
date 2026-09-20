@@ -14,7 +14,17 @@ pub struct VersionInfo {
     pub bep_in_ex: String,
     pub manager: String,
     pub dlls: Vec<String>,
+    pub paths: DownloadPaths,
     pub zips: Vec<String>,
+}
+
+#[derive(Clone, Deserialize)]
+pub struct DownloadPaths {
+    #[serde(rename = "bepInEx")]
+    pub bep_in_ex: Option<String>,
+    pub dll: Option<String>,
+    pub manager: Option<String>,
+    pub zip: Option<String>,
 }
 
 impl VersionInfo {

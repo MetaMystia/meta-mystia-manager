@@ -442,8 +442,13 @@ impl<'a> Upgrader<'a> {
 
             self.ui.upgrade_downloading_dll()?;
 
-            self.downloader
-                .download_metamystia(&share_code, new_dll_version, &path, true)?;
+            self.downloader.download_metamystia(
+                &share_code,
+                new_dll_version,
+                &path,
+                version_info.paths.dll.as_deref(),
+                true,
+            )?;
 
             Some((path, new_dll_filename))
         } else {
@@ -457,8 +462,12 @@ impl<'a> Upgrader<'a> {
 
             self.ui.upgrade_downloading_resourceex()?;
 
-            self.downloader
-                .download_resourceex(&share_code, new_resourceex_version, &path)?;
+            self.downloader.download_resourceex(
+                &share_code,
+                new_resourceex_version,
+                &path,
+                version_info.paths.zip.as_deref(),
+            )?;
 
             Some((path, resourceex_filename))
         } else {

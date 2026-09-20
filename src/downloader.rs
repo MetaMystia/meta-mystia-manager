@@ -169,8 +169,12 @@ impl<'a> Downloader<'a> {
         }
     }
 
-    fn file_api_url(share_code: &str, filename: &str) -> String {
-        format!("{FILE_API}/{share_code}/{filename}")
+    /// 分享目录 base；`category` 为 `None` 表示扁平路径
+    fn file_api_base(share_code: &str, category: Option<&str>) -> String {
+        category.map_or_else(
+            || format!("{FILE_API}/{share_code}"),
+            |category| format!("{FILE_API}/{share_code}/{category}"),
+        )
     }
 
     fn parse_share_code_from_url(url: &str) -> Option<String> {
@@ -472,14 +476,14 @@ impl<'a> Downloader<'a> {
 
     fn download_share_code_candidates(
         &self,
-        share_code: &str,
+        base_url: &str,
         filenames: &[String],
         dest: &Path,
     ) -> Result<String> {
         let mut last_err = None;
 
         for filename in filenames {
-            let url = Self::file_api_url(share_code, filename);
+            let url = format!("{base_url}/{filename}");
 
             match self.download_file_with_progress(&url, dest, None, true) {
                 Ok(()) => return Ok(filename.clone()),
@@ -493,14 +497,14 @@ impl<'a> Downloader<'a> {
 
     fn download_share_code_asset_with_events(
         &self,
-        share_code: &str,
+        base_url: &str,
         filenames: &[String],
         dest: &Path,
         version: &str,
         success_event: &str,
         failed_event: &str,
     ) -> Result<String> {
-        match self.download_share_code_candidates(share_code, filenames, dest) {
+        match self.download_share_code_candidates(base_url, filenames, dest) {
             Ok(filename) => {
                 report_event(
                     success_event,
@@ -763,16 +767,18 @@ impl<'a> Downloader<'a> {
         share_code: &str,
         version: &str,
         dest: &Path,
+        category: Option<&str>,
         try_github: bool,
     ) -> Result<()> {
         report_event("Download.Metamystia.Start", Some(version));
 
         let fallback_filenames = [VersionInfo::metamystia_filename(version)];
+        let base_url = Self::file_api_base(share_code, category);
 
         if !try_github {
             return self
                 .download_share_code_asset_with_events(
-                    share_code,
+                    &base_url,
                     &fallback_filenames,
                     dest,
                     version,
@@ -797,7 +803,7 @@ impl<'a> Downloader<'a> {
                 report_event("Download.Metamystia.Failed.GitHub", Some(&format!("{e}")));
 
                 self.download_share_code_asset_with_events(
-                    share_code,
+                    &base_url,
                     &fallback_filenames,
                     dest,
                     version,
@@ -817,7 +823,7 @@ impl<'a> Downloader<'a> {
             report_event("Download.Metamystia.GitHubUrlFailed", None);
 
             self.download_share_code_asset_with_events(
-                share_code,
+                &base_url,
                 &fallback_filenames,
                 dest,
                 version,
@@ -829,13 +835,20 @@ impl<'a> Downloader<'a> {
     }
 
     /// 下载 ResourceExample ZIP
-    pub fn download_resourceex(&self, share_code: &str, version: &str, dest: &Path) -> Result<()> {
+    pub fn download_resourceex(
+        &self,
+        share_code: &str,
+        version: &str,
+        dest: &Path,
+        category: Option<&str>,
+    ) -> Result<()> {
         report_event("Download.ResourceEx.Start", Some(version));
 
         let filenames = [VersionInfo::resourceex_filename(version)];
+        let base_url = Self::file_api_base(share_code, category);
 
         self.download_share_code_asset_with_events(
-            share_code,
+            &base_url,
             &filenames,
             dest,
             version,
@@ -891,8 +904,11 @@ impl<'a> Downloader<'a> {
 
                 let share_code = self.get_share_code()?;
                 let fallback_filenames = [filename_with_version];
+                let base_url =
+                    Self::file_api_base(&share_code, version_info.paths.bep_in_ex.as_deref());
+
                 self.download_share_code_asset_with_events(
-                    &share_code,
+                    &base_url,
                     &fallback_filenames,
                     dest,
                     version,
@@ -912,8 +928,11 @@ impl<'a> Downloader<'a> {
 
             let share_code = self.get_share_code()?;
             let fallback_filenames = [filename_with_version];
+            let base_url =
+                Self::file_api_base(&share_code, version_info.paths.bep_in_ex.as_deref());
+
             self.download_share_code_asset_with_events(
-                &share_code,
+                &base_url,
                 &fallback_filenames,
                 dest,
                 version,
@@ -931,7 +950,8 @@ impl<'a> Downloader<'a> {
         report_event("Download.Manager.Start", Some(&version_info.manager));
 
         let share_code = self.get_share_code()?;
-        let url = Self::file_api_url(&share_code, &filename);
+        let base_url = Self::file_api_base(&share_code, version_info.paths.manager.as_deref());
+        let url = format!("{base_url}/{filename}");
 
         match self.download_file_with_progress(&url, dest, None, true) {
             Ok(()) => {

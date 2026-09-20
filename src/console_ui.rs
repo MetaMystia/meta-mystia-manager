@@ -234,7 +234,6 @@ impl Ui for ConsoleUI {
         metamystia_installed: bool,
         resourceex_installed: bool,
     ) -> Result<()> {
-        println!();
         println!("{}", style("警告：检测到已安装的组件").yellow());
         println!();
 
@@ -354,7 +353,6 @@ impl Ui for ConsoleUI {
     }
 
     fn upgrade_checking_installed_version(&self) -> Result<()> {
-        println!();
         println!("正在检查当前安装的版本...");
         Ok(())
     }
