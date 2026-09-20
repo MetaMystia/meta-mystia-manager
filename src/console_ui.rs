@@ -1026,6 +1026,10 @@ impl Ui for ConsoleUI {
 
         Ok(())
     }
+
+    fn sso_ask_open_browser(&self) -> Result<bool> {
+        Self::confirm_with_event(" 是否打开浏览器登录？", false, "UI.Sso.OpenBrowser.Confirm")
+    }
 }
 
 fn print_markdown(text: &str) {

@@ -7,7 +7,7 @@ use std::{
     env,
     process::Command,
     sync::{
-        Mutex, OnceLock,
+        Mutex, OnceLock, PoisonError,
         mpsc::{RecvTimeoutError, Sender, channel},
     },
     thread::{JoinHandle, spawn},
@@ -18,11 +18,17 @@ const ID_SITE: &str = "13";
 const TRACKING_ENDPOINT: &str = "https://track.izakaya.cc/api.php";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
-fn build_tracking_url(user_id: &str, params: &HashMap<&str, String>) -> String {
+fn build_tracking_url(
+    visitor_id: &str,
+    account_user_id: Option<&str>,
+    params: &HashMap<&str, String>,
+) -> String {
+    let user_id = account_user_id.unwrap_or(visitor_id);
+
     let mut base = vec![
         ("idsite".to_string(), ID_SITE.to_string()),
         ("rec".to_string(), "1".to_string()),
-        ("_id".to_string(), user_id.to_string()),
+        ("_id".to_string(), visitor_id.to_string()),
         ("uid".to_string(), user_id.to_string()),
     ];
 
@@ -87,6 +93,22 @@ pub fn get_user_id() -> String {
             md5_hex(&combined)
         })
         .clone()
+}
+
+static ACCOUNT_USER_ID: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
+pub fn set_account_user_id(user_id: &str) {
+    let slot = ACCOUNT_USER_ID.get_or_init(|| Mutex::new(None));
+    *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(user_id.to_string());
+}
+
+fn get_account_user_id() -> Option<String> {
+    let slot = ACCOUNT_USER_ID
+        .get()?
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+
+    slot.clone()
 }
 
 static CACHED_AGENT: OnceLock<ureq::Agent> = OnceLock::new();
@@ -178,7 +200,8 @@ pub fn report_event(action: &str, name: Option<&str>) {
         return;
     }
 
-    let user_id = get_user_id();
+    let visitor_id = get_user_id();
+    let account_user_id = get_account_user_id();
 
     let mut params: HashMap<&str, String> = HashMap::new();
     params.insert("ca", "1".to_string());
@@ -188,6 +211,6 @@ pub fn report_event(action: &str, name: Option<&str>) {
         params.insert("e_n", n.to_string());
     }
 
-    let url = build_tracking_url(&user_id, &params);
+    let url = build_tracking_url(&visitor_id, account_user_id.as_deref(), &params);
     send_tracking_request(url);
 }

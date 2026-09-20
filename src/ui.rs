@@ -163,4 +163,8 @@ pub trait Ui: Send + Sync {
         version: &str,
         available: &[String],
     ) -> Result<()>;
+
+    // 账号登录相关
+    /// 询问是否现在打开浏览器完成账号登录
+    fn sso_ask_open_browser(&self) -> Result<bool>;
 }

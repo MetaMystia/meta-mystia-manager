@@ -29,9 +29,12 @@ md5 = "0.8"
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_Security",
+  "Win32_Security_Cryptography",
   "Win32_System_Diagnostics_ToolHelp",
   "Win32_System_Registry",
   "Win32_System_Threading",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
 ] }
 
 # HTTP 客户端
@@ -40,6 +43,9 @@ native-tls = "0.2"
 
 # URL 编码
 percent-encoding = "2.3"
+
+# Base64 编码
+base64 = "0.23"
 
 # 序列化
 serde = { version = "1.0", features = ["derive"] }

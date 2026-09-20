@@ -20,7 +20,9 @@ fn stderr(msg: &str) {
 
 /// CLI 模式下不支持的交互操作
 fn unsupported_interaction<T>(action: &str) -> Result<T> {
-    Err(ManagerError::Ui(format!("CLI not supported interaction: {action}")))
+    Err(ManagerError::Ui(format!(
+        "CLI not supported interaction: {action}"
+    )))
 }
 
 impl CliUI {
@@ -569,5 +571,9 @@ impl Ui for CliUI {
             available[..display_count].join(", ")
         ));
         Ok(())
+    }
+
+    fn sso_ask_open_browser(&self) -> Result<bool> {
+        unsupported_interaction("sso_ask_open_browser")
     }
 }

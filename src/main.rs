@@ -13,6 +13,7 @@ mod model;
 mod net;
 mod permission;
 mod shutdown;
+mod sso;
 mod temp_dir;
 mod ui;
 mod uninstaller;
@@ -158,8 +159,19 @@ fn run(ui: &dyn Ui) -> Result<()> {
         ui.display_available_updates(bep_needs, dll_needs, res_needs)?;
     }
 
-    // 5. 选择操作模式
-    let operation = ui.select_operation_mode()?;
+    // 5. 选择操作模式（安装/升级需要先完成账号登录；用户放弃登录时回到菜单）
+    let operation = loop {
+        let operation = ui.select_operation_mode()?;
+
+        if matches!(operation, OperationMode::Install | OperationMode::Upgrade)
+            && !sso::ensure_logged_in(ui)?
+        {
+            continue;
+        }
+
+        break operation;
+    };
+
     match operation {
         OperationMode::Install => run_install(game_root, ui, None),
         OperationMode::Upgrade => run_upgrade(game_root, ui),
