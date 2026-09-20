@@ -1,9 +1,26 @@
 ---
 name: SubRunner
-description: 'Use when: a complex task needs a stronger, slower model; a delegated subtask requires deeper reasoning; or a larger task should be split into substantial parallel work streams. Best for bounded but difficult analysis, implementation, debugging, and verification that exceed lightweight agent scope.'
-model: Claude Opus 4.7 (copilot)
-tools: [edit, execute, read, search, todo, vscode/memory, web]
+description: "Use when: a complex task needs a stronger, slower model; a delegated subtask requires deeper reasoning; or a larger task should be split into substantial parallel work streams. Best for bounded but difficult analysis, implementation, debugging, and verification that exceed lightweight agent scope."
 argument-hint: A bounded but complex subtask that needs stronger reasoning, deeper investigation, or a substantial parallel work stream.
+model: DeepSeek V4.1 Flash (deepseek)
+tools:
+  [
+    vscode/memory,
+    vscode/resolveMemoryFileUri,
+    vscode/runCommand,
+    vscode/vscodeAPI,
+    vscode/toolSearch,
+    execute,
+    read,
+    edit,
+    search,
+    web,
+    "cognitionai/deepwiki/*",
+    "microsoftdocs/mcp/*",
+    vscodeGeneral/toolSearch,
+    "gitkraken/*",
+    todo,
+  ]
 user-invocable: false
 ---
 
