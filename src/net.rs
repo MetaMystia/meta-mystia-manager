@@ -8,7 +8,7 @@ use std::{
     ffi::OsString, mem::size_of, os::windows::ffi::OsStringExt, ptr::null_mut, thread::sleep,
     time::Duration,
 };
-use ureq::Response;
+use ureq::{Body, http::Response};
 use windows_sys::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_READ, REG_DWORD, REG_SZ, RegCloseKey, RegOpenKeyExW,
     RegQueryValueExW,
@@ -77,37 +77,69 @@ where
     Err(ManagerError::Other("重试流程意外结束".to_string()))
 }
 
-/// 将 ureq::Error 转换为 ManagerError，同时处理 429 Rate Limit
-pub fn handle_ureq_error(e: ureq::Error, ui: &dyn Ui, op_desc: &str) -> ManagerError {
-    match e {
-        ureq::Error::Status(429, ref resp) => {
-            let retry_after = resp
-                .header("Retry-After")
-                .and_then(|v| v.parse::<u64>().ok());
+/// 解析 `Retry-After` 响应头（秒）
+fn retry_after_secs(headers: &ureq::http::HeaderMap) -> Option<u64> {
+    headers
+        .get("Retry-After")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+}
 
-            if let Some(secs) = retry_after
-                && secs <= 30
-            {
-                let _ = ui.network_rate_limited(secs);
-                report_event(
-                    "Network.RateLimited",
-                    Some(&format!("{};retry_after={}", op_desc, secs)),
-                );
-                sleep(Duration::from_secs(secs));
-            } else {
-                report_event("Network.RateLimited", Some(op_desc));
-            }
-            ManagerError::RateLimited(op_desc.to_string())
-        }
-        ureq::Error::Status(code, _) => {
-            report_event(
-                "Network.HttpError",
-                Some(&format!("{};status={}", op_desc, code)),
-            );
-            ManagerError::NetworkError(format!("{}返回错误：HTTP {}", op_desc, code))
-        }
-        ureq::Error::Transport(t) => ManagerError::NetworkError(format!("请求失败：{}", t)),
+/// 处理 429 Rate Limit：等待 `Retry-After` 指定的秒数（不超过 30 秒）
+fn rate_limited_error(retry_after: Option<u64>, ui: &dyn Ui, op_desc: &str) -> ManagerError {
+    if let Some(secs) = retry_after
+        && secs <= 30
+    {
+        let _ = ui.network_rate_limited(secs);
+        report_event(
+            "Network.RateLimited",
+            Some(&format!("{};retry_after={}", op_desc, secs)),
+        );
+        sleep(Duration::from_secs(secs));
+    } else {
+        report_event("Network.RateLimited", Some(op_desc));
     }
+    ManagerError::RateLimited(op_desc.to_string())
+}
+
+/// 检查响应状态码，非成功状态（4xx/5xx）转换为 `ManagerError`，成功状态返回 `None`
+///
+/// ureq 3 默认会把 4xx/5xx 直接转换为 [`ureq::Error::StatusCode`]，那样会丢失响应头，
+/// 因此本项目在构建 Agent 时关闭了该行为，统一在此处判定，以便处理 429 的 `Retry-After`。
+pub fn check_response_status(
+    resp: &Response<Body>,
+    ui: &dyn Ui,
+    op_desc: &str,
+) -> Option<ManagerError> {
+    let status = resp.status();
+    if !status.is_client_error() && !status.is_server_error() {
+        return None;
+    }
+
+    let code = status.as_u16();
+    if code == 429 {
+        return Some(rate_limited_error(
+            retry_after_secs(resp.headers()),
+            ui,
+            op_desc,
+        ));
+    }
+
+    report_event(
+        "Network.HttpError",
+        Some(&format!("{};status={}", op_desc, code)),
+    );
+    Some(ManagerError::NetworkError(format!(
+        "{}返回错误：HTTP {}",
+        op_desc, code
+    )))
+}
+
+/// 将 ureq 传输层错误转换为 ManagerError
+///
+/// Agent 已关闭 `http_status_as_error`，4xx/5xx 一律由 [`check_response_status`] 判定。
+pub fn handle_ureq_error(e: ureq::Error) -> ManagerError {
+    ManagerError::NetworkError(format!("请求失败：{}", e))
 }
 
 /// 使用重试机制获取 JSON 响应，并在遇到特定 HTTP 状态码时停止重试
@@ -135,73 +167,112 @@ pub fn get_json_with_retry_stopping_on_status<T: DeserializeOwned>(
     for attempt in 0..cfg.attempts {
         let mut req = agent.get(url);
         if let Some(h) = accept_header {
-            req = req.set("Accept", h);
+            req = req.header("Accept", h);
         }
 
-        match req.call() {
+        let err = match req.call() {
             Ok(resp) => {
-                let text = resp.into_string().map_err(|e| {
-                    report_event(
-                        "Network.ReadFailed",
-                        Some(&format!("{};err={}", op_desc, e)),
-                    );
-                    JsonRequestError::Other(ManagerError::NetworkError(format!(
-                        "读取响应失败：{}",
-                        e
-                    )))
-                })?;
+                let status = resp.status().as_u16();
+                if stop_statuses.contains(&status) {
+                    return Err(JsonRequestError::HttpStatus(status));
+                }
 
-                return serde_json::from_str(&text).map_err(|e| {
-                    report_event(
-                        "Network.JsonParseFailed",
-                        Some(&format!("{};err={}", op_desc, e)),
-                    );
-                    JsonRequestError::Other(ManagerError::NetworkError(format!(
-                        "解析 JSON 失败：{}",
-                        e
-                    )))
-                });
-            }
-            Err(ureq::Error::Status(code, _)) if stop_statuses.contains(&code) => {
-                return Err(JsonRequestError::HttpStatus(code));
-            }
-            Err(err) => {
-                let err = handle_ureq_error(err, ui, op_desc);
+                match check_response_status(&resp, ui, op_desc) {
+                    Some(err) => err,
+                    None => {
+                        let text = resp.into_body().read_to_string().map_err(|e| {
+                            report_event(
+                                "Network.ReadFailed",
+                                Some(&format!("{};err={}", op_desc, e)),
+                            );
+                            JsonRequestError::Other(ManagerError::NetworkError(format!(
+                                "读取响应失败：{}",
+                                e
+                            )))
+                        })?;
 
-                let raw = (cfg.base_delay_secs as f64) * cfg.multiplier.powi(attempt as i32);
-                let delay_secs = raw.min(cfg.max_delay_secs as f64).ceil() as u64;
-
-                ui.network_retrying(
-                    op_desc,
-                    delay_secs,
-                    attempt + 1,
-                    cfg.attempts,
-                    &err.to_string(),
-                )
-                .map_err(JsonRequestError::Other)?;
-                report_event(
-                    "Network.Retry",
-                    Some(&format!(
-                        "{};attempt={};delay={}",
-                        op_desc,
-                        attempt + 1,
-                        delay_secs
-                    )),
-                );
-
-                if attempt < cfg.attempts - 1 {
-                    sleep(Duration::from_secs(delay_secs));
-                } else {
-                    report_event("Network.RetryFailed", Some(op_desc));
-                    return Err(JsonRequestError::Other(err));
+                        return serde_json::from_str(&text).map_err(|e| {
+                            report_event(
+                                "Network.JsonParseFailed",
+                                Some(&format!("{};err={}", op_desc, e)),
+                            );
+                            JsonRequestError::Other(ManagerError::NetworkError(format!(
+                                "解析 JSON 失败：{}",
+                                e
+                            )))
+                        });
+                    }
                 }
             }
+            Err(err) => handle_ureq_error(err),
+        };
+
+        let raw = (cfg.base_delay_secs as f64) * cfg.multiplier.powi(attempt as i32);
+        let delay_secs = raw.min(cfg.max_delay_secs as f64).ceil() as u64;
+
+        ui.network_retrying(
+            op_desc,
+            delay_secs,
+            attempt + 1,
+            cfg.attempts,
+            &err.to_string(),
+        )
+        .map_err(JsonRequestError::Other)?;
+        report_event(
+            "Network.Retry",
+            Some(&format!(
+                "{};attempt={};delay={}",
+                op_desc,
+                attempt + 1,
+                delay_secs
+            )),
+        );
+
+        if attempt < cfg.attempts - 1 {
+            sleep(Duration::from_secs(delay_secs));
+        } else {
+            report_event("Network.RetryFailed", Some(op_desc));
+            return Err(JsonRequestError::Other(err));
         }
     }
 
     Err(JsonRequestError::Other(ManagerError::Other(
         "重试流程意外结束".to_string(),
     )))
+}
+
+/// 构建统一配置的 `ureq::Agent`
+///
+/// ureq 3 TLS 配置需要显式指定 provider，否则会使用默认的 rustls；
+/// 本程序编译时只启用了 native-tls 特性，所以必须设置为 `NativeTls` 并使用系统证书库。
+///
+/// # 参数
+/// - `connect_timeout`: 连接超时（含 TLS 握手），`None` 表示不限制
+/// - `global_timeout`: 整个请求的超时，`None` 表示不限制
+pub fn build_agent(
+    connect_timeout: Option<Duration>,
+    global_timeout: Option<Duration>,
+) -> ureq::Agent {
+    let tls_config = ureq::tls::TlsConfig::builder()
+        .provider(ureq::tls::TlsProvider::NativeTls)
+        .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+        .build();
+
+    let mut builder = ureq::Agent::config_builder()
+        .tls_config(tls_config)
+        .timeout_connect(connect_timeout)
+        .timeout_global(global_timeout)
+        // 4xx/5xx 交由 check_response_status 判定，便于读取 Retry-After
+        .http_status_as_error(false)
+        .user_agent(crate::config::USER_AGENT);
+
+    if let Some(proxy) = read_system_proxy()
+        && let Ok(p) = ureq::Proxy::new(&proxy)
+    {
+        builder = builder.proxy(Some(p));
+    }
+
+    ureq::Agent::new_with_config(builder.build())
 }
 
 /// 使用重试机制获取响应
@@ -214,12 +285,13 @@ pub fn get_response_with_retry(
     url: &str,
     op_desc: &str,
     cfg: Option<RetryConfig>,
-) -> Result<Response> {
+) -> Result<Response<Body>> {
     with_retry(ui, op_desc, cfg, || {
-        let resp = agent
-            .get(url)
-            .call()
-            .map_err(|e| handle_ureq_error(e, ui, op_desc))?;
+        let resp = agent.get(url).call().map_err(handle_ureq_error)?;
+
+        if let Some(err) = check_response_status(&resp, ui, op_desc) {
+            return Err(err);
+        }
 
         Ok(resp)
     })

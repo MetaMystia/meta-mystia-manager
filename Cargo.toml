@@ -32,7 +32,7 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 # HTTP 客户端
-ureq = { version = "2.12", features = ["native-tls"], default-features = false }
+ureq = { version = "3.4", features = ["native-tls"], default-features = false }
 native-tls = "0.2"
 
 # URL 编码
@@ -47,7 +47,7 @@ glob = "0.3"
 steamlocate = "2.0.1"
 
 # ZIP 解压
-zip = { version = "7.2", features = ["deflate"], default-features = false }
+zip = { version = "8.6", features = ["deflate"], default-features = false }
 
 # 用户交互
 console = "0.16"

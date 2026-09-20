@@ -1,15 +1,13 @@
-use crate::config::USER_AGENT;
 use crate::error::Result;
-use crate::net::read_system_proxy;
+use crate::net::build_agent;
 use crate::shutdown::SHUTDOWN_TIMEOUT;
 
-use native_tls::TlsConnector;
 use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
 use std::{
     collections::HashMap,
     process::Command,
     sync::{
-        Arc, Mutex, OnceLock,
+        Mutex, OnceLock,
         mpsc::{RecvTimeoutError, Sender, channel},
     },
     thread::{JoinHandle, spawn},
@@ -93,25 +91,11 @@ pub fn get_user_id() -> String {
 
 static CACHED_AGENT: OnceLock<ureq::Agent> = OnceLock::new();
 
-fn get_agent() -> &'static ureq::Agent {
-    CACHED_AGENT.get_or_init(|| {
-        let mut builder = ureq::AgentBuilder::new()
-            .timeout(DEFAULT_TIMEOUT)
-            .user_agent(USER_AGENT);
-        if let Ok(tls) = TlsConnector::new() {
-            builder = builder.tls_connector(Arc::new(tls));
-        }
-        if let Some(proxy) = read_system_proxy()
-            && let Ok(p) = ureq::Proxy::new(&proxy)
-        {
-            builder = builder.proxy(p);
-        }
-        builder.build()
-    })
-}
-
 fn send_with_client(url: String) {
-    let _ = get_agent().get(&url).call();
+    let _ = CACHED_AGENT
+        .get_or_init(|| build_agent(None, Some(DEFAULT_TIMEOUT)))
+        .get(&url)
+        .call();
 }
 
 struct TrackingWorker {

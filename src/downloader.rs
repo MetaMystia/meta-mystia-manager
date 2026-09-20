@@ -4,22 +4,22 @@ use crate::file_ops::atomic_rename_or_copy;
 use crate::metrics::report_event;
 use crate::model::VersionInfo;
 use crate::net::{
-    JsonRequestError, get_json_with_retry_stopping_on_status, get_response_with_retry,
-    read_system_proxy, with_retry,
+    JsonRequestError, build_agent, check_response_status, get_json_with_retry_stopping_on_status,
+    get_response_with_retry, with_retry,
 };
 use crate::ui::Ui;
 
-use native_tls::TlsConnector;
 use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
 use std::{
     cmp,
     collections::HashMap,
     io::{Read, Write},
     path::Path,
-    sync::{Arc, Mutex},
+    sync::Mutex,
     thread::sleep,
     time::{Duration, Instant},
 };
+use ureq::ResponseExt;
 
 const FILE_API: &str = "https://file.izakaya.cc/api/public/dl";
 const REDIRECT_URL: &str = "https://url.izakaya.cc/getMetaMystia";
@@ -50,28 +50,13 @@ pub struct Downloader<'a> {
 
 impl<'a> Downloader<'a> {
     pub fn new(ui: &'a dyn Ui) -> Result<Self> {
-        let agent = Self::build_agent(CONNECT_TIMEOUT)?;
+        let agent = build_agent(Some(CONNECT_TIMEOUT), None);
         Ok(Self {
             agent,
             ui,
             cached_github_releases: Mutex::new(HashMap::new()),
             cached_version: Mutex::new(None),
         })
-    }
-
-    fn build_agent(connect_timeout: Duration) -> Result<ureq::Agent> {
-        let tls = TlsConnector::new()
-            .map_err(|e| ManagerError::NetworkError(format!("创建 TLS 连接器失败：{}", e)))?;
-        let mut builder = ureq::AgentBuilder::new()
-            .tls_connector(Arc::new(tls))
-            .timeout_connect(connect_timeout)
-            .user_agent(crate::config::USER_AGENT);
-        if let Some(proxy) = read_system_proxy()
-            && let Ok(p) = ureq::Proxy::new(&proxy)
-        {
-            builder = builder.proxy(p);
-        }
-        Ok(builder.build())
     }
 
     fn retry<F, T>(&self, op_desc: &str, f: F) -> Result<T>
@@ -83,19 +68,19 @@ impl<'a> Downloader<'a> {
 
     fn convert_ureq_error(e: &ureq::Error) -> String {
         match e {
-            ureq::Error::Transport(t) => {
-                let s = t.to_string();
-                if s.contains("timed out") || s.contains("timeout") {
-                    "请求超时".to_string()
-                } else if s.contains("connect") || s.contains("Connection") {
-                    "连接失败".to_string()
-                } else {
-                    format!("请求失败：{}", e)
-                }
-            }
-            ureq::Error::Status(code, _) => {
-                format!("服务器返回错误：HTTP {}", code)
-            }
+            ureq::Error::Timeout(_) => "请求超时".to_string(),
+            ureq::Error::Io(err) => match err.kind() {
+                std::io::ErrorKind::TimedOut => "请求超时".to_string(),
+                std::io::ErrorKind::ConnectionRefused
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::NotConnected
+                | std::io::ErrorKind::AddrNotAvailable
+                | std::io::ErrorKind::AddrInUse => "连接失败".to_string(),
+                _ => format!("请求失败：{}", e),
+            },
+            ureq::Error::ConnectionFailed | ureq::Error::HostNotFound => "连接失败".to_string(),
+            _ => format!("请求失败：{}", e),
         }
     }
 
@@ -137,8 +122,14 @@ impl<'a> Downloader<'a> {
             ManagerError::NetworkError(msg)
         })?;
 
+        if let Some(err) = check_response_status(&response, self.ui, "获取版本信息") {
+            let _ = self.ui.download_version_info_failed(&err.to_string());
+            return Err(err);
+        }
+
         let text = response
-            .into_string()
+            .into_body()
+            .read_to_string()
             .map_err(|e| ManagerError::NetworkError(format!("读取响应失败：{}", e)))?;
 
         let mut vi: VersionInfo = serde_json::from_str(&text).map_err(|e| {
@@ -178,15 +169,20 @@ impl<'a> Downloader<'a> {
             ManagerError::NetworkError(msg)
         })?;
 
-        let final_url = response.get_url().to_string();
-        if let Some(code) = Self::parse_share_code_from_url(&final_url) {
+        if let Some(err) = check_response_status(&response, self.ui, "获取下载链接") {
+            let _ = self.ui.download_share_code_failed(&err.to_string());
+            return Err(err);
+        }
+
+        let final_uri = response.get_uri().to_string();
+        if let Some(code) = Self::parse_share_code_from_url(&final_uri) {
             self.ui.download_share_code_success()?;
             report_event("Download.ShareCode.Success", Some(&code));
             Ok(code)
         } else {
             report_event(
                 "Download.ShareCode.ParseFailed",
-                Some(&format!("url={}", final_url)),
+                Some(&format!("final_uri={}", final_uri)),
             );
             Err(ManagerError::NetworkError(
                 "无法从下载链接中解析分享码".to_string(),
@@ -231,10 +227,16 @@ impl<'a> Downloader<'a> {
             .call()
             .map_err(|e| ManagerError::NetworkError(Self::convert_ureq_error(&e)))?;
 
+        if let Some(err) = check_response_status(&response, self.ui, "下载文件") {
+            return Err(err);
+        }
+
         let total_size = file_size.or_else(|| {
             response
-                .header("Content-Length")
-                .and_then(|v| v.parse::<u64>().ok())
+                .headers()
+                .get("Content-Length")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.trim().parse::<u64>().ok())
         });
         let filename = dest
             .file_name()
@@ -243,7 +245,7 @@ impl<'a> Downloader<'a> {
 
         let id = self.ui.download_start(&filename, total_size)?;
 
-        let mut reader = response.into_reader();
+        let mut reader = response.into_body().into_reader();
         self.write_response_to_file(&mut reader, dest, id, total_size, rate_limit, min_speed_bps)
     }
 
@@ -846,14 +848,16 @@ impl<'a> Downloader<'a> {
         match primary_result {
             Ok(resp) => {
                 let total_size = resp
-                    .header("Content-Length")
-                    .and_then(|v| v.parse::<u64>().ok());
+                    .headers()
+                    .get("Content-Length")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.trim().parse::<u64>().ok());
                 let id = self
                     .ui
                     .download_start("BepInEx（bepinex.dev）", total_size)?;
 
                 if let Err(e) = self.write_response_to_file(
-                    &mut resp.into_reader(),
+                    &mut resp.into_body().into_reader(),
                     dest,
                     id,
                     total_size,
