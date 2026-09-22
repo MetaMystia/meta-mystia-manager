@@ -65,6 +65,8 @@ thiserror = "2.0"
 
 [build-dependencies]
 thunk-rs = { version = "0.3", features = ["win7"], default-features = false }
+
+[target.'cfg(windows)'.build-dependencies]
 winres = "0.1"
 
 [lints.clippy]

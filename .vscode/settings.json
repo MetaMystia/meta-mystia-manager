@@ -27,15 +27,19 @@
     "idsite",
     "indicatif",
     "izakaya",
+    "LASTEXITCODE",
     "metamystia",
+    "msvc",
     "mystia",
     "nonblocking",
     "NTSTATUS",
     "outpath",
     "pkce",
+    "Prng",
     "PROCESSENTRY",
     "resourceex",
     "resourceexample",
+    "rustup",
     "serde",
     "SHOWNORMAL",
     "SNAPPROCESS",
@@ -51,8 +55,11 @@
     "upgrader",
     "ureq",
     "USERPROFILE",
+    "VCRUNTIME",
+    "windres",
     "winhttp",
     "winreg",
-    "winres"
+    "winres",
+    "xwin"
   ]
 }
