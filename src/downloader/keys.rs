@@ -230,9 +230,19 @@ impl Downloader<'_> {
             || dest.display().to_string(),
             |n| n.to_string_lossy().into_owned(),
         );
+        // 续传时进度条只统计本次传输量，否则速度会瞬间跳到"已完成大小/0s"
+        let label = if append_from > 0 {
+            format!(
+                "{filename}（续传，已完成 {}）",
+                crate::preflight::format_bytes(append_from)
+            )
+        } else {
+            filename
+        };
+        let remaining = ticket.size.saturating_sub(append_from);
         let id = self
             .ui
-            .download_start(&filename, Some(ticket.size))
+            .download_start(&label, Some(remaining))
             .map_err(KeyedDownloadError::Failed)?;
 
         let mut reader = response.into_body().into_reader();
@@ -310,7 +320,7 @@ impl Downloader<'_> {
             }
 
             transferred += read as u64;
-            self.ui.download_update(id, append_from + transferred)?;
+            self.ui.download_update(id, transferred)?;
 
             if let Some(rate_limit_bps) = ticket.rate_limit_bps {
                 sleep_for_rate_limit(transferred, start.elapsed(), rate_limit_bps);
