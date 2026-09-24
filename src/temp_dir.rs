@@ -11,7 +11,7 @@ use std::{
 type RefCounter = Arc<Mutex<usize>>;
 type PathRegistry = Vec<(PathBuf, RefCounter)>;
 
-/// 在 Guard 被 drop 时删除目录
+/// 临时目录守卫：引用计数归零时删除目录，进程退出时由清理回调兜底
 pub struct DirGuard {
     path: PathBuf,
     counter: RefCounter,

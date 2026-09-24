@@ -49,7 +49,6 @@ const TAIL_SKIP_MIN_REMAINING_CAP: u64 = 384 * 1024; // 剩余字节豁免阈值
 /// 一个下载任务：名称（用于错误提示）+ 执行体
 pub type DownloadJob<'a> = (&'a str, Box<dyn Fn() -> Result<()> + Send + Sync + 'a>);
 
-/// 下载器
 pub struct Downloader<'a> {
     agent: ureq::Agent,
     ui: &'a dyn Ui,
@@ -186,7 +185,7 @@ impl<'a> Downloader<'a> {
             .map(ToString::to_string)
     }
 
-    /// 获取版本信息
+    /// 获取版本信息：进程内缓存，并在返回前规范化、校验版本号
     pub fn get_version_info(&self) -> Result<VersionInfo> {
         // 开发模拟模式：不联网，直接返回伪版本信息
         #[cfg(not(windows))]
@@ -299,7 +298,7 @@ impl<'a> Downloader<'a> {
         }
     }
 
-    /// 下载 MetaMystia DLL
+    /// 下载 MetaMystia DLL；`try_github` 为真时先试 GitHub，失败再回落到镜像源
     pub fn download_metamystia(
         &self,
         version: &str,
@@ -360,7 +359,7 @@ impl<'a> Downloader<'a> {
         }
     }
 
-    /// 下载 ResourceExample ZIP
+    /// 下载 ResourceExample ZIP（可选组件，仅在用户选择安装时调用）
     pub fn download_resourceex(
         &self,
         version: &str,

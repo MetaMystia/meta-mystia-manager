@@ -19,7 +19,7 @@ use std::{
     time::Instant,
 };
 
-/// 控制台 UI 实现
+/// 交互式控制台实现：基于 `dialoguer` 的选项交互与 `indicatif` 的进度条
 pub struct ConsoleUI {
     bars: Mutex<HashMap<usize, ProgressBar>>,
     multi: MultiProgress,

@@ -49,7 +49,6 @@ fn main() -> ExitCode {
 
     let res = run_console_ui();
 
-    // 执行清理回调
     run_shutdown();
 
     res
@@ -172,7 +171,6 @@ fn run_offline(ui: &dyn Ui) -> Result<()> {
 }
 
 fn run_install(game_root: PathBuf, ui: &dyn Ui) -> Result<()> {
-    // 创建安装器
     let installer = Installer::new(game_root, ui);
 
     // 检查是否已安装组件
@@ -194,7 +192,6 @@ fn run_install(game_root: PathBuf, ui: &dyn Ui) -> Result<()> {
         }
     }
 
-    // 执行安装
     installer.install(has_installed)?;
 
     ui.wait_for_key()?;
@@ -202,10 +199,8 @@ fn run_install(game_root: PathBuf, ui: &dyn Ui) -> Result<()> {
 }
 
 fn run_upgrade(game_root: PathBuf, ui: &dyn Ui) -> Result<()> {
-    // 创建升级器
     let upgrader = Upgrader::new(game_root, ui);
 
-    // 执行升级
     upgrader.upgrade()?;
 
     ui.wait_for_key()?;
@@ -213,10 +208,8 @@ fn run_upgrade(game_root: PathBuf, ui: &dyn Ui) -> Result<()> {
 }
 
 fn run_uninstall(game_root: PathBuf, ui: &dyn Ui) -> Result<()> {
-    // 创建卸载器
     let uninstaller = Uninstaller::new(game_root, ui);
 
-    // 执行卸载
     uninstaller.uninstall()?;
 
     ui.wait_for_key()?;

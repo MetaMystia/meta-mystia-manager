@@ -16,7 +16,7 @@ use crate::config::GAME_STEAM_APP_ID;
 #[cfg(windows)]
 use steamlocate::SteamDir;
 
-/// 检查游戏根目录
+/// 定位游戏根目录：开发模拟模式用沙箱目录，Windows 上先查 Steam 安装位置，再回落到当前目录
 pub fn check_game_directory(ui: &dyn Ui) -> Result<PathBuf> {
     // 开发模拟模式使用沙箱目录，不探测本机 Steam
     #[cfg(not(windows))]
@@ -66,7 +66,7 @@ pub fn check_game_directory(ui: &dyn Ui) -> Result<PathBuf> {
 static GAME_RUNNING_CACHE: OnceLock<Mutex<(bool, Instant)>> = OnceLock::new();
 const CACHE_DURATION: Duration = Duration::from_secs(1);
 
-/// 检查游戏进程是否正在运行
+/// 游戏进程是否正在运行（结果缓存 1 秒，避免短时间内反复枚举进程）
 pub fn check_game_running() -> Result<bool> {
     let cache = GAME_RUNNING_CACHE
         .get_or_init(|| Mutex::new((false, Instant::now().checked_sub(CACHE_DURATION).unwrap())));

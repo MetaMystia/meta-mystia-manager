@@ -56,7 +56,6 @@ fn write_entry_to_file(entry: &mut impl io::Read, outpath: &Path) -> Result<()> 
     Ok(())
 }
 
-/// 文件解压器
 pub struct Extractor;
 
 impl Extractor {

@@ -67,7 +67,6 @@ impl PartialOrd for ParsedVersion {
     }
 }
 
-/// 升级管理器
 pub struct Upgrader<'a> {
     game_root: PathBuf,
     downloader: Downloader<'a>,
@@ -293,7 +292,7 @@ impl<'a> Upgrader<'a> {
             .filter(|s| !s.is_empty())
     }
 
-    /// 检查是否有可用升级
+    /// 检查是否有可用升级，返回（BepInEx、MetaMystia DLL、ResourceExample ZIP）是否需更新
     pub fn has_updates(&self, version_info: &VersionInfo) -> Result<(bool, bool, bool)> {
         let bep_needs = version_info
             .bepinex_version()
@@ -311,7 +310,6 @@ impl<'a> Upgrader<'a> {
         Ok((bep_needs, dll_needs, res_needs))
     }
 
-    /// 执行升级
     #[allow(
         clippy::too_many_lines,
         reason = "升级流程按步骤线性推进，拆分步骤会让上下文参数来回传递"

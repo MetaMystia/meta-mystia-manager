@@ -1,4 +1,4 @@
-//! Windows 平台实现
+//! Windows 真实实现：提权、进程枚举、系统浏览器、CNG 加密与控制台事件钩子。
 
 use crate::config::GAME_PROCESS_NAME;
 use crate::error::{ManagerError, Result};

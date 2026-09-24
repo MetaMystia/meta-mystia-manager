@@ -101,10 +101,9 @@ pub fn perform_self_update(
     Err(ManagerError::Other("无法启动 PowerShell".to_string()))
 }
 
-/// 开发模拟模式：走完自更新的下载与就位准备，但不替换正在运行的可执行文件
+/// 开发模拟模式：只走下载与提示，不替换正在运行的可执行文件。
 ///
-/// Windows 上替换自身要借助 PowerShell 脚本等待旧进程退出后再覆盖，
-/// 非 Windows 宿主没有这条链路，因此这里只模拟到“新版本已下载”为止。
+/// 替换自身依赖 PowerShell 脚本等待旧进程退出后再覆盖，非 Windows 宿主没有这条链路。
 #[cfg(not(windows))]
 pub fn perform_self_update(
     game_root: &Path,

@@ -285,9 +285,9 @@ pub fn get_response_with_retry(
 }
 
 /// 读取系统代理设置，供构建 `ureq::Agent` 时使用。
-/// ureq `自身仅读取环境变量（HTTP_PROXY` 等），不读取 Windows 注册表系统代理，
-/// 此函数优先读取环境变量，再回落到注册表。
-/// 返回形如 `"http://host:port"` 的字符串，可直接传入 `ureq::Proxy::new`
+///
+/// ureq 自身只读环境变量（`HTTP_PROXY`、`HTTPS_PROXY` 等），不读 Windows 的系统代理设置，
+/// 所以这里先读环境变量，再回落到注册表。返回值形如 `http://host:port`，可直接传给 `ureq::Proxy::new`。
 pub fn read_system_proxy() -> Option<String> {
     for var in &["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
         if let Ok(val) = env::var(var)

@@ -109,7 +109,6 @@ impl VersionInfo {
         Self::normalize_version_list(&mut self.zips);
     }
 
-    /// 验证版本信息
     pub fn validate(&self) -> Result<()> {
         if self.dlls.is_empty() {
             report_event("Model.VersionInfo.Invalid", Some("dlls_empty"));
@@ -138,12 +137,10 @@ impl VersionInfo {
         Ok(())
     }
 
-    /// 获取最新的 MetaMystia DLL 版本
     pub fn latest_dll(&self) -> &str {
         &self.dlls[0]
     }
 
-    /// 获取最新的 ResourceExample ZIP 版本
     pub fn latest_resourceex(&self) -> &str {
         &self.zips[0]
     }
@@ -231,21 +228,18 @@ impl VersionInfo {
         Ok(version)
     }
 
-    /// MetaMystia DLL 文件名
     pub fn metamystia_filename(version: &str) -> String {
         let version = Self::normalize_canonical_version(version)
             .unwrap_or_else(|| Self::normalize_version(version));
         format!("MetaMystia-v{version}.dll")
     }
 
-    /// ResourceExample ZIP 文件名
     pub fn resourceex_filename(version: &str) -> String {
         let version = Self::normalize_canonical_version(version)
             .unwrap_or_else(|| Self::normalize_version(version));
         format!("ResourceExample-v{version}.zip")
     }
 
-    /// MetaMystia Manager 可执行文件名
     pub fn manager_filename(&self) -> String {
         format!("meta-mystia-manager-v{}.exe", self.manager.trim())
     }

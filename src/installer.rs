@@ -23,7 +23,6 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-/// 安装管理器
 pub struct Installer<'a> {
     game_root: PathBuf,
     downloader: Downloader<'a>,
@@ -40,7 +39,6 @@ impl<'a> Installer<'a> {
         }
     }
 
-    /// 检查是否已安装 MetaMystia DLL
     pub fn check_metamystia_installed(&self) -> bool {
         let matches = glob_matches_by_filename(
             &self.game_root.join(METAMYSTIA_PLUGIN_GLOB),
@@ -49,7 +47,6 @@ impl<'a> Installer<'a> {
         !matches.is_empty()
     }
 
-    /// 检查是否已安装 ResourceExample ZIP
     pub fn check_resourceex_installed(&self) -> bool {
         let resourceex_dir = self.game_root.join("ResourceEx");
         resourceex_dir.exists() && resourceex_dir.is_dir() && {
@@ -61,7 +58,6 @@ impl<'a> Installer<'a> {
         }
     }
 
-    /// 检查是否已安装 BepInEx
     pub fn check_bepinex_installed(&self) -> bool {
         let bepinex_dir = self.game_root.join("BepInEx");
         bepinex_dir.exists() && bepinex_dir.is_dir() && {
@@ -149,7 +145,6 @@ impl<'a> Installer<'a> {
         Ok((success, failed))
     }
 
-    /// 执行安装流程
     #[allow(
         clippy::too_many_lines,
         reason = "安装流程按步骤线性推进，拆分步骤会让上下文参数来回传递"

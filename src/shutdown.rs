@@ -18,7 +18,7 @@ type CleanupCallback = Box<dyn Fn() + Send + 'static>;
 static CALLBACKS: OnceLock<Mutex<Vec<Option<CleanupCallback>>>> = OnceLock::new();
 static SHUTDOWN_STARTED: AtomicBool = AtomicBool::new(false);
 
-/// 注册一个清理回调函数
+/// 注册清理回调；程序正常退出或收到中断事件时执行
 pub fn register_cleanup<F>(f: F) -> usize
 where
     F: Fn() + Send + 'static,
@@ -34,7 +34,7 @@ where
     guard.len() - 1
 }
 
-/// 执行所有注册的清理回调函数
+/// 并发执行所有清理回调，总耗时不超过 [`SHUTDOWN_TIMEOUT`]；重复调用只生效一次
 pub fn run_shutdown() {
     if SHUTDOWN_STARTED.swap(true, Ordering::SeqCst) {
         return;

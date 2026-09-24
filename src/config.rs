@@ -20,7 +20,6 @@ pub const USER_AGENT: &str = concat!(
     ")"
 );
 
-/// 操作模式枚举
 pub enum OperationMode {
     Install,
     Upgrade,
@@ -34,7 +33,6 @@ pub enum OfflineMode {
     Diagnostics,
 }
 
-/// 卸载模式枚举
 #[derive(Clone, Copy, Debug)]
 pub enum UninstallMode {
     Light,
@@ -74,7 +72,6 @@ impl UninstallMode {
     }
 }
 
-/// 通用重试配置
 pub struct RetryConfig {
     /// 最大重试次数（至少 1）
     pub attempts: usize,

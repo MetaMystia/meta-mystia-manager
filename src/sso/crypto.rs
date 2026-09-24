@@ -15,7 +15,7 @@ pub fn base64url_encode(bytes: &[u8]) -> String {
     BASE64_URL_SAFE_NO_PAD.encode(bytes)
 }
 
-/// 用 CNG 的系统首选随机数发生器填充缓冲区
+/// 用系统随机数发生器填充缓冲区（Windows 走 CNG，开发模拟走 `/dev/urandom`）
 pub fn random_bytes(buffer: &mut [u8]) -> Result<()> {
     platform::random_bytes(buffer)
 }

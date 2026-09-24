@@ -27,7 +27,6 @@ fn failed_in_use(results: &[DeletionResult], path: &Path) -> bool {
         })
 }
 
-/// 卸载管理器
 pub struct Uninstaller<'a> {
     game_root: PathBuf,
     ui: &'a dyn Ui,
@@ -38,7 +37,6 @@ impl<'a> Uninstaller<'a> {
         Self { game_root, ui }
     }
 
-    /// 执行卸载流程
     pub fn uninstall(&self) -> Result<()> {
         report_event("Uninstall.Start", None);
 

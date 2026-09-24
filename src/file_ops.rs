@@ -59,7 +59,7 @@ fn ensure_owner_writable(metadata: &fs::Metadata) -> fs::Permissions {
 #[cfg(windows)]
 const ERROR_SHARING_VIOLATION: i32 = 32;
 
-/// 将 `io::Error` 映射为更具体的 `UninstallError`
+/// 将 `io::Error` 映射为更具体的 `ManagerError`（Windows 上识别“文件被占用”）
 pub fn map_io_error_to_uninstall_error(err: &io::Error, path: &Path) -> ManagerError {
     #[cfg(windows)]
     if let Some(code) = err.raw_os_error()
@@ -327,7 +327,6 @@ fn scan_target(base: &Path, pattern: &str, is_directory: bool, existing_files: &
     }
 }
 
-/// 执行删除操作
 pub fn execute_deletion(files: &[PathBuf], ui: &dyn Ui) -> Vec<DeletionResult> {
     let total = files.len();
     let mut results = Vec::new();
@@ -362,12 +361,10 @@ pub fn execute_deletion(files: &[PathBuf], ui: &dyn Ui) -> Vec<DeletionResult> {
     results
 }
 
-/// 删除单个文件
 fn delete_file(path: &Path) -> DeletionResult {
     delete_path(path, |path| fs::remove_file(path), "执行删除后文件仍存在")
 }
 
-/// 删除目录
 fn delete_directory(path: &Path) -> DeletionResult {
     delete_path(
         path,
