@@ -177,10 +177,8 @@ impl Downloader<'_> {
         let mut slow_overall_count: u32 = 0;
 
         loop {
-            let to_read = buffer.len();
-
             let n = resp
-                .read(&mut buffer[..to_read])
+                .read(&mut buffer)
                 .map_err(|e| ManagerError::NetworkError(e.to_string()))?;
             if n == 0 {
                 break;

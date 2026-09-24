@@ -154,6 +154,14 @@ impl<'a> Uninstaller<'a> {
             )),
         );
 
+        if failed > 0 {
+            report_event("Uninstall.Finished.WithFailures", Some(&failed.to_string()));
+
+            return Err(ManagerError::UninstallIncomplete(format!(
+                "{failed} 项未能删除，请关闭占用文件的程序或以管理员身份重试"
+            )));
+        }
+
         Ok(())
     }
 

@@ -138,6 +138,7 @@ fn get_account_user_id() -> Option<String> {
 static CACHED_AGENT: OnceLock<ureq::Agent> = OnceLock::new();
 
 fn send_with_client(url: &str) {
+    // 埋点尽力而为，失败不影响主流程
     let _ = CACHED_AGENT
         .get_or_init(|| build_agent(None, Some(DEFAULT_TIMEOUT)))
         .get(url)

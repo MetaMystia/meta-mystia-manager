@@ -131,16 +131,29 @@ pub fn atomic_rename_or_copy(src: &Path, dst: &Path) -> Result<(), ManagerError>
     }
 }
 
-pub fn write_bepinex_version_marker(game_root: &Path, version_info: &VersionInfo) {
+/// 写入 BepInEx 版本标记；版本号缺失时跳过（后续升级检测会重新扫描）
+pub fn write_bepinex_version_marker(
+    game_root: &Path,
+    version_info: &VersionInfo,
+) -> Result<(), ManagerError> {
     if platform::fs_dry_run() {
         eprintln!("[dev] 跳过写入版本标记（模拟）：{BEPINEX_VERSION_FILE}");
-        return;
+        return Ok(());
     }
 
-    if let Ok(bep_version) = version_info.bepinex_version() {
-        let version_file = game_root.join(BEPINEX_VERSION_FILE);
-        let _ = fs::write(&version_file, bep_version.as_bytes());
-    }
+    let Ok(bep_version) = version_info.bepinex_version() else {
+        return Ok(());
+    };
+
+    let version_file = game_root.join(BEPINEX_VERSION_FILE);
+    let bytes = bep_version.as_bytes();
+
+    fs::write(&version_file, bytes).map_err(|e| {
+        ManagerError::from(io::Error::new(
+            e.kind(),
+            format!("写入版本标记 {} 失败：{}", version_file.display(), e),
+        ))
+    })
 }
 
 fn backup_with_index(path: &Path, ext_suffix: &str) -> Result<PathBuf, ManagerError> {

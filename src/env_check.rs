@@ -63,22 +63,22 @@ pub fn check_game_directory(ui: &dyn Ui) -> Result<PathBuf> {
     Err(ManagerError::GameNotFound)
 }
 
-static GAME_RUNNING_CACHE: OnceLock<Mutex<(bool, Instant)>> = OnceLock::new();
+static GAME_RUNNING_CACHE: OnceLock<Mutex<Option<(bool, Instant)>>> = OnceLock::new();
 const CACHE_DURATION: Duration = Duration::from_secs(1);
 
 /// 游戏进程是否正在运行（结果缓存 1 秒，避免短时间内反复枚举进程）
 pub fn check_game_running() -> Result<bool> {
-    let cache = GAME_RUNNING_CACHE
-        .get_or_init(|| Mutex::new((false, Instant::now().checked_sub(CACHE_DURATION).unwrap())));
+    let cache = GAME_RUNNING_CACHE.get_or_init(|| Mutex::new(None));
+    let cached = *cache.lock().unwrap_or_else(PoisonError::into_inner);
 
-    let (cached_result, last_check) = *cache.lock().unwrap_or_else(PoisonError::into_inner);
-
-    if last_check.elapsed() < CACHE_DURATION {
-        return Ok(cached_result);
+    if let Some((result, checked_at)) = cached
+        && checked_at.elapsed() < CACHE_DURATION
+    {
+        return Ok(result);
     }
 
     let result = platform::is_game_running()?;
-    *cache.lock().unwrap_or_else(PoisonError::into_inner) = (result, Instant::now());
+    *cache.lock().unwrap_or_else(PoisonError::into_inner) = Some((result, Instant::now()));
 
     Ok(result)
 }

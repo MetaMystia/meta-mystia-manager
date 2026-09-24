@@ -80,7 +80,13 @@ pub fn export(ui: &dyn Ui, game_root: &Path) -> Result<PathBuf> {
 
     let info = build_manager_info(game_root);
     let archive_path = archive_path()?;
-    write_archive(&archive_path, &info, &entries)?;
+
+    if let Err(e) = write_archive(&archive_path, &info, &entries) {
+        // 写包失败时清掉半成品，避免留下打不开的 zip
+        let _ = fs::remove_file(&archive_path);
+
+        return Err(e);
+    }
 
     Ok(archive_path)
 }
@@ -333,7 +339,7 @@ fn walk_plugin_files(root: &Path, dir: &Path, depth: usize, found: &mut Vec<Stri
     }
 }
 
-/// 管理器所在目录；不可写时回落到临时目录
+/// 诊断包路径：优先管理器所在目录，不可写时回落到临时目录
 fn archive_path() -> Result<PathBuf> {
     let stamp = format_timestamp(
         SystemTime::now()
@@ -349,9 +355,13 @@ fn archive_path() -> Result<PathBuf> {
         .chain([env::temp_dir()]);
 
     for dir in dirs {
-        let candidate = dir.join(&filename);
-        if fs::File::create(&candidate).is_ok() {
-            return Ok(candidate);
+        // 先用独立的探针文件试写，避免真正写包失败时留下空包
+        let probe = dir.join(format!(".{filename}.probe"));
+
+        if fs::File::create(&probe).is_ok() {
+            let _ = fs::remove_file(&probe);
+
+            return Ok(dir.join(&filename));
         }
     }
 

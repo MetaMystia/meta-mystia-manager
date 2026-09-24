@@ -48,6 +48,9 @@ pub enum ManagerError {
     #[error("用户取消了操作")]
     UserCancelled,
 
+    #[error("卸载未完成：{0}")]
+    UninstallIncomplete(String),
+
     #[error("{0}")]
     SsoLoginFailed(String),
 

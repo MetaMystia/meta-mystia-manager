@@ -415,6 +415,7 @@ unsafe extern "system" {
 
 /// 注册控制台事件钩子
 pub fn install_shutdown_handler() {
+    // 注册失败不阻断运行，只是中断时少了统一清理
     unsafe {
         let _ = SetConsoleCtrlHandler(Some(console_ctrl_handler), 1);
     }

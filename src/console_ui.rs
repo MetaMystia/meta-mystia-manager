@@ -463,11 +463,6 @@ impl Ui for ConsoleUI {
         Ok(())
     }
 
-    fn upgrade_backup_failed(&self, err: &str) -> Result<()> {
-        println!("{}", style(format!("备份失败：{err}")).yellow());
-        Ok(())
-    }
-
     fn upgrade_deleted(&self, path: &Path) -> Result<()> {
         println!("已删除：{}", path.display());
         Ok(())

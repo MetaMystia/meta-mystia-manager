@@ -286,6 +286,7 @@ impl<'a> Installer<'a> {
         if cleanup_before_deploy {
             self.ui.install_start_cleanup()?;
             let (success, failed) = Self::execute_install_cleanup(&self.game_root, self.ui)?;
+            // 清理失败只提示：后续部署会真实写入，写不进去时再走回滚
             self.ui.install_cleanup_result(success, failed)?;
             report_event(
                 "Install.Cleanup",
@@ -337,7 +338,7 @@ impl<'a> Installer<'a> {
             Extractor::deploy_bepinex(&bepinex_path, &self.game_root, exclusions)?;
 
             // 写入 BepInEx 版本标记文件
-            write_bepinex_version_marker(&self.game_root, &version_info);
+            write_bepinex_version_marker(&self.game_root, &version_info)?;
 
             // 写入默认配置（如果不存在）
             let bepinex_config_dir = self.game_root.join("BepInEx").join("config");

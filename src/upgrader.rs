@@ -83,16 +83,16 @@ impl<'a> Upgrader<'a> {
         }
     }
 
-    fn report_backup_results(&self, results: Vec<Result<PathBuf>>) -> Result<()> {
-        for res in results {
-            if let Err(e) = res {
-                self.ui.upgrade_backup_failed(&format!("{e}"))?;
-            }
+    /// 备份待覆盖文件；任一失败即中止，避免在没有备份的情况下继续覆盖
+    fn backup_paths(paths: &[PathBuf], suffix: &str) -> Result<()> {
+        for result in backup_paths_with_index(paths, suffix) {
+            result?;
         }
 
         Ok(())
     }
 
+    /// 删除遗留的旧版本/备份文件；失败只提示，不阻断升级
     fn cleanup_old_files_by_pattern(
         &self,
         pattern: &Path,
@@ -126,7 +126,6 @@ impl<'a> Upgrader<'a> {
     }
 
     fn backup_existing_assets(
-        &self,
         pattern: &Path,
         matcher: fn(&str) -> bool,
         current_filename: &str,
@@ -144,7 +143,7 @@ impl<'a> Upgrader<'a> {
             to_backup.push(old_entry);
         }
 
-        self.report_backup_results(backup_paths_with_index(&to_backup, backup_suffix))
+        Self::backup_paths(&to_backup, backup_suffix)
     }
 
     fn install_asset_from_temp(
@@ -256,10 +255,7 @@ impl<'a> Upgrader<'a> {
             .map(|(_, path)| path)
             .collect();
 
-        self.report_backup_results(backup_paths_with_index(
-            &to_backup,
-            asset_pattern.backup_suffix,
-        ))?;
+        Self::backup_paths(&to_backup, asset_pattern.backup_suffix)?;
 
         Ok(Some((latest_version.display, latest_path)))
     }
@@ -528,7 +524,7 @@ impl<'a> Upgrader<'a> {
                 )?;
 
                 // 更新版本标记文件
-                write_bepinex_version_marker(&self.game_root, &version_info);
+                write_bepinex_version_marker(&self.game_root, &version_info)?;
 
                 self.ui
                     .upgrade_install_success(&self.game_root.join("BepInEx"))?;
@@ -539,7 +535,7 @@ impl<'a> Upgrader<'a> {
             if let Some((temp_path, filename)) = &temp_dll_path {
                 let plugins_dir = self.game_root.join("BepInEx").join("plugins");
 
-                self.backup_existing_assets(
+                Self::backup_existing_assets(
                     &self.game_root.join(METAMYSTIA_PLUGIN_GLOB),
                     VersionInfo::is_metamystia_filename,
                     filename,
@@ -562,7 +558,7 @@ impl<'a> Upgrader<'a> {
             // 6. 安装 ResourceExample ZIP（仅当需要升级时）
             if let Some((temp_path, filename)) = &temp_resourceex_path {
                 let resourceex_dir = self.game_root.join("ResourceEx");
-                self.backup_existing_assets(
+                Self::backup_existing_assets(
                     &self.game_root.join(RESOURCEEX_ZIP_GLOB),
                     VersionInfo::is_resourceex_filename,
                     filename,
