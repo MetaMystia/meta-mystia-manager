@@ -1,0 +1,290 @@
+name: Release
+
+# 打 tag 时自动构建并创建 draft release；也可以手动指定 tag 触发。
+# 构建在 Windows 宿主上进行：thunk-rs（VC-LTL5 + YY-Thunks）只有在 Windows 宿主上
+# 才会生效，产出的单文件 exe 支持 Windows 7+，且不需要 VC++ 运行库。
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要发布的 tag（例如 v3.0.0）"
+        required: true
+        type: string
+      dry_run:
+        description: "只构建与校验，不创建/更新 release"
+        required: false
+        type: boolean
+        default: true
+      use_current_ref:
+        description: "用当前分支的代码构建（不切到 tag），仅用于流程验证"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and draft release
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # Windows 控制台默认 cp1252，脚本里的中文输出需要 UTF-8 模式
+      PYTHONUTF8: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # git 历史与 tag 都要有，用于生成发行日志素材
+
+      - name: Resolve tag
+        id: tag
+        shell: pwsh
+        run: |
+          $tag = if ('${{ github.event_name }}' -eq 'workflow_dispatch') { '${{ inputs.tag }}' } else { '${{ github.ref_name }}' }
+          if (-not $tag) { throw '无法确定 tag' }
+
+          git fetch --tags --force
+          if (-not (git rev-parse --verify --quiet "refs/tags/$tag")) { throw "tag $tag 不存在" }
+
+          if ('${{ inputs.use_current_ref }}' -eq 'true') {
+            # 流程验证用：历史 tag 里可能还没有最新的 CI 脚本，这里直接构建当前 ref
+            Write-Host "按输入使用当前 ref（$env:GITHUB_SHA），不切换到 tag"
+          }
+          else {
+            git checkout --force "tags/$tag"
+          }
+
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "发布 tag：$tag"
+
+      - name: Verify workflow scripts
+        shell: pwsh
+        run: |
+          # 历史 tag 的代码里可能还没有 CI 脚本，这里给出可操作的提示而不是 file not found
+          $required = @('.github/scripts/check_win7_imports.py', '.github/scripts/gen_release_material.py')
+          $missing = $required | Where-Object { -not (Test-Path $_) }
+
+          if ($missing) {
+            throw "当前代码缺少 $($missing -join '、')。历史 tag 的流程验证请勾选 use_current_ref；正式发布请使用包含 CI 脚本的 tag。"
+          }
+
+      - name: Check version consistency
+        shell: pwsh
+        run: |
+          $tag = '${{ steps.tag.outputs.tag }}'
+          $match = Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+          if (-not $match) { throw 'Cargo.toml 中找不到 version' }
+
+          $version = $match.Matches[0].Groups[1].Value
+          if ($tag -ne "v$version") { throw "tag $tag 与 Cargo.toml 的 v$version 不一致" }
+
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "版本：$version"
+        id: version
+
+      - name: Ensure 7-Zip
+        id: sevenzip
+        shell: pwsh
+        run: |
+          # 解包 VC-LTL5 与 YY-Thunks 需要 7z；镜像一般自带，没有就自己装
+          $command = Get-Command 7z -ErrorAction SilentlyContinue | Select-Object -First 1
+          $sevenZip = if ($command) { $command.Source } else { $null }
+
+          if (-not $sevenZip) {
+            $candidate = Join-Path $env:ProgramFiles '7-Zip\7z.exe'
+            if (Test-Path $candidate) {
+              $sevenZip = $candidate
+              Split-Path $candidate | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+            }
+          }
+
+          if (-not $sevenZip) {
+            Write-Host '构建机没有 7z，改用 Chocolatey 安装'
+            choco install 7zip -y --no-progress
+            $command = Get-Command 7z -ErrorAction SilentlyContinue | Select-Object -First 1
+            $sevenZip = if ($command) { $command.Source } else { $null }
+          }
+
+          if (-not $sevenZip) { throw '无法准备 7z' }
+
+          "seven_zip=$sevenZip" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "7z：$sevenZip"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+          components: rustfmt, clippy
+
+      # runner 每次都是全新机器：没有缓存时 cargo 会重新下载全部依赖并从头编译。
+      # rust-cache 会缓存 ~/.cargo 与 target/（只保留被引用的产物），key 里带上
+      # rustc 版本、Cargo.lock 哈希等，依赖没变时可直接复用编译结果。
+      - name: Cache cargo dependencies and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-msvc
+
+      - name: Cache thunk-rs assets
+        id: thunk-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.thunk-rs-assets
+          # thunk-rs 内置的 VC-LTL5 / YY-Thunks 版本只在升级该 crate 时变化，
+          # 而升级一定会改写 Cargo.lock，因此用它做 key 足够精确。
+          key: thunk-rs-assets-${{ hashFiles('Cargo.lock') }}
+
+      - name: Prepare thunk-rs assets
+        shell: pwsh
+        env:
+          SEVEN_ZIP: ${{ steps.sevenzip.outputs.seven_zip }}
+        run: |
+          # thunk-rs 每次构建都会重新下载 VC-LTL5（约 17.8MB）与 YY-Thunks（约 12.7MB）
+          # 并解包；这里预先准备好，再通过 VC_LTL / YY_THUNKS 环境变量让它跳过下载。
+          $assets = Join-Path $env:GITHUB_WORKSPACE '.thunk-rs-assets'
+          $vcLtl = Join-Path $assets 'vc-ltl'
+          $yyThunks = Join-Path $assets 'yy-thunks'
+
+          if ((Test-Path (Join-Path $vcLtl 'TargetPlatform')) -and (Test-Path (Join-Path $yyThunks 'objs'))) {
+            Write-Host 'thunk-rs 资产已就绪，跳过下载'
+            exit 0
+          }
+
+          # 从 thunk-rs 源码里读取它期望的版本号，避免手写版本导致与 crate 不同步
+          cargo fetch --locked
+          $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
+          $lib = Get-ChildItem (Join-Path $cargoHome 'registry\src\*\thunk-rs-*\src\lib.rs') |
+            Select-Object -First 1
+          if (-not $lib) { throw '找不到 thunk-rs 源码，无法确定要下载的版本' }
+
+          $vcMatch = Select-String -Path $lib.FullName -Pattern 'const VC_LTL_VERSION:[^=]*= "([^"]+)"'
+          $yyMatch = Select-String -Path $lib.FullName -Pattern 'const YY_THUNKS_VERSION:[^=]*= "([^"]+)"'
+          if (-not $vcMatch) { throw '无法从 thunk-rs 源码解析 VC_LTL_VERSION' }
+          if (-not $yyMatch) { throw '无法从 thunk-rs 源码解析 YY_THUNKS_VERSION' }
+
+          $vcVersion = $vcMatch.Matches[0].Groups[1].Value
+          $yyVersion = $yyMatch.Matches[0].Groups[1].Value
+          Write-Host "thunk-rs 需要 VC-LTL5 v$vcVersion 与 YY-Thunks v$yyVersion"
+
+          $work = Join-Path $env:RUNNER_TEMP 'thunk-rs-download'
+          New-Item -ItemType Directory -Force $work | Out-Null
+          Push-Location $work
+
+          curl.exe -LOkf "https://github.com/Chuyu-Team/VC-LTL5/releases/download/v$vcVersion/VC-LTL-Binary.7z"
+          if ($LASTEXITCODE -ne 0) { throw "下载 VC-LTL5 失败（退出码 $LASTEXITCODE）" }
+
+          curl.exe -LOkf "https://github.com/Chuyu-Team/YY-Thunks/releases/download/v$yyVersion/YY-Thunks-Objs.zip"
+          if ($LASTEXITCODE -ne 0) { throw "下载 YY-Thunks 失败（退出码 $LASTEXITCODE）" }
+
+          New-Item -ItemType Directory -Force $vcLtl, $yyThunks | Out-Null
+          & $env:SEVEN_ZIP x -aoa 'VC-LTL-Binary.7z' "-o$vcLtl"
+          if ($LASTEXITCODE -ne 0) { throw "解包 VC-LTL5 失败（退出码 $LASTEXITCODE）" }
+
+          & $env:SEVEN_ZIP x -aoa 'YY-Thunks-Objs.zip' "-o$yyThunks"
+          if ($LASTEXITCODE -ne 0) { throw "解包 YY-Thunks 失败（退出码 $LASTEXITCODE）" }
+
+          Pop-Location
+
+          Remove-Item $work -Recurse -Force
+
+          if (-not (Test-Path (Join-Path $vcLtl 'TargetPlatform'))) { throw 'VC-LTL5 解包结果不符合预期' }
+          if (-not (Test-Path (Join-Path $yyThunks 'objs'))) { throw 'YY-Thunks 解包结果不符合预期' }
+
+      - name: Point thunk-rs at the prepared assets
+        shell: pwsh
+        run: |
+          $assets = Join-Path $env:GITHUB_WORKSPACE '.thunk-rs-assets'
+          "VC_LTL=$(Join-Path $assets 'vc-ltl')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "YY_THUNKS=$(Join-Path $assets 'yy-thunks')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host 'thunk-rs 将直接使用缓存里的 VC-LTL5 / YY-Thunks'
+
+      - name: Build
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Collect artifact
+        id: artifact
+        shell: pwsh
+        run: |
+          $version = '${{ steps.version.outputs.version }}'
+          $name = "meta-mystia-manager-v$version.exe"
+          $exe = 'target/x86_64-pc-windows-msvc/release/meta-mystia-manager.exe'
+          if (-not (Test-Path $exe)) { throw "找不到构建产物 $exe" }
+
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $target = Join-Path dist $name
+          Copy-Item $exe $target -Force
+
+          $hash = (Get-FileHash $target -Algorithm SHA256).Hash.ToLower()
+
+          "exe=$(Resolve-Path $target)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "hash=$hash" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "$name  $hash"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: meta-mystia-manager-v${{ steps.version.outputs.version }}
+          path: dist/*.exe
+          if-no-files-found: warn
+
+      - name: Check Windows 7 compatibility of the import table
+        run: python .github/scripts/check_win7_imports.py '${{ steps.artifact.outputs.exe }}'
+
+      - name: Generate release notes material
+        shell: pwsh
+        run: |
+          $tag = '${{ steps.tag.outputs.tag }}'
+          # 用当前 ref 构建时，素材按「tag..HEAD」收集，避免把已发布版本的提交算进来
+          $source = if ('${{ inputs.use_current_ref }}' -eq 'true') { 'HEAD' } else { $tag }
+
+          python .github/scripts/gen_release_material.py $source --output notes.md
+          Get-Content notes.md -Encoding utf8 | Select-Object -First 40
+
+      - name: Create or update draft release
+        shell: pwsh
+        run: |
+          # gh release view 在 release 不存在时返回非零；这里自己判断退出码
+          $PSNativeCommandUseErrorActionPreference = $false
+
+          $tag = '${{ steps.tag.outputs.tag }}'
+          $exe = '${{ steps.artifact.outputs.exe }}'
+
+          if ('${{ inputs.dry_run }}' -eq 'true') {
+            Write-Host 'dry run：跳过 release 创建与附件上传'
+            exit 0
+          }
+
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host '创建 draft release 并写入自动收集的素材'
+            gh release create $tag --draft --title $tag --notes-file notes.md
+          }
+          else {
+            # 已存在（例如重跑或已人工润色）：只更新附件，不动说明
+            Write-Host 'release 已存在，仅更新附件，保留已有说明'
+          }
+
+          gh release upload $tag $exe --clobber
+
+      - name: Summary
+        shell: pwsh
+        run: |
+          $tag = '${{ steps.tag.outputs.tag }}'
+          $version = '${{ steps.version.outputs.version }}'
+          $hash = '${{ steps.artifact.outputs.hash }}'
+          $source = if ('${{ inputs.use_current_ref }}' -eq 'true') { '当前分支' } else { "tag $tag" }
+
+          @(
+            "## Release $tag",
+            "",
+            "- 产物：``meta-mystia-manager-v$version.exe``（Windows 7+，单文件）",
+            "- 构建来源：$source",
+            "- SHA256：``$hash``",
+            "- 发行日志：已写入 draft release 作为素材，请润色后再发布",
+            "- 导入表：已确认不含 Win8+/Win10+ 依赖"
+          ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
