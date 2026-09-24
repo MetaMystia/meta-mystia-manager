@@ -247,8 +247,15 @@ impl Downloader<'_> {
 
         let mut reader = response.into_body().into_reader();
 
-        self.write_keyed_response(&mut reader, dest, id, ticket, append_from)
-            .map_err(KeyedDownloadError::Failed)
+        match self.write_keyed_response(&mut reader, dest, id, ticket, append_from) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                // 失败时收尾进度条，避免留下卡住的下载行
+                let _ = self.ui.download_finish(id, "下载失败");
+
+                Err(KeyedDownloadError::Failed(e))
+            }
+        }
     }
 
     /// 写入一次性密钥下载的内容：支持追加续传、流式校验，最后原子改名

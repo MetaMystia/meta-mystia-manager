@@ -344,11 +344,11 @@ impl Ui for ConsoleUI {
         println!("检测到的最新版本：");
         println!(
             "  • MetaMystia DLL：{}",
-            style(version_info.latest_dll()).green()
+            style(version_info.latest_dll()?).green()
         );
         println!(
             "  • ResourceExample ZIP：{}",
-            style(version_info.latest_resourceex()).green()
+            style(version_info.latest_resourceex()?).green()
         );
         println!(
             "  • BepInEx：{}",

@@ -296,12 +296,16 @@ impl<'a> Upgrader<'a> {
 
         let (dll_opt, res_opt) = self.get_installed_versions()?;
 
-        let dll_needs = dll_opt
-            .as_ref()
-            .is_some_and(|cur| !Self::versions_match(cur, version_info.latest_dll()));
-        let res_needs = res_opt
-            .as_ref()
-            .is_some_and(|cur| !Self::versions_match(cur, version_info.latest_resourceex()));
+        let dll_needs = dll_opt.as_ref().is_some_and(|cur| {
+            version_info
+                .latest_dll()
+                .is_ok_and(|latest| !Self::versions_match(cur, latest))
+        });
+        let res_needs = res_opt.as_ref().is_some_and(|cur| {
+            version_info
+                .latest_resourceex()
+                .is_ok_and(|latest| !Self::versions_match(cur, latest))
+        });
 
         Ok((bep_needs, dll_needs, res_needs))
     }
@@ -359,13 +363,13 @@ impl<'a> Upgrader<'a> {
         }
 
         // 检查 MetaMystia DLL 是否需要升级
-        let new_dll_version = version_info.latest_dll();
+        let new_dll_version = version_info.latest_dll()?;
         let dll_needs_upgrade = !Self::versions_match(&current_dll_version, new_dll_version);
         self.ui
             .upgrade_display_current_and_latest_dll(&current_dll_version, new_dll_version)?;
 
         // 检查 ResourceExample ZIP 是否需要升级
-        let new_resourceex_version = version_info.latest_resourceex();
+        let new_resourceex_version = version_info.latest_resourceex()?;
         let resourceex_needs_upgrade =
             !Self::versions_match(&current_resourceex_version, new_resourceex_version)
                 && has_resourceex;

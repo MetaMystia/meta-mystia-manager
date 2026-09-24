@@ -432,7 +432,6 @@ impl<'a> Downloader<'a> {
                 None,
                 Some(EXTERNAL_SOURCE_MIN_SPEED_BPS),
             ) {
-                self.ui.download_finish(id, "从 bepinex.dev 下载失败")?;
                 self.ui.download_bepinex_primary_failed(&format!(
                     "从 bepinex.dev 下载失败 ({e}), 切换到备用源..."
                 ))?;

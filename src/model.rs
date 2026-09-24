@@ -137,12 +137,26 @@ impl VersionInfo {
         Ok(())
     }
 
-    pub fn latest_dll(&self) -> &str {
-        &self.dlls[0]
+    /// 最新的 MetaMystia DLL 版本；列表为空时按无效版本信息处理
+    pub fn latest_dll(&self) -> Result<&str> {
+        self.dlls
+            .first()
+            .map(String::as_str)
+            .ok_or_else(|| Self::empty_list_error("dlls_empty"))
     }
 
-    pub fn latest_resourceex(&self) -> &str {
-        &self.zips[0]
+    /// 最新的 ResourceExample ZIP 版本；列表为空时按无效版本信息处理
+    pub fn latest_resourceex(&self) -> Result<&str> {
+        self.zips
+            .first()
+            .map(String::as_str)
+            .ok_or_else(|| Self::empty_list_error("zips_empty"))
+    }
+
+    fn empty_list_error(reason: &str) -> ManagerError {
+        report_event("Model.VersionInfo.Invalid", Some(reason));
+
+        ManagerError::InvalidVersionInfo
     }
 
     pub fn metamystia_version_from_filename(filename: &str) -> Option<String> {

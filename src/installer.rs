@@ -183,9 +183,13 @@ impl<'a> Installer<'a> {
             let idx = self
                 .ui
                 .select_version_from_list("MetaMystia DLL", &version_info.dlls)?;
-            version_info.dlls[idx].clone()
+            version_info
+                .dlls
+                .get(idx)
+                .cloned()
+                .ok_or(ManagerError::InvalidVersionInfo)?
         } else {
-            version_info.latest_dll().to_string()
+            version_info.latest_dll()?.to_string()
         };
 
         // 2.4. 选择 ResourceEx 版本（仅在安装时）
@@ -194,9 +198,15 @@ impl<'a> Installer<'a> {
                 let idx = self
                     .ui
                     .select_version_from_list("ResourceEx ZIP", &version_info.zips)?;
-                Some(version_info.zips[idx].clone())
+                Some(
+                    version_info
+                        .zips
+                        .get(idx)
+                        .cloned()
+                        .ok_or(ManagerError::InvalidVersionInfo)?,
+                )
             } else {
-                Some(version_info.latest_resourceex().to_string())
+                Some(version_info.latest_resourceex()?.to_string())
             }
         } else {
             None
@@ -235,7 +245,7 @@ impl<'a> Installer<'a> {
         let resourceex_path = resourceex_version
             .as_ref()
             .map(|version| temp_dir.join(VersionInfo::resourceex_filename(version)));
-        let try_github = VersionInfo::versions_match(&dll_version, version_info.latest_dll());
+        let try_github = VersionInfo::versions_match(&dll_version, version_info.latest_dll()?);
         let bepinex_from_primary = AtomicBool::new(false);
 
         let mut jobs: Vec<DownloadJob<'_>> = vec![

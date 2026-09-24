@@ -161,6 +161,32 @@ impl Downloader<'_> {
         rate_limit_bps: Option<usize>,
         min_speed_bps: Option<usize>,
     ) -> Result<()> {
+        let result = self.write_response_to_file_inner(
+            resp,
+            dest,
+            id,
+            total_size,
+            rate_limit_bps,
+            min_speed_bps,
+        );
+
+        // 中途失败（含换源重试）时收尾进度条，避免留下卡住的下载行
+        if result.is_err() {
+            let _ = self.ui.download_finish(id, "下载失败");
+        }
+
+        result
+    }
+
+    fn write_response_to_file_inner<R: Read>(
+        &self,
+        resp: &mut R,
+        dest: &Path,
+        id: usize,
+        total_size: Option<u64>,
+        rate_limit_bps: Option<usize>,
+        min_speed_bps: Option<usize>,
+    ) -> Result<()> {
         // 0 表示不限速
         let rate_limit_bps = rate_limit_bps.filter(|limit| *limit > 0);
         let (tmp_path, mut tmp_file) = create_download_temp_file(dest)?;

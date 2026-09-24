@@ -69,7 +69,9 @@ fn build_tracking_url(
     format!("{TRACKING_ENDPOINT}?{q}")
 }
 
-fn read_machine_guid() -> Option<String> {
+/// 读取机器标识：Windows 取 `MachineGuid`，macOS 取 `IOPlatformUUID`，Linux 取 `machine-id`
+#[cfg(windows)]
+fn read_machine_id() -> Option<String> {
     let out = Command::new("reg")
         .args([
             "query",
@@ -97,6 +99,39 @@ fn read_machine_guid() -> Option<String> {
     None
 }
 
+#[cfg(target_os = "macos")]
+fn read_machine_id() -> Option<String> {
+    let out = Command::new("ioreg")
+        .args(["-rd1", "-c", "IOPlatformExpertDevice"])
+        .output()
+        .ok()?;
+
+    if !out.status.success() {
+        return None;
+    }
+
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find(|line| line.contains("IOPlatformUUID"))
+        .and_then(|line| line.split('=').nth(1))
+        .map(|value| value.trim().trim_matches('"').to_string())
+        .filter(|id| !id.is_empty())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn read_machine_id() -> Option<String> {
+    ["/etc/machine-id", "/var/lib/dbus/machine-id"]
+        .iter()
+        .find_map(|path| std::fs::read_to_string(path).ok())
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+}
+
+#[cfg(not(any(windows, unix)))]
+fn read_machine_id() -> Option<String> {
+    None
+}
+
 fn md5_hex(input: &str) -> String {
     format!("{:x}", md5::compute(input))
 }
@@ -106,8 +141,8 @@ static CACHED_USER_ID: OnceLock<String> = OnceLock::new();
 pub fn get_user_id() -> String {
     CACHED_USER_ID
         .get_or_init(|| {
-            if let Some(guid) = read_machine_guid() {
-                return md5_hex(&guid);
+            if let Some(machine_id) = read_machine_id() {
+                return md5_hex(&machine_id);
             }
 
             let hostname = env::var("COMPUTERNAME").unwrap_or_default();

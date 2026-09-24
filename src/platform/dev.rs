@@ -104,6 +104,12 @@ pub fn init() {
     eprintln!("[dev] 开发模拟模式：Windows 特有行为已由开发实现替代");
     eprintln!("[dev] 沙箱游戏目录：{}", sandbox_root().display());
 
+    if env::var_os(ENV_ROOT).is_some() {
+        eprintln!(
+            "[dev] 注意：{ENV_ROOT} 覆盖了默认沙箱目录，请确认它指向专用目录而不是真实游戏目录"
+        );
+    }
+
     let switches = [
         (
             ENV_SIM_DOWNLOAD,
