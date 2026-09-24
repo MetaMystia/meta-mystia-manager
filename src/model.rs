@@ -12,7 +12,13 @@ use std::{
 pub struct VersionInfo {
     #[serde(rename = "bepInEx")]
     pub bep_in_ex: String,
+    /// 上游 BepInEx 文件名（如 `BepInEx-Unity.IL2CPP-win-x64-6.0.0-be.785+6abdba4.zip`）
+    #[serde(rename = "bepInExFileName", default)]
+    pub bep_in_ex_file_name: Option<String>,
     pub manager: String,
+    /// 运行期配置地址
+    #[serde(rename = "configUrl")]
+    pub config_url: String,
     pub dlls: Vec<String>,
     pub paths: DownloadPaths,
     pub zips: Vec<String>,
@@ -23,7 +29,6 @@ pub struct DownloadPaths {
     #[serde(rename = "bepInEx")]
     pub bep_in_ex: Option<String>,
     pub dll: Option<String>,
-    pub manager: Option<String>,
     pub zip: Option<String>,
 }
 
@@ -202,28 +207,28 @@ impl VersionInfo {
         Self::normalize_version(left) == Self::normalize_version(right)
     }
 
-    /// 解析 BepInEx 的文件名
+    /// 上游 BepInEx 文件名（服务端通过 `bepInExFileName` 下发）
     pub fn bepinex_filename(&self) -> Result<&str> {
-        self.bep_in_ex
-            .split('#')
-            .nth(1)
+        self.bep_in_ex_file_name
+            .as_deref()
             .map(str::trim)
+            .filter(|name| !name.is_empty())
             .ok_or_else(|| {
                 report_event("Model.VersionInfo.Invalid", Some("bepinex_filename"));
                 ManagerError::InvalidVersionInfo
             })
     }
 
-    /// 解析 BepInEx 的版本号
+    /// BepInEx 构建号（服务端只下发构建号，例如 `785`）
     pub fn bepinex_version(&self) -> Result<&str> {
-        self.bep_in_ex
-            .split('#')
-            .next()
-            .map(str::trim)
-            .ok_or_else(|| {
-                report_event("Model.VersionInfo.Invalid", Some("bepinex_version"));
-                ManagerError::InvalidVersionInfo
-            })
+        let version = self.bep_in_ex.trim();
+
+        if version.is_empty() {
+            report_event("Model.VersionInfo.Invalid", Some("bepinex_version"));
+            return Err(ManagerError::InvalidVersionInfo);
+        }
+
+        Ok(version)
     }
 
     /// MetaMystia DLL 文件名

@@ -23,6 +23,13 @@ pub enum OperationMode {
     Install,
     Upgrade,
     Uninstall,
+    Diagnostics,
+}
+
+/// 获取不到版本信息时的离线模式：只提供不依赖服务端的功能
+pub enum OfflineMode {
+    Uninstall,
+    Diagnostics,
 }
 
 /// 卸载模式枚举

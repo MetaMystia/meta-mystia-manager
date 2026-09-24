@@ -5,7 +5,7 @@ authors = ["AnYiEE <i@anyi.in>"]
 edition = "2024"
 description = "A manager for MetaMystia Mod (https://github.com/MetaMikuAI/MetaMystia). Repository: https://github.com/AnYiEE/meta-mystia-manager"
 license = "AGPL-3.0-only"
-categories = ["command-line-utilities"]
+categories = ["utilities"]
 keywords = ["touhou", "mod-manager", "bepinex", "metamystia"]
 repository = "https://github.com/AnYiEE/meta-mystia-manager"
 
@@ -17,12 +17,6 @@ panic = "abort"
 strip = "symbols"
 
 [dependencies]
-clap = { version = "4.5", features = [
-  "std",
-  "derive",
-  "help",
-  "usage",
-], default-features = false }
 md5 = "0.8"
 
 # Windows API
@@ -31,8 +25,11 @@ windows-sys = { version = "0.61", features = [
   "Win32_Security",
   "Win32_Security_Cryptography",
   "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_Console",
   "Win32_System_Registry",
   "Win32_System_Threading",
+  "Win32_Storage_FileSystem",
+  "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
 ] }

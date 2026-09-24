@@ -49,6 +49,37 @@ pub enum ManagerError {
 
     #[error("{0}")]
     SsoLoginFailed(String),
+
+    /// 服务端返回的错误，文案可直接展示给用户
+    #[error("{0}")]
+    ServiceError(String),
+}
+
+/// 把服务端返回的错误码转换成面向用户的提示；`scope` 是操作名，例如 `登录`、`下载`
+pub fn service_error(scope: &str, code: &str, status: u16) -> ManagerError {
+    let reason = match code {
+        "invalid-request" => "请求格式异常，请升级管理器后重试".to_string(),
+        "invalid-client" | "unknown-client" => "管理器配置无效，请升级管理器后重试".to_string(),
+        "client-disabled" => "该管理器已被停用，请联系管理员".to_string(),
+        "invalid-ticket" | "invalid-session" => "授权已过期，请重新登录后重试".to_string(),
+        "user-blocked" => "当前账号已被限制下载，请联系管理员".to_string(),
+        "user-disabled" | "disabled" => "当前账号已被禁用".to_string(),
+        "user-deleted" => "当前账号已被删除".to_string(),
+        "user-not-found" => "当前账号不可用，请联系管理员".to_string(),
+        "sso-unreachable" => "登录服务暂时不可用，请稍后再试".to_string(),
+        "feature-disabled" => "服务端未启用该功能，请联系管理员".to_string(),
+        "too-many-keys" => "同时下载的文件过多，请稍后再试".to_string(),
+        "too-many-requests" => "请求过于频繁，请稍后再试".to_string(),
+        "not-found" => {
+            "服务器上没有该文件（可能已下架或未同步），请更换版本或升级管理器".to_string()
+        }
+        "internal-error" => "服务端出错，请稍后再试".to_string(),
+        "" if status >= 500 => format!("服务端暂时不可用（HTTP {status}），请稍后再试"),
+        "" => format!("服务端返回异常（HTTP {status}）"),
+        other => format!("服务端返回异常（{other}）"),
+    };
+
+    ManagerError::ServiceError(format!("{scope}失败：{reason}"))
 }
 
 impl From<dialoguer::Error> for ManagerError {

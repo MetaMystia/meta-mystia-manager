@@ -72,6 +72,46 @@ impl Extractor {
         })
     }
 
+    fn is_excluded(file_path: &Path, exclude_patterns: &[&str]) -> bool {
+        exclude_patterns.iter().any(|pattern| {
+            let pat = Path::new(pattern);
+            file_path == pat || file_path.starts_with(pat.join(""))
+        })
+    }
+
+    /// 列出 ZIP 内会被解压到游戏目录的文件（与解压使用同一套安全校验与排除规则）
+    pub fn list_zip_entries(zip_path: &Path, exclude_patterns: &[&str]) -> Result<Vec<PathBuf>> {
+        let file = fs::File::open(zip_path).map_err(|e| {
+            ManagerError::from(io::Error::new(
+                e.kind(),
+                format!("打开 ZIP 文件 {} 失败：{}", zip_path.display(), e),
+            ))
+        })?;
+        let mut archive = ZipArchive::new(file)
+            .map_err(|e| ManagerError::ExtractFailed(format!("读取 ZIP 失败：{e}")))?;
+        let mut entries = Vec::new();
+
+        for i in 0..archive.len() {
+            let file = archive.by_index(i).map_err(|e| {
+                ManagerError::ExtractFailed(format!("读取条目失败（index {i}）：{e}"))
+            })?;
+            let Some(path) = file.enclosed_name() else {
+                continue;
+            };
+
+            if !Self::is_safe_path(&path) || file.is_symlink() || file.name().ends_with('/') {
+                continue;
+            }
+            if Self::is_excluded(&path, exclude_patterns) {
+                continue;
+            }
+
+            entries.push(path);
+        }
+
+        Ok(entries)
+    }
+
     /// 解压文件到指定目录（支持排除路径）
     pub fn extract_zip_safe_with_exclusions(
         zip_path: &Path,
@@ -148,12 +188,7 @@ impl Extractor {
                 )));
             }
 
-            let should_exclude = exclude_patterns.iter().any(|pattern| {
-                let pat = Path::new(pattern);
-                file_path == pat || file_path.starts_with(pat.join(""))
-            });
-
-            if should_exclude {
+            if Self::is_excluded(&file_path, exclude_patterns) {
                 continue;
             }
 

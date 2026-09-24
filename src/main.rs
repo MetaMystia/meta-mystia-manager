@@ -1,7 +1,6 @@
-mod cli;
-mod cli_ui;
 mod config;
 mod console_ui;
+mod diagnostics;
 mod downloader;
 mod env_check;
 mod error;
@@ -12,6 +11,9 @@ mod metrics;
 mod model;
 mod net;
 mod permission;
+mod preflight;
+mod remote_config;
+mod rollback;
 mod shutdown;
 mod sso;
 mod temp_dir;
@@ -20,10 +22,9 @@ mod uninstaller;
 mod updater;
 mod upgrader;
 mod win32;
+mod window;
 
-use crate::cli::{Cli, CliConfig, CliOperation, InstallConfig};
-use crate::cli_ui::CliUI;
-use crate::config::{GAME_EXECUTABLE, OperationMode, UninstallMode};
+use crate::config::{GAME_EXECUTABLE, OfflineMode, OperationMode};
 use crate::console_ui::ConsoleUI;
 use crate::downloader::Downloader;
 use crate::env_check::{check_game_directory, check_game_running};
@@ -36,48 +37,26 @@ use crate::uninstaller::Uninstaller;
 use crate::updater::perform_self_update;
 use crate::upgrader::Upgrader;
 
-use clap::Parser;
 use std::{
     env,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{self, ExitCode},
 };
 
 fn main() -> ExitCode {
-    let cli_args = Cli::parse();
-    let cli_config = cli_args.to_config();
-
     if !cfg!(windows) {
-        if let Some(ref config) = cli_config {
-            let cli_ui = CliUI::new(config.quiet);
-            let _ = cli_ui.error("Windows platform is required");
-            return ExitCode::from(1);
-        }
         let console_ui = ConsoleUI::new();
         let _ = console_ui.error("错误：仅支持 Windows 平台");
         console_ui.wait_for_key().ok();
         return ExitCode::from(1);
     }
 
-    let res = cli_config.as_ref().map_or_else(run_console_ui, run_cli_ui);
+    let res = run_console_ui();
 
     // 执行清理回调
     run_shutdown();
 
     res
-}
-
-/// 以 CLI 模式运行，返回进程退出码
-fn run_cli_ui(config: &CliConfig) -> ExitCode {
-    let cli_ui = CliUI::new(config.quiet);
-
-    match run_with_cli(&cli_ui, config) {
-        Ok(exit_code) => ExitCode::from(exit_code),
-        Err(e) => {
-            eprintln!("Error: {e}");
-            ExitCode::from(1)
-        }
-    }
 }
 
 /// 以交互式控制台模式运行，返回进程退出码
@@ -100,50 +79,35 @@ fn run(ui: &dyn Ui) -> Result<()> {
     // 1. 显示欢迎信息
     ui.display_welcome()?;
 
-    let mut version_info = None;
-    let downloader = {
-        let dl = Downloader::new(ui);
-        match dl.get_version_info() {
-            Ok(vi) => {
-                version_info = Some(vi);
-                Some(dl)
-            }
-            Err(e) => {
-                let _ = ui.message(&format!("无法获取版本信息：{e}"));
-                None
-            }
+    // 拿不到版本信息时无法安装/升级，转入只提供卸载与诊断包的离线模式
+    let downloader = Downloader::new(ui);
+    let version_info = match downloader.get_version_info() {
+        Ok(version_info) => version_info,
+        Err(e) => {
+            ui.error(&format!("无法获取版本信息：{e}"))?;
+
+            return run_offline(ui);
         }
     };
 
-    ui.display_version(version_info.as_ref().map(|vi| vi.manager.as_str()))?;
+    ui.display_version(Some(version_info.manager.as_str()))?;
 
     // 自升级提示
-    if let (Some(downloader), Some(vi)) = (&downloader, &version_info) {
-        let current_version = env!("CARGO_PKG_VERSION");
-        if current_version != vi.manager
-            && ui.manager_ask_self_update(current_version, &vi.manager)?
-        {
-            match perform_self_update(&env::current_dir()?, ui, downloader, vi, true) {
-                Ok(_) => {
-                    run_shutdown();
-                    process::exit(0);
-                }
-                Err(e) => ui.manager_update_failed(&format!("{e}"))?,
+    let current_version = env!("CARGO_PKG_VERSION");
+    if current_version != version_info.manager
+        && ui.manager_ask_self_update(current_version, &version_info.manager)?
+    {
+        match perform_self_update(&env::current_dir()?, ui, &downloader, &version_info, true) {
+            Ok(_) => {
+                run_shutdown();
+                process::exit(0);
             }
+            Err(e) => ui.manager_update_failed(&format!("{e}"))?,
         }
     }
 
     // 2. 目录环境检查
-    let game_root = match check_game_directory(ui) {
-        Ok(path) => path,
-        Err(e) => {
-            ui.message(&format!("当前目录：{}", env::current_dir()?.display()))?;
-            ui.message(&format!(
-                "请在游戏根目录（包含 {GAME_EXECUTABLE} 的文件夹）下运行本程序。"
-            ))?;
-            return Err(e);
-        }
-    };
+    let game_root = resolve_game_root(ui)?;
 
     // 3. 游戏进程检查
     if check_game_running()? {
@@ -152,9 +116,8 @@ fn run(ui: &dyn Ui) -> Result<()> {
     }
 
     // 4. 显示可升级项
-    if let Some(vi) = &version_info
-        && let Ok((bep_needs, dll_needs, res_needs)) =
-            Upgrader::new(game_root.clone(), ui).has_updates(vi)
+    if let Ok((bep_needs, dll_needs, res_needs)) =
+        Upgrader::new(game_root.clone(), ui).has_updates(&version_info)
     {
         ui.display_available_updates(bep_needs, dll_needs, res_needs)?;
     }
@@ -164,7 +127,7 @@ fn run(ui: &dyn Ui) -> Result<()> {
         let operation = ui.select_operation_mode()?;
 
         if matches!(operation, OperationMode::Install | OperationMode::Upgrade)
-            && !sso::ensure_logged_in(ui)?
+            && !sso::ensure_logged_in(ui, &version_info.config_url)?
         {
             continue;
         }
@@ -173,102 +136,44 @@ fn run(ui: &dyn Ui) -> Result<()> {
     };
 
     match operation {
-        OperationMode::Install => run_install(game_root, ui, None),
+        OperationMode::Install => run_install(game_root, ui),
         OperationMode::Upgrade => run_upgrade(game_root, ui),
-        OperationMode::Uninstall => run_uninstall(game_root, ui, None),
+        OperationMode::Uninstall => run_uninstall(game_root, ui),
+        OperationMode::Diagnostics => run_diagnostics(&game_root, ui),
     }
 }
 
-fn run_with_cli(ui: &dyn Ui, config: &CliConfig) -> Result<u8> {
-    report_event("Run.CLI", Some(env!("CARGO_PKG_VERSION")));
+/// 定位游戏根目录（当前目录或 Steam 安装路径）
+fn resolve_game_root(ui: &dyn Ui) -> Result<PathBuf> {
+    match check_game_directory(ui) {
+        Ok(path) => Ok(path),
+        Err(e) => {
+            ui.message(&format!("当前目录：{}", env::current_dir()?.display()))?;
+            ui.message(&format!(
+                "请在游戏根目录（包含 {GAME_EXECUTABLE} 的文件夹）下运行本程序。"
+            ))?;
 
-    let skip_network = matches!(config.operation, CliOperation::Uninstall(_));
-
-    let mut version_info = None;
-    let downloader = if skip_network {
-        None
-    } else {
-        let dl = Downloader::new(ui);
-        let vi = dl.get_version_info()?;
-        version_info = Some(vi);
-        Some(dl)
-    };
-
-    ui.display_version(version_info.as_ref().map(|vi| vi.manager.as_str()))?;
-
-    // 执行自更新
-    if !skip_network
-        && !config.skip_self_update
-        && let (Some(downloader), Some(vi)) = (&downloader, &version_info)
-    {
-        let current_version = env!("CARGO_PKG_VERSION");
-        if current_version != vi.manager {
-            match perform_self_update(&env::current_dir()?, ui, downloader, vi, false) {
-                Ok(filename) => {
-                    ui.message(&filename)?;
-                    run_shutdown();
-                    return Ok(100);
-                }
-                Err(e) => ui.manager_update_failed(&format!("{e}"))?,
-            }
+            Err(e)
         }
     }
+}
 
-    // 1. 目录环境检查
-    let game_root = if let Some(path) = &config.game_path {
-        if !path.exists() {
-            return Err(ManagerError::Other(format!(
-                "Path does not exist: {}",
-                path.display()
-            )));
-        }
-        if !path.join(GAME_EXECUTABLE).exists() {
-            return Err(ManagerError::Other(format!(
-                "Game executable {} not found in {}",
-                GAME_EXECUTABLE,
-                path.display()
-            )));
-        }
-        path.clone()
-    } else {
-        match check_game_directory(ui) {
-            Ok(path) => path,
-            Err(e) => {
-                ui.message(&format!(
-                    "Current directory: {}",
-                    env::current_dir()?.display()
-                ))?;
-                ui.message(&format!(
-                    "Please run this program in the game root directory (containing {GAME_EXECUTABLE}) or use --path to specify the directory."
-                ))?;
-                return Err(e);
-            }
-        }
-    };
+/// 离线模式：版本信息拿不到时只提供不依赖服务端的功能
+fn run_offline(ui: &dyn Ui) -> Result<()> {
+    let game_root = resolve_game_root(ui)?;
 
-    // 2. 游戏进程检查
     if check_game_running()? {
         ui.display_game_running_warning()?;
         return Err(ManagerError::GameRunning);
     }
 
-    // 3. 执行操作
-    match &config.operation {
-        CliOperation::Install(install_config) => {
-            run_install(game_root, ui, Some(install_config))?;
-        }
-        CliOperation::Upgrade => {
-            run_upgrade(game_root, ui)?;
-        }
-        CliOperation::Uninstall(mode) => {
-            run_uninstall(game_root, ui, Some(*mode))?;
-        }
+    match ui.select_offline_mode()? {
+        OfflineMode::Uninstall => run_uninstall(game_root, ui),
+        OfflineMode::Diagnostics => run_diagnostics(&game_root, ui),
     }
-
-    Ok(0)
 }
 
-fn run_install(game_root: PathBuf, ui: &dyn Ui, config: Option<&InstallConfig>) -> Result<()> {
+fn run_install(game_root: PathBuf, ui: &dyn Ui) -> Result<()> {
     // 创建安装器
     let installer = Installer::new(game_root, ui);
 
@@ -292,7 +197,7 @@ fn run_install(game_root: PathBuf, ui: &dyn Ui, config: Option<&InstallConfig>) 
     }
 
     // 执行安装
-    installer.install(has_installed, config)?;
+    installer.install(has_installed)?;
 
     ui.wait_for_key()?;
     Ok(())
@@ -309,12 +214,22 @@ fn run_upgrade(game_root: PathBuf, ui: &dyn Ui) -> Result<()> {
     Ok(())
 }
 
-fn run_uninstall(game_root: PathBuf, ui: &dyn Ui, mode: Option<UninstallMode>) -> Result<()> {
+fn run_uninstall(game_root: PathBuf, ui: &dyn Ui) -> Result<()> {
     // 创建卸载器
     let uninstaller = Uninstaller::new(game_root, ui);
 
     // 执行卸载
-    uninstaller.uninstall(mode)?;
+    uninstaller.uninstall()?;
+
+    ui.wait_for_key()?;
+    Ok(())
+}
+
+fn run_diagnostics(game_root: &Path, ui: &dyn Ui) -> Result<()> {
+    match diagnostics::export(ui, game_root)? {
+        path if path.as_os_str().is_empty() => {}
+        path => ui.message(&format!("诊断包已生成：{}", path.display()))?,
+    }
 
     ui.wait_for_key()?;
     Ok(())

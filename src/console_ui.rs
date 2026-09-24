@@ -1,4 +1,4 @@
-use crate::config::{OperationMode, UninstallMode};
+use crate::config::{OfflineMode, OperationMode, UninstallMode};
 use crate::error::{ManagerError, Result};
 use crate::metrics::{get_user_id, report_event};
 use crate::model::VersionInfo;
@@ -6,7 +6,7 @@ use crate::ui::Ui;
 
 use console::{Term, style};
 use dialoguer::{Confirm, Input, theme::ColorfulTheme};
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
 use std::{
     cmp::min,
     collections::HashMap,
@@ -16,19 +16,115 @@ use std::{
         Mutex, PoisonError,
         atomic::{AtomicUsize, Ordering},
     },
+    time::Instant,
 };
 
 /// 控制台 UI 实现
 pub struct ConsoleUI {
     bars: Mutex<HashMap<usize, ProgressBar>>,
+    multi: MultiProgress,
     next_id: AtomicUsize,
+    overall: ProgressBar,
+    progress: Mutex<ProgressTotals>,
+}
+
+/// 下载总进度：按任务汇总已下载字节，并按采样估算总速度
+#[derive(Default)]
+struct ProgressTotals {
+    /// id -> (已下载, 已知总量)
+    active: HashMap<usize, (u64, Option<u64>)>,
+    finished_bytes: u64,
+    last_sample: Option<(Instant, u64)>,
+    speed_bytes_per_second: f64,
+}
+
+impl ProgressTotals {
+    fn downloaded(&self) -> u64 {
+        self.finished_bytes
+            + self
+                .active
+                .values()
+                .map(|(downloaded, _)| *downloaded)
+                .sum::<u64>()
+    }
+
+    fn known_total(&self) -> u64 {
+        self.active
+            .values()
+            .filter_map(|(_, total)| *total)
+            .sum::<u64>()
+    }
+
+    /// 按 0.3 秒以上的采样窗口估算总速度
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "下载量远小于 f64 的 2^53 精度上限"
+    )]
+    fn sample(&mut self) {
+        let downloaded = self.downloaded();
+        let now = Instant::now();
+
+        match self.last_sample {
+            Some((at, bytes)) if now.duration_since(at).as_secs_f64() >= 0.3 => {
+                let elapsed = now.duration_since(at).as_secs_f64();
+                self.speed_bytes_per_second = downloaded.saturating_sub(bytes) as f64 / elapsed;
+                self.last_sample = Some((now, downloaded));
+            }
+            None => self.last_sample = Some((now, downloaded)),
+            _ => {}
+        }
+    }
+
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss,
+        reason = "速度与剩余量都是估算值，量级远小于 f64/u64 上限"
+    )]
+    fn summary(&self) -> String {
+        let downloaded = self.downloaded();
+        let total = self.known_total();
+        let speed = format!("{}/s", HumanBytes(self.speed_bytes_per_second as u64));
+        let remaining = if total > downloaded && self.speed_bytes_per_second > 0.0 {
+            format_duration((total - downloaded) as f64 / self.speed_bytes_per_second)
+        } else {
+            "--".to_string()
+        };
+
+        if total > 0 {
+            format!(
+                "总进度：{} / {}　{speed}　剩余 {remaining}",
+                HumanBytes(downloaded),
+                HumanBytes(total)
+            )
+        } else {
+            format!("总进度：{}　{speed}", HumanBytes(downloaded))
+        }
+    }
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "剩余时间已取正数并按秒取整"
+)]
+fn format_duration(seconds: f64) -> String {
+    let seconds = seconds.max(0.0).round() as u64;
+
+    format!("{:02}:{:02}", seconds / 60, seconds % 60)
 }
 
 impl ConsoleUI {
     pub fn new() -> Self {
+        let multi = MultiProgress::new();
+        let overall = multi.add(ProgressBar::new_spinner());
+
         Self {
             bars: Mutex::new(HashMap::new()),
+            multi,
             next_id: AtomicUsize::new(1),
+            overall,
+            progress: Mutex::new(ProgressTotals::default()),
         }
     }
 
@@ -124,6 +220,7 @@ impl Ui for ConsoleUI {
         println!("  {} 安装 Mod", style("[1]").green());
         println!("  {} 升级 Mod", style("[2]").green());
         println!("  {} 卸载 Mod", style("[3]").green());
+        println!("  {} 导出诊断包", style("[4]").green());
         println!("  {} 退出程序", style("[0]").dim());
         println!();
 
@@ -136,12 +233,44 @@ impl Ui for ConsoleUI {
                 "1" => return Ok(OperationMode::Install),
                 "2" => return Ok(OperationMode::Upgrade),
                 "3" => return Ok(OperationMode::Uninstall),
+                "4" => return Ok(OperationMode::Diagnostics),
                 "0" => {
                     return Err(ManagerError::UserCancelled);
                 }
                 _ => {
                     println!();
-                    println!("{}", style("无效的选项，请输入 0、1、2 或 3").yellow());
+                    println!("{}", style("无效的选项，请输入 0 到 4 之间的数字").yellow());
+                }
+            }
+        }
+    }
+
+    fn select_offline_mode(&self) -> Result<OfflineMode> {
+        println!();
+        println!(
+            "{}",
+            style("离线模式：安装与升级需要联网获取版本信息，当前只能卸载或导出诊断包。")
+                .yellow()
+                .bold()
+        );
+        println!();
+        println!("  {} 卸载 Mod", style("[1]").green());
+        println!("  {} 导出诊断包", style("[2]").green());
+        println!("  {} 退出程序", style("[0]").dim());
+        println!();
+
+        loop {
+            let input: String = Input::with_theme(&ColorfulTheme::default())
+                .with_prompt(" 请输入选项")
+                .interact_text()?;
+
+            match input.trim() {
+                "1" => return Ok(OfflineMode::Uninstall),
+                "2" => return Ok(OfflineMode::Diagnostics),
+                "0" => return Err(ManagerError::UserCancelled),
+                _ => {
+                    println!();
+                    println!("{}", style("无效的选项，请输入 0、1 或 2").yellow());
                 }
             }
         }
@@ -204,7 +333,7 @@ impl Ui for ConsoleUI {
         println!();
         println!(
             "{} {}",
-            style(format!("[{step}/4]")).cyan().bold(),
+            style(format!("[{step}/3]")).cyan().bold(),
             style(description).cyan()
         );
         println!();
@@ -664,7 +793,9 @@ impl Ui for ConsoleUI {
             |size| {
                 let pb = ProgressBar::new(size);
                 let style = ProgressStyle::default_bar()
-                    .template("{msg}\n[{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+                    .template(
+                        "{msg}\n[{bar:40.cyan/blue}] {bytes}/{total_bytes} {bytes_per_sec} ({eta})",
+                    )
                     .map_or_else(
                         |_| ProgressStyle::default_bar(),
                         |style| style.progress_chars("#>-"),
@@ -674,6 +805,16 @@ impl Ui for ConsoleUI {
                 pb
             },
         );
+        let pb = self.multi.add(pb);
+
+        {
+            let mut progress = self.progress.lock().unwrap_or_else(PoisonError::into_inner);
+            progress.active.insert(id, (0, total));
+            let summary = progress.summary();
+            drop(progress);
+
+            self.overall.set_message(summary);
+        }
 
         let mut guard = self.bars.lock().unwrap_or_else(PoisonError::into_inner);
         guard.insert(id, pb);
@@ -690,6 +831,18 @@ impl Ui for ConsoleUI {
         }
         drop(guard);
 
+        {
+            let mut progress = self.progress.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(entry) = progress.active.get_mut(&id) {
+                entry.0 = downloaded;
+            }
+            progress.sample();
+            let summary = progress.summary();
+            drop(progress);
+
+            self.overall.set_message(summary);
+        }
+
         Ok(())
     }
 
@@ -700,6 +853,25 @@ impl Ui for ConsoleUI {
             pb.finish_with_message(message.to_string());
         }
         drop(guard);
+
+        {
+            let mut progress = self.progress.lock().unwrap_or_else(PoisonError::into_inner);
+
+            if let Some((downloaded, _)) = progress.active.remove(&id) {
+                progress.finished_bytes += downloaded;
+            }
+
+            if progress.active.is_empty() {
+                // 全部任务完成：清掉总进度条并重置汇总，供下次安装复用
+                *progress = ProgressTotals::default();
+                drop(progress);
+                self.overall.finish_and_clear();
+            } else {
+                let summary = progress.summary();
+                drop(progress);
+                self.overall.set_message(summary);
+            }
+        }
 
         Ok(())
     }
@@ -1000,33 +1172,24 @@ impl Ui for ConsoleUI {
         }
     }
 
-    fn select_version_not_available(
-        &self,
-        component: &str,
-        version: &str,
-        available: &[String],
-    ) -> Result<()> {
+    fn sso_ask_open_browser(&self) -> Result<bool> {
+        Self::confirm_with_event(" 是否打开浏览器登录？", false, "UI.Sso.OpenBrowser.Confirm")
+    }
+
+    fn diagnostics_confirm_export(&self, entries: &[String]) -> Result<bool> {
         println!();
         println!(
             "{}",
-            style(format!("错误：{component} 版本 {version} 不可用")).red()
+            style("将收集以下内容，打包到管理器所在目录：")
+                .cyan()
+                .bold()
         );
-
-        let display_count = min(10, available.len());
-        let header = if available.len() < 10 {
-            "可用版本："
-        } else {
-            "最新 10 个可用版本："
-        };
-
-        println!("{}{}", header, available[..display_count].join("、"));
+        for entry in entries {
+            println!("  · {entry}");
+        }
         println!();
 
-        Ok(())
-    }
-
-    fn sso_ask_open_browser(&self) -> Result<bool> {
-        Self::confirm_with_event(" 是否打开浏览器登录？", false, "UI.Sso.OpenBrowser.Confirm")
+        Self::confirm_with_event(" 是否导出诊断包？", true, "UI.Diagnostics.ConfirmExport")
     }
 }
 

@@ -12,21 +12,22 @@ mod pkce;
 use crate::error::Result;
 use crate::metrics;
 use crate::net::build_agent;
+use crate::remote_config;
 use crate::ui::Ui;
+use crate::window;
 
 use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
-const SSO_BROWSER_ORIGIN: &str = "https://izakaya.cc";
 const SSO_CLIENT_ID: &str = "meta-mystia-manager";
-const SSO_CLIENT_SECRET: &str = "MXWo3vcfK1E9seyZlIOC-dy-tnXNdLeenqqEEzfOL0M";
 const AGENT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const AGENT_GLOBAL_TIMEOUT: Duration = Duration::from_secs(30);
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
 pub struct AccountSession {
+    pub download_token: String,
     pub user_id: String,
     pub username: String,
     pub nickname: Option<String>,
@@ -50,12 +51,12 @@ static CACHED_AGENT: OnceLock<ureq::Agent> = OnceLock::new();
 /// - 已登录：直接复用当次会话并返回 `true`
 /// - 用户拒绝确认、在浏览器中取消或等待超时：返回 `false`，调用方回到操作菜单
 /// - 真正的失败（网络异常、客户端失效、账号不可用等）：返回 `Err`
-pub fn ensure_logged_in(ui: &dyn Ui) -> Result<bool> {
+pub fn ensure_logged_in(ui: &dyn Ui, config_url: &str) -> Result<bool> {
     if current_account().is_some() {
         return Ok(true);
     }
 
-    login(ui)
+    login(ui, config_url)
 }
 
 pub fn current_account() -> Option<AccountSession> {
@@ -67,9 +68,23 @@ pub fn current_account() -> Option<AccountSession> {
     slot.clone()
 }
 
-fn login(ui: &dyn Ui) -> Result<bool> {
+/// 清除当前登录态；下载会话被服务端判定失效时调用，下次操作会重新登录
+pub fn clear_session() {
+    if let Some(slot) = SESSION.get() {
+        *slot.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    }
+}
+
+/// 当前登录态对应的下载会话 token（用于申请一次性下载密钥）
+pub fn current_download_token() -> Option<String> {
+    current_account().map(|account| account.download_token)
+}
+
+fn login(ui: &dyn Ui, config_url: &str) -> Result<bool> {
     ui.blank_line()?;
     ui.message("需要登录东方夜雀食堂小助手账号才能继续（登录在浏览器中完成）。")?;
+
+    let config = remote_config::get(ui, config_url)?;
 
     if !ui.sso_ask_open_browser()? {
         ui.message("已取消登录，未执行任何操作")?;
@@ -81,7 +96,12 @@ fn login(ui: &dyn Ui) -> Result<bool> {
     let pkce = pkce::create_pkce_pair()?;
     let state = pkce::create_state()?;
     let redirect_uri = server.redirect_uri();
-    let authorize_url = create_authorize_url(&redirect_uri, &state, &pkce.code_challenge);
+    let authorize_url = create_authorize_url(
+        &config.sso.authorize_origin,
+        &redirect_uri,
+        &state,
+        &pkce.code_challenge,
+    );
 
     if browser::open_url(&authorize_url).is_err() {
         ui.message(&format!(
@@ -91,7 +111,11 @@ fn login(ui: &dyn Ui) -> Result<bool> {
     ui.message("请在浏览器中完成登录并确认授权……")?;
 
     let ticket = match server.wait_for_callback(&state, LOGIN_TIMEOUT)? {
-        loopback::CallbackOutcome::Authorized { ticket } => ticket,
+        loopback::CallbackOutcome::Authorized { ticket } => {
+            window::focus_console();
+
+            ticket
+        }
         loopback::CallbackOutcome::Cancelled => {
             ui.message("已取消登录，未执行任何操作")?;
             ui.blank_line()?;
@@ -104,11 +128,18 @@ fn login(ui: &dyn Ui) -> Result<bool> {
         }
     };
 
-    let profile = exchange::validate_ticket(get_agent(), &ticket, &pkce.code_verifier)?;
+    let session = exchange::create_session(
+        get_agent(),
+        &config.sso.session_url,
+        SSO_CLIENT_ID,
+        &ticket,
+        &pkce.code_verifier,
+    )?;
     let session = AccountSession {
-        nickname: profile.nickname,
-        user_id: profile.user_id,
-        username: profile.username,
+        download_token: session.download_token,
+        nickname: session.nickname,
+        user_id: session.user_id,
+        username: session.username,
     };
 
     store_session(session.clone());
@@ -119,11 +150,17 @@ fn login(ui: &dyn Ui) -> Result<bool> {
     Ok(true)
 }
 
-fn create_authorize_url(redirect_uri: &str, state: &str, code_challenge: &str) -> String {
+fn create_authorize_url(
+    authorize_origin: &str,
+    redirect_uri: &str,
+    state: &str,
+    code_challenge: &str,
+) -> String {
     let encoded_redirect_uri = percent_encode(redirect_uri.as_bytes(), NON_ALPHANUMERIC);
+    let origin = authorize_origin.trim_end_matches('/');
 
     format!(
-        "{SSO_BROWSER_ORIGIN}/api/v1/sso/authorize?client_id={SSO_CLIENT_ID}\
+        "{origin}/api/v1/sso/authorize?client_id={SSO_CLIENT_ID}\
          &redirect_uri={encoded_redirect_uri}&state={state}&code_challenge={code_challenge}"
     )
 }

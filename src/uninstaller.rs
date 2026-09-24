@@ -1,4 +1,4 @@
-use crate::config::{RetryConfig, UninstallMode};
+use crate::config::RetryConfig;
 use crate::error::{ManagerError, Result};
 use crate::file_ops::{
     DeletionResult, DeletionStatus, count_results, execute_deletion, extract_failed_files,
@@ -39,11 +39,11 @@ impl<'a> Uninstaller<'a> {
     }
 
     /// 执行卸载流程
-    pub fn uninstall(&self, mode: Option<UninstallMode>) -> Result<()> {
+    pub fn uninstall(&self) -> Result<()> {
         report_event("Uninstall.Start", None);
 
-        // 1. 选择卸载模式（如果 mode 存在则使用，否则询问用户）
-        let mode = mode.map_or_else(|| self.ui.uninstall_select_mode(), Ok)?;
+        // 1. 选择卸载模式
+        let mode = self.ui.uninstall_select_mode()?;
         let mode_desc = mode.description();
         report_event("Uninstall.ModeSelected", Some(mode_desc));
 

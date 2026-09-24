@@ -2,7 +2,7 @@ use crate::config::{
     BEPINEX_VERSION_FILE, METAMYSTIA_PLUGIN_GLOB, METAMYSTIA_PLUGIN_OLD_GLOB, RESOURCEEX_ZIP_GLOB,
     RESOURCEEX_ZIP_OLD_GLOB,
 };
-use crate::downloader::Downloader;
+use crate::downloader::{DownloadJob, Downloader};
 use crate::error::{ManagerError, Result};
 use crate::extractor::Extractor;
 use crate::file_ops::{
@@ -11,6 +11,8 @@ use crate::file_ops::{
 };
 use crate::metrics::report_event;
 use crate::model::VersionInfo;
+use crate::preflight;
+use crate::rollback::Rollback;
 use crate::temp_dir::create_temp_dir_with_guard;
 use crate::ui::Ui;
 
@@ -412,135 +414,179 @@ impl<'a> Upgrader<'a> {
             self.ui.blank_line()?;
         }
 
-        // 3. 获取分享码
-        let share_code = self.downloader.get_share_code()?;
-
-        // 4. 下载新版本
-
+        // 3. 下载新版本
         let (temp_dir, _temp_guard) = create_temp_dir_with_guard(&self.game_root).map_err(|e| {
             ManagerError::from(io::Error::new(e.kind(), format!("创建临时目录失败：{e}")))
         })?;
 
-        // 下载 BepInEx（仅当需要升级时）
+        preflight::check(self.ui, &self.game_root, &temp_dir)?;
+
         let temp_bepinex_path = if bepinex_needs_upgrade {
-            let bepinex_filename = version_info.bepinex_filename()?;
-            let path = temp_dir.join(bepinex_filename);
-
-            self.ui.upgrade_downloading_bepinex()?;
-
-            self.downloader.download_bepinex(&version_info, &path)?;
-
-            Some(path)
+            Some(temp_dir.join(version_info.bepinex_filename()?))
         } else {
             None
         };
 
-        // 下载 DLL（仅当需要升级时）
         let temp_dll_path = if dll_needs_upgrade {
             let new_dll_filename = VersionInfo::metamystia_filename(new_dll_version);
             let path = temp_dir.join(&new_dll_filename);
-
-            self.ui.upgrade_downloading_dll()?;
-
-            self.downloader.download_metamystia(
-                &share_code,
-                new_dll_version,
-                &path,
-                version_info.paths.dll.as_deref(),
-                true,
-            )?;
 
             Some((path, new_dll_filename))
         } else {
             None
         };
 
-        // 下载 ResourceExample ZIP（仅当已安装且需要升级时）
         let temp_resourceex_path = if has_resourceex && resourceex_needs_upgrade {
             let resourceex_filename = VersionInfo::resourceex_filename(new_resourceex_version);
             let path = temp_dir.join(&resourceex_filename);
-
-            self.ui.upgrade_downloading_resourceex()?;
-
-            self.downloader.download_resourceex(
-                &share_code,
-                new_resourceex_version,
-                &path,
-                version_info.paths.zip.as_deref(),
-            )?;
 
             Some((path, resourceex_filename))
         } else {
             None
         };
 
-        // 5. 安装 BepInEx（仅当需要升级时）
-        if let Some(bepinex_path) = temp_bepinex_path {
-            self.ui.upgrade_installing_bepinex()?;
+        let mut jobs: Vec<DownloadJob<'_>> = Vec::new();
 
-            // 升级时保留 plugins 和 config 目录
-            Extractor::deploy_bepinex(
-                &bepinex_path,
-                &self.game_root,
-                &["BepInEx/config", "BepInEx/plugins"],
-            )?;
-
-            // 更新版本标记文件
-            write_bepinex_version_marker(&self.game_root, &version_info);
-
-            self.ui
-                .upgrade_install_success(&self.game_root.join("BepInEx"))?;
-            report_event("Upgrade.Installed.BepInEx", new_bepinex_version.as_deref());
+        if let Some(path) = &temp_bepinex_path {
+            jobs.push((
+                "下载 BepInEx",
+                Box::new(|| {
+                    self.ui.upgrade_downloading_bepinex()?;
+                    self.downloader
+                        .download_bepinex(&version_info, path)
+                        .map(|_| ())
+                }),
+            ));
+        }
+        if let Some((path, _)) = &temp_dll_path {
+            jobs.push((
+                "下载 MetaMystia DLL",
+                Box::new(|| {
+                    self.ui.upgrade_downloading_dll()?;
+                    self.downloader.download_metamystia(
+                        new_dll_version,
+                        path,
+                        version_info.paths.dll.as_deref(),
+                        true,
+                    )
+                }),
+            ));
+        }
+        if let Some((path, _)) = &temp_resourceex_path {
+            jobs.push((
+                "下载 ResourceExample",
+                Box::new(|| {
+                    self.ui.upgrade_downloading_resourceex()?;
+                    self.downloader.download_resourceex(
+                        new_resourceex_version,
+                        path,
+                        version_info.paths.zip.as_deref(),
+                    )
+                }),
+            ));
         }
 
-        // 6. 安装新版本 MetaMystia DLL（仅当需要升级时）
-        if let Some((temp_path, filename)) = temp_dll_path {
-            let plugins_dir = self.game_root.join("BepInEx").join("plugins");
+        self.downloader.download_files(&jobs)?;
+        drop(jobs);
 
-            self.backup_existing_assets(
-                &self.game_root.join(METAMYSTIA_PLUGIN_GLOB),
-                VersionInfo::is_metamystia_filename,
-                &filename,
-                "dll.old",
+        // 部署前记录将被覆盖/新建的文件，失败时回滚
+        let mut rollback = Rollback::new(&self.game_root, &temp_dir);
+        if let Some(path) = &temp_bepinex_path {
+            rollback.plan_zip(path, &["BepInEx/config", "BepInEx/plugins"])?;
+            rollback.plan(&self.game_root.join(BEPINEX_VERSION_FILE))?;
+        }
+        if let Some((_, filename)) = &temp_dll_path {
+            rollback.plan(
+                &self
+                    .game_root
+                    .join("BepInEx")
+                    .join("plugins")
+                    .join(filename),
             )?;
+        }
+        if let Some((_, filename)) = &temp_resourceex_path {
+            rollback.plan(&self.game_root.join("ResourceEx").join(filename))?;
+        }
 
-            if !bepinex_needs_upgrade {
-                self.ui.blank_line()?;
-                self.ui.blank_line()?;
+        let deploy = || -> Result<()> {
+            // 4. 安装 BepInEx（仅当需要升级时；升级时保留 plugins 和 config 目录）
+            if let Some(bepinex_path) = &temp_bepinex_path {
+                self.ui.upgrade_installing_bepinex()?;
+
+                Extractor::deploy_bepinex(
+                    bepinex_path,
+                    &self.game_root,
+                    &["BepInEx/config", "BepInEx/plugins"],
+                )?;
+
+                // 更新版本标记文件
+                write_bepinex_version_marker(&self.game_root, &version_info);
+
+                self.ui
+                    .upgrade_install_success(&self.game_root.join("BepInEx"))?;
+                report_event("Upgrade.Installed.BepInEx", new_bepinex_version.as_deref());
             }
-            self.ui.upgrade_installing_dll()?;
 
-            let new_dll_path = plugins_dir.join(&filename);
-            Self::install_asset_from_temp(&temp_path, &new_dll_path, "dll.tmp")?;
+            // 5. 安装新版本 MetaMystia DLL（仅当需要升级时）
+            if let Some((temp_path, filename)) = &temp_dll_path {
+                let plugins_dir = self.game_root.join("BepInEx").join("plugins");
 
-            self.ui.upgrade_install_success(&new_dll_path)?;
-            report_event("Upgrade.Installed.DLL", Some(&filename));
-        }
+                self.backup_existing_assets(
+                    &self.game_root.join(METAMYSTIA_PLUGIN_GLOB),
+                    VersionInfo::is_metamystia_filename,
+                    filename,
+                    "dll.old",
+                )?;
 
-        // 7. 安装 ResourceExample ZIP（仅当需要升级时）
-        if let Some((temp_path, filename)) = temp_resourceex_path {
-            let resourceex_dir = self.game_root.join("ResourceEx");
-            self.backup_existing_assets(
-                &self.game_root.join(RESOURCEEX_ZIP_GLOB),
-                VersionInfo::is_resourceex_filename,
-                &filename,
-                "zip.old",
-            )?;
+                if !bepinex_needs_upgrade {
+                    self.ui.blank_line()?;
+                    self.ui.blank_line()?;
+                }
+                self.ui.upgrade_installing_dll()?;
 
-            if !bepinex_needs_upgrade && !dll_needs_upgrade {
-                self.ui.blank_line()?;
-                self.ui.blank_line()?;
+                let new_dll_path = plugins_dir.join(filename);
+                Self::install_asset_from_temp(temp_path, &new_dll_path, "dll.tmp")?;
+
+                self.ui.upgrade_install_success(&new_dll_path)?;
+                report_event("Upgrade.Installed.DLL", Some(filename));
             }
-            self.ui.upgrade_installing_resourceex()?;
 
-            let new_zip_path = resourceex_dir.join(&filename);
-            Self::install_asset_from_temp(&temp_path, &new_zip_path, "zip.tmp")?;
+            // 6. 安装 ResourceExample ZIP（仅当需要升级时）
+            if let Some((temp_path, filename)) = &temp_resourceex_path {
+                let resourceex_dir = self.game_root.join("ResourceEx");
+                self.backup_existing_assets(
+                    &self.game_root.join(RESOURCEEX_ZIP_GLOB),
+                    VersionInfo::is_resourceex_filename,
+                    filename,
+                    "zip.old",
+                )?;
 
-            self.ui.upgrade_install_success(&new_zip_path)?;
-            report_event("Upgrade.Installed.ResourceEx", Some(&filename));
+                if !bepinex_needs_upgrade && !dll_needs_upgrade {
+                    self.ui.blank_line()?;
+                    self.ui.blank_line()?;
+                }
+                self.ui.upgrade_installing_resourceex()?;
+
+                let new_zip_path = resourceex_dir.join(filename);
+                Self::install_asset_from_temp(temp_path, &new_zip_path, "zip.tmp")?;
+
+                self.ui.upgrade_install_success(&new_zip_path)?;
+                report_event("Upgrade.Installed.ResourceEx", Some(filename));
+            }
+
+            Ok(())
+        };
+
+        if let Err(e) = deploy() {
+            let _ = rollback.restore();
+            self.ui.message("升级失败，已回滚到操作前状态")?;
+            report_event("Upgrade.Failed.RolledBack", Some(&format!("{e}")));
+
+            return Err(e);
         }
+        rollback.discard();
 
-        // 8. 清理临时文件
+        // 7. 清理临时文件
         self.ui.upgrade_cleanup_start()?;
         self.cleanup_old_files()?;
 

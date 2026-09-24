@@ -3,7 +3,7 @@ use crate::shutdown::SHUTDOWN_TIMEOUT;
 
 use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     env,
     process::Command,
     sync::{
@@ -11,12 +11,16 @@ use std::{
         mpsc::{RecvTimeoutError, Sender, channel},
     },
     thread::{JoinHandle, spawn},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const ID_SITE: &str = "13";
 const TRACKING_ENDPOINT: &str = "https://track.izakaya.cc/api.php";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+const RECENT_EVENT_LIMIT: usize = 200;
+
+static STARTED_AT: OnceLock<Instant> = OnceLock::new();
+static RECENT_EVENTS: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
 
 fn build_tracking_url(
     visitor_id: &str,
@@ -196,6 +200,8 @@ pub fn shutdown(timeout: Option<Duration>) {
 }
 
 pub fn report_event(action: &str, name: Option<&str>) {
+    record_recent_event(action, name);
+
     if cfg!(debug_assertions) {
         return;
     }
@@ -213,4 +219,33 @@ pub fn report_event(action: &str, name: Option<&str>) {
 
     let url = build_tracking_url(&visitor_id, account_user_id.as_deref(), &params);
     send_tracking_request(url);
+}
+
+/// 最近事件（只留在内存里，供诊断包导出）
+pub fn recent_events() -> Vec<String> {
+    RECENT_EVENTS.get().map_or_else(Vec::new, |events| {
+        events
+            .lock()
+            .map(|events| events.iter().cloned().collect())
+            .unwrap_or_default()
+    })
+}
+
+fn record_recent_event(action: &str, name: Option<&str>) {
+    let events = RECENT_EVENTS.get_or_init(|| Mutex::new(VecDeque::new()));
+    let Ok(mut events) = events.lock() else {
+        return;
+    };
+
+    if events.len() >= RECENT_EVENT_LIMIT {
+        events.pop_front();
+    }
+
+    let elapsed = STARTED_AT.get_or_init(Instant::now).elapsed().as_secs();
+    let line = name.map_or_else(
+        || format!("[+{elapsed}s] {action}"),
+        |name| format!("[+{elapsed}s] {action}：{name}"),
+    );
+
+    events.push_back(line);
 }

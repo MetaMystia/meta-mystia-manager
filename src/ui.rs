@@ -1,4 +1,4 @@
-use crate::config::{OperationMode, UninstallMode};
+use crate::config::{OfflineMode, OperationMode, UninstallMode};
 use crate::error::Result;
 use crate::model::VersionInfo;
 
@@ -16,6 +16,8 @@ pub trait Ui: Send + Sync {
         resourceex_available: bool,
     ) -> Result<()>;
     fn select_operation_mode(&self) -> Result<OperationMode>;
+    /// 离线模式（获取不到版本信息）下的菜单：只提供卸载与诊断包
+    fn select_offline_mode(&self) -> Result<OfflineMode>;
 
     fn blank_line(&self) -> Result<()>;
     fn wait_for_key(&self) -> Result<()>;
@@ -157,14 +159,12 @@ pub trait Ui: Send + Sync {
     // 版本选择相关
     fn select_version_ask_select(&self, component: &str) -> Result<bool>;
     fn select_version_from_list(&self, component: &str, versions: &[String]) -> Result<usize>;
-    fn select_version_not_available(
-        &self,
-        component: &str,
-        version: &str,
-        available: &[String],
-    ) -> Result<()>;
 
     // 账号登录相关
     /// 询问是否现在打开浏览器完成账号登录
     fn sso_ask_open_browser(&self) -> Result<bool>;
+
+    // 诊断相关
+    /// 展示将要收集的内容并确认是否导出诊断包
+    fn diagnostics_confirm_export(&self, entries: &[String]) -> Result<bool>;
 }
