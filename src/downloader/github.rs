@@ -235,6 +235,12 @@ impl Downloader<'_> {
         &self,
         version: Option<&str>,
     ) -> Result<Option<(String, String, String)>> {
+        // 开发模拟模式的离线运行：跳过发行说明拉取
+        #[cfg(not(windows))]
+        if crate::platform::dev::sim_download() {
+            return Ok(None);
+        }
+
         match self.get_github_release_notes(version) {
             Ok(Some((tag, name, body))) => {
                 self.ui

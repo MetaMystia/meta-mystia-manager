@@ -8,7 +8,7 @@ use crate::metrics::report_event;
 use crate::net::build_agent;
 use crate::ui::Ui;
 
-use std::{path::Path, ptr::null_mut, time::Duration};
+use std::{path::Path, time::Duration};
 
 /// 下载 + 解压需要的余量（BepInEx 压缩包约 34MB，解压后约 100MB+）
 const MIN_FREE_BYTES: u64 = 512 * 1024 * 1024;
@@ -28,6 +28,12 @@ const PROBE_ENDPOINTS: &[(&str, &str)] = &[
 
 /// 组合预检；任何一项失败都不阻断，只提示
 pub fn check(ui: &dyn Ui, game_root: &Path, temp_dir: &Path) -> Result<()> {
+    // 开发模拟模式的离线运行：跳过磁盘与站点探测
+    #[cfg(not(windows))]
+    if crate::platform::dev::sim_download() {
+        return Ok(());
+    }
+
     check_free_space("游戏目录", game_root)?;
     check_free_space("临时目录", temp_dir)?;
     check_endpoints(ui)
@@ -100,6 +106,7 @@ pub fn format_bytes(bytes: u64) -> String {
 #[cfg(windows)]
 fn free_space(path: &Path) -> Option<u64> {
     use std::os::windows::ffi::OsStrExt;
+    use std::ptr::null_mut;
     use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 
     let wide = path
@@ -116,6 +123,6 @@ fn free_space(path: &Path) -> Option<u64> {
 }
 
 #[cfg(not(windows))]
-fn free_space(_path: &Path) -> Option<u64> {
+const fn free_space(_path: &Path) -> Option<u64> {
     None
 }

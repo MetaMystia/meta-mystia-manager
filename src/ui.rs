@@ -30,7 +30,9 @@ pub trait Ui: Send + Sync {
     fn error(&self, text: &str) -> Result<()>;
 
     // 目录相关
+    #[allow(dead_code)]
     fn path_display_steam_found(&self, app_id: u32, name: Option<&str>, path: &Path) -> Result<()>;
+    #[allow(dead_code)]
     fn path_confirm_use_steam_found(&self) -> Result<bool>;
 
     // 安装相关
@@ -154,6 +156,7 @@ pub trait Ui: Send + Sync {
     fn manager_ask_self_update(&self, current_version: &str, latest_version: &str) -> Result<bool>;
     fn manager_update_starting(&self) -> Result<()>;
     fn manager_update_failed(&self, err: &str) -> Result<()>;
+    #[allow(dead_code)]
     fn manager_prompt_manual_update(&self) -> Result<()>;
 
     // 版本选择相关

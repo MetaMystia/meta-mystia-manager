@@ -1,6 +1,7 @@
 use crate::error::{ManagerError, Result};
 use crate::file_ops::atomic_rename_or_copy;
 use crate::metrics::report_event;
+use crate::platform;
 
 use std::{
     fs, io,
@@ -221,6 +222,11 @@ impl Extractor {
         game_root: &Path,
         exclude_patterns: &[&str],
     ) -> Result<()> {
+        if platform::fs_dry_run() {
+            eprintln!("[dev] 跳过解压（模拟）：{}", zip_path.display());
+            return Ok(());
+        }
+
         report_event(
             "Deploy.BepInEx.Start",
             Some(&zip_path.display().to_string()),
@@ -247,6 +253,12 @@ impl Extractor {
     }
 
     fn copy_to_destination_atomically(src: &Path, dest: &Path, temp_extension: &str) -> Result<()> {
+        // 开发模拟模式的干跑：只打印将要执行的动作
+        if platform::fs_dry_run() {
+            eprintln!("[dev] 跳过文件部署（模拟）：{}", dest.display());
+            return Ok(());
+        }
+
         let tmp_dest = dest.with_extension(temp_extension);
         fs::copy(src, &tmp_dest).map_err(|e| {
             ManagerError::from(io::Error::new(
@@ -305,6 +317,12 @@ impl Extractor {
 
     /// 安装 ResourceExample ZIP 到 ResourceEx/ 目录
     pub fn deploy_resourceex(zip_path: &Path, game_root: &Path) -> Result<()> {
+        // 开发模拟模式的干跑：只打印将要执行的动作
+        if platform::fs_dry_run() {
+            eprintln!("[dev] 跳过文件部署（模拟）：{}", zip_path.display());
+            return Ok(());
+        }
+
         let resourceex_dir = game_root.join("ResourceEx");
 
         if !resourceex_dir.exists() {

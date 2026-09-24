@@ -22,6 +22,26 @@ const RECENT_EVENT_LIMIT: usize = 200;
 static STARTED_AT: OnceLock<Instant> = OnceLock::new();
 static RECENT_EVENTS: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
 
+/// 埋点上报开关（仅开发模拟模式需要）
+#[cfg(not(windows))]
+static ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// 关闭埋点上报
+#[cfg(not(windows))]
+pub fn disable() {
+    ENABLED.store(false, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(windows)]
+const fn enabled() -> bool {
+    true
+}
+
+#[cfg(not(windows))]
+fn enabled() -> bool {
+    ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 fn build_tracking_url(
     visitor_id: &str,
     account_user_id: Option<&str>,
@@ -202,7 +222,7 @@ pub fn shutdown(timeout: Option<Duration>) {
 pub fn report_event(action: &str, name: Option<&str>) {
     record_recent_event(action, name);
 
-    if cfg!(debug_assertions) {
+    if cfg!(debug_assertions) || !enabled() {
         return;
     }
 

@@ -7,6 +7,8 @@ use crate::net::{
     JsonRequestError, build_agent, check_response_status, get_json_with_retry_stopping_on_status,
     get_response_with_retry, with_retry,
 };
+#[cfg(not(windows))]
+use crate::platform;
 use crate::remote_config::{self, RemoteConfig};
 use crate::sso;
 use crate::ui::Ui;
@@ -122,6 +124,20 @@ impl<'a> Downloader<'a> {
             return Ok(());
         }
 
+        // 开发模拟模式：占位产物由各下载函数直接生成，跳过远程配置与并发调度
+        #[cfg(not(windows))]
+        if platform::dev::sim_download() {
+            for (name, job) in jobs {
+                if let Err(e) = job() {
+                    let message = format!("{name}失败：{e}");
+                    report_event("Download.Job.Failed", Some(&message));
+                    return Err(ManagerError::ServiceError(message));
+                }
+            }
+
+            return Ok(());
+        }
+
         let concurrency = self.max_concurrent_downloads()?;
 
         for chunk in jobs.chunks(concurrency) {
@@ -172,6 +188,15 @@ impl<'a> Downloader<'a> {
 
     /// 获取版本信息
     pub fn get_version_info(&self) -> Result<VersionInfo> {
+        // 开发模拟模式：不联网，直接返回伪版本信息
+        #[cfg(not(windows))]
+        if platform::dev::sim_download() {
+            self.ui.download_version_info_start()?;
+            let version_info = platform::dev::fake_version_info();
+            self.ui.download_version_info_success()?;
+            return Ok(version_info);
+        }
+
         if let Ok(guard) = self.cached_version.lock()
             && let Some(cached) = guard.clone()
         {
@@ -231,6 +256,14 @@ impl<'a> Downloader<'a> {
 
     /// 获取自更新入口短链最终跳转到的分享码
     fn get_share_code(&self, redirect_url: &str) -> Result<String> {
+        // 开发模拟模式：不联网，直接返回占位分享码
+        #[cfg(not(windows))]
+        if platform::dev::sim_download() {
+            self.ui.download_share_code_start()?;
+            self.ui.download_share_code_success()?;
+            return Ok("dev".to_string());
+        }
+
         self.retry("获取下载链接", || {
             self.try_get_share_code(redirect_url)
         })
@@ -274,6 +307,12 @@ impl<'a> Downloader<'a> {
         category: Option<&str>,
         try_github: bool,
     ) -> Result<()> {
+        #[cfg(not(windows))]
+        if platform::dev::sim_download() {
+            report_event("Download.Metamystia.Success.Dev", Some(version));
+            return platform::dev::write_fake_artifact(dest, &platform::dev::FakeArtifact::Dll);
+        }
+
         report_event("Download.Metamystia.Start", Some(version));
 
         let filename = VersionInfo::metamystia_filename(version);
@@ -328,6 +367,12 @@ impl<'a> Downloader<'a> {
         dest: &Path,
         category: Option<&str>,
     ) -> Result<()> {
+        #[cfg(not(windows))]
+        if platform::dev::sim_download() {
+            report_event("Download.ResourceEx.Success.Dev", Some(version));
+            return platform::dev::write_fake_artifact(dest, &platform::dev::FakeArtifact::Zip);
+        }
+
         report_event("Download.ResourceEx.Start", Some(version));
 
         let filename = VersionInfo::resourceex_filename(version);
@@ -346,6 +391,13 @@ impl<'a> Downloader<'a> {
 
     /// 下载 BepInEx；返回是否来自上游主源
     pub fn download_bepinex(&self, version_info: &VersionInfo, dest: &Path) -> Result<bool> {
+        #[cfg(not(windows))]
+        if platform::dev::sim_download() {
+            report_event("Download.BepInEx.Success.Dev", None);
+            platform::dev::write_fake_artifact(dest, &platform::dev::FakeArtifact::Zip)?;
+            return Ok(true);
+        }
+
         let filename = version_info.bepinex_filename()?;
         let build = version_info.bepinex_version()?;
 
@@ -416,6 +468,12 @@ impl<'a> Downloader<'a> {
 
     /// 下载管理工具可执行文件（自更新，不需要登录）
     pub fn download_manager(&self, version_info: &VersionInfo, dest: &Path) -> Result<()> {
+        #[cfg(not(windows))]
+        if platform::dev::sim_download() {
+            report_event("Download.Manager.Success.Dev", Some(&version_info.manager));
+            return platform::dev::write_fake_artifact(dest, &platform::dev::FakeArtifact::Exe);
+        }
+
         let filename = version_info.manager_filename();
 
         report_event("Download.Manager.Start", Some(&version_info.manager));

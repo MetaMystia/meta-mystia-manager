@@ -10,7 +10,7 @@ mod installer;
 mod metrics;
 mod model;
 mod net;
-mod permission;
+mod platform;
 mod preflight;
 mod remote_config;
 mod rollback;
@@ -21,6 +21,7 @@ mod ui;
 mod uninstaller;
 mod updater;
 mod upgrader;
+#[cfg(windows)]
 mod win32;
 mod window;
 
@@ -44,12 +45,7 @@ use std::{
 };
 
 fn main() -> ExitCode {
-    if !cfg!(windows) {
-        let console_ui = ConsoleUI::new();
-        let _ = console_ui.error("错误：仅支持 Windows 平台");
-        console_ui.wait_for_key().ok();
-        return ExitCode::from(1);
-    }
+    platform::init();
 
     let res = run_console_ui();
 
@@ -93,16 +89,18 @@ fn run(ui: &dyn Ui) -> Result<()> {
     ui.display_version(Some(version_info.manager.as_str()))?;
 
     // 自升级提示
-    let current_version = env!("CARGO_PKG_VERSION");
-    if current_version != version_info.manager
-        && ui.manager_ask_self_update(current_version, &version_info.manager)?
-    {
-        match perform_self_update(&env::current_dir()?, ui, &downloader, &version_info, true) {
-            Ok(_) => {
-                run_shutdown();
-                process::exit(0);
+    if platform::self_update_enabled() {
+        let current_version = env!("CARGO_PKG_VERSION");
+        if current_version != version_info.manager
+            && ui.manager_ask_self_update(current_version, &version_info.manager)?
+        {
+            match perform_self_update(&env::current_dir()?, ui, &downloader, &version_info, true) {
+                Ok(_) => {
+                    run_shutdown();
+                    process::exit(0);
+                }
+                Err(e) => ui.manager_update_failed(&format!("{e}"))?,
             }
-            Err(e) => ui.manager_update_failed(&format!("{e}"))?,
         }
     }
 

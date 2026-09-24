@@ -19,21 +19,6 @@ strip = "symbols"
 [dependencies]
 md5 = "0.8"
 
-# Windows API
-windows-sys = { version = "0.61", features = [
-  "Win32_Foundation",
-  "Win32_Security",
-  "Win32_Security_Cryptography",
-  "Win32_System_Diagnostics_ToolHelp",
-  "Win32_System_Console",
-  "Win32_System_Registry",
-  "Win32_System_Threading",
-  "Win32_Storage_FileSystem",
-  "Win32_UI_Input_KeyboardAndMouse",
-  "Win32_UI_Shell",
-  "Win32_UI_WindowsAndMessaging",
-] }
-
 # HTTP 客户端
 ureq = { version = "3.4", features = ["native-tls"], default-features = false }
 native-tls = "0.2"
@@ -50,7 +35,6 @@ serde_json = "1.0"
 
 # 文件系统操作
 glob = "0.3"
-steamlocate = "2.0.1"
 
 # ZIP 解压
 zip = { version = "8.6", features = ["deflate"], default-features = false }
@@ -63,10 +47,31 @@ indicatif = "0.18"
 # 错误处理
 thiserror = "2.0"
 
-[build-dependencies]
-thunk-rs = { version = "0.3", features = ["win7"], default-features = false }
+[target.'cfg(windows)'.dependencies]
+# Windows API
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Cryptography",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Console",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_Registry",
+  "Win32_System_Threading",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+# Steam 安装目录定位
+steamlocate = "2.0.1"
+
+[target.'cfg(not(windows))'.dependencies]
+# 开发模拟模式：Windows 使用 CNG，其他平台用纯 Rust 实现
+sha2 = "0.10"
 
 [target.'cfg(windows)'.build-dependencies]
+thunk-rs = { version = "0.3", features = ["win7"], default-features = false }
 winres = "0.1"
 
 [lints.clippy]
@@ -74,7 +79,7 @@ all = { level = "warn", priority = -1 }
 cargo = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
-multiple_crate_versions = { level = "allow", priority = 1 } # 非 Windows 平台的 native-tls 会引入 openssl（依赖 syn 2），本项目只构建 Windows
+multiple_crate_versions = { level = "allow", priority = 1 } # 依赖图跨平台合并：非 Windows 宿主上 native-tls 会引入 openssl（依赖 syn 2），与 Windows 产物无关
 
 [[bin]]
 name = "meta-mystia-manager"

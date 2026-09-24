@@ -1,7 +1,9 @@
 use std::time::Duration;
 
 pub const GAME_EXECUTABLE: &str = "Touhou Mystia Izakaya.exe";
+#[cfg(windows)]
 pub const GAME_PROCESS_NAME: &str = "Touhou Mystia Izakaya.exe";
+#[cfg(windows)]
 pub const GAME_STEAM_APP_ID: u32 = 1_584_090;
 pub const TEMP_DIR_NAME: &str = concat!(".", env!("CARGO_PKG_NAME"), "-temp");
 pub const BEPINEX_VERSION_FILE: &str = "BepInEx/.mmm-bepinex-version";

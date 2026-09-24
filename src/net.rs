@@ -2,14 +2,16 @@ use crate::config::{RetryConfig, USER_AGENT};
 use crate::error::{ManagerError, Result};
 use crate::metrics::report_event;
 use crate::ui::Ui;
-use crate::win32::dword_len;
 
 use serde::de::DeserializeOwned;
-use std::{
-    env, ffi::OsString, mem::size_of, os::windows::ffi::OsStringExt, ptr::null_mut, thread::sleep,
-    time::Duration,
-};
+use std::{env, thread::sleep, time::Duration};
 use ureq::{Body, http::Response};
+
+#[cfg(windows)]
+use crate::win32::dword_len;
+#[cfg(windows)]
+use std::{ffi::OsString, mem::size_of, os::windows::ffi::OsStringExt, ptr::null_mut};
+#[cfg(windows)]
 use windows_sys::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_READ, REG_DWORD, REG_SZ, RegCloseKey, RegOpenKeyExW,
     RegQueryValueExW,
@@ -386,6 +388,6 @@ fn read_windows_registry_proxy() -> Option<String> {
 }
 
 #[cfg(not(windows))]
-fn read_windows_registry_proxy() -> Option<String> {
+const fn read_windows_registry_proxy() -> Option<String> {
     None
 }

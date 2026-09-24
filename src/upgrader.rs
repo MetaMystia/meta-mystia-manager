@@ -11,6 +11,7 @@ use crate::file_ops::{
 };
 use crate::metrics::report_event;
 use crate::model::VersionInfo;
+use crate::platform;
 use crate::preflight;
 use crate::rollback::Rollback;
 use crate::temp_dir::create_temp_dir_with_guard;
@@ -152,6 +153,12 @@ impl<'a> Upgrader<'a> {
         destination: &Path,
         temp_extension: &str,
     ) -> Result<()> {
+        // 开发模拟模式的干跑：只打印将要执行的动作
+        if platform::fs_dry_run() {
+            eprintln!("[dev] 跳过文件部署（模拟）：{}", destination.display());
+            return Ok(());
+        }
+
         if let Some(parent) = destination.parent()
             && !parent.exists()
         {
@@ -491,21 +498,24 @@ impl<'a> Upgrader<'a> {
 
         // 部署前记录将被覆盖/新建的文件，失败时回滚
         let mut rollback = Rollback::new(&self.game_root, &temp_dir);
-        if let Some(path) = &temp_bepinex_path {
-            rollback.plan_zip(path, &["BepInEx/config", "BepInEx/plugins"])?;
-            rollback.plan(&self.game_root.join(BEPINEX_VERSION_FILE))?;
-        }
-        if let Some((_, filename)) = &temp_dll_path {
-            rollback.plan(
-                &self
-                    .game_root
-                    .join("BepInEx")
-                    .join("plugins")
-                    .join(filename),
-            )?;
-        }
-        if let Some((_, filename)) = &temp_resourceex_path {
-            rollback.plan(&self.game_root.join("ResourceEx").join(filename))?;
+        // 干跑模式下不会真正写文件，无需备份
+        if !platform::fs_dry_run() {
+            if let Some(path) = &temp_bepinex_path {
+                rollback.plan_zip(path, &["BepInEx/config", "BepInEx/plugins"])?;
+                rollback.plan(&self.game_root.join(BEPINEX_VERSION_FILE))?;
+            }
+            if let Some((_, filename)) = &temp_dll_path {
+                rollback.plan(
+                    &self
+                        .game_root
+                        .join("BepInEx")
+                        .join("plugins")
+                        .join(filename),
+                )?;
+            }
+            if let Some((_, filename)) = &temp_resourceex_path {
+                rollback.plan(&self.game_root.join("ResourceEx").join(filename))?;
+            }
         }
 
         let deploy = || -> Result<()> {

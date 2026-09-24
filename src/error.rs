@@ -12,6 +12,7 @@ pub enum ManagerError {
     GameRunning,
 
     #[error("进程列表错误：{0}")]
+    #[cfg(windows)]
     ProcessListError(String),
 
     #[error("权限不足：{0}")]

@@ -3,7 +3,6 @@
 //! 只在交互式安装/升级前使用：先说明、再让用户确认，然后用系统浏览器完成授权，
 //! 最后用回调中的一次性 ticket 换取账号资料。会话只保存在当前进程内存里，退出即失效。
 
-mod browser;
 mod crypto;
 mod exchange;
 mod loopback;
@@ -12,6 +11,7 @@ mod pkce;
 use crate::error::Result;
 use crate::metrics;
 use crate::net::build_agent;
+use crate::platform;
 use crate::remote_config;
 use crate::ui::Ui;
 use crate::window;
@@ -56,7 +56,26 @@ pub fn ensure_logged_in(ui: &dyn Ui, config_url: &str) -> Result<bool> {
         return Ok(true);
     }
 
+    // 开发模拟模式直接注入假账号，跳过浏览器登录
+    #[cfg(not(windows))]
+    if platform::dev::sim_login() {
+        ui.message("[dev] 已跳过账号登录（MMM_DEV_SIM_LOGIN=1）")?;
+        ui.blank_line()?;
+        store_session(dev_session());
+        return Ok(true);
+    }
+
     login(ui, config_url)
+}
+
+#[cfg(not(windows))]
+fn dev_session() -> AccountSession {
+    AccountSession {
+        download_token: "dev-download-token".to_string(),
+        user_id: "dev-user".to_string(),
+        username: "dev".to_string(),
+        nickname: Some("开发模拟".to_string()),
+    }
 }
 
 pub fn current_account() -> Option<AccountSession> {
@@ -103,7 +122,7 @@ fn login(ui: &dyn Ui, config_url: &str) -> Result<bool> {
         &pkce.code_challenge,
     );
 
-    if browser::open_url(&authorize_url).is_err() {
+    if platform::open_url(&authorize_url).is_err() {
         ui.message(&format!(
             "如果浏览器没有自动打开，请手动访问：{authorize_url}"
         ))?;

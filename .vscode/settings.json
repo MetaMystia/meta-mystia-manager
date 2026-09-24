@@ -39,6 +39,7 @@
     "PROCESSENTRY",
     "resourceex",
     "resourceexample",
+    "RUSTFLAGS",
     "rustup",
     "serde",
     "SHOWNORMAL",

@@ -59,4 +59,4 @@ fn flash_window(window: *mut core::ffi::c_void) {
 }
 
 #[cfg(not(windows))]
-pub fn focus_console() {}
+pub const fn focus_console() {}

@@ -3,9 +3,8 @@ use crate::metrics;
 use std::{
     mem::take,
     panic::{AssertUnwindSafe, catch_unwind},
-    process,
     sync::{
-        Mutex, Once, OnceLock,
+        Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
         mpsc::channel,
     },
@@ -17,51 +16,13 @@ pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 type CleanupCallback = Box<dyn Fn() + Send + 'static>;
 static CALLBACKS: OnceLock<Mutex<Vec<Option<CleanupCallback>>>> = OnceLock::new();
-static SET_HANDLER: Once = Once::new();
 static SHUTDOWN_STARTED: AtomicBool = AtomicBool::new(false);
-
-const CTRL_C_EVENT: u32 = 0;
-const CTRL_BREAK_EVENT: u32 = 1;
-const CTRL_CLOSE_EVENT: u32 = 2;
-const CTRL_LOGOFF_EVENT: u32 = 5;
-const CTRL_SHUTDOWN_EVENT: u32 = 6;
-
-unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> i32 {
-    if matches!(
-        ctrl_type,
-        CTRL_C_EVENT
-            | CTRL_BREAK_EVENT
-            | CTRL_CLOSE_EVENT
-            | CTRL_LOGOFF_EVENT
-            | CTRL_SHUTDOWN_EVENT
-    ) {
-        run_shutdown();
-        process::exit(0);
-    } else {
-        0
-    }
-}
-
-unsafe extern "system" {
-    fn SetConsoleCtrlHandler(
-        handler: Option<unsafe extern "system" fn(u32) -> i32>,
-        add: i32,
-    ) -> i32;
-}
-
-fn ensure_handlers() {
-    SET_HANDLER.call_once(|| unsafe {
-        let _ = SetConsoleCtrlHandler(Some(console_ctrl_handler), 1);
-    });
-}
 
 /// 注册一个清理回调函数
 pub fn register_cleanup<F>(f: F) -> usize
 where
     F: Fn() + Send + 'static,
 {
-    ensure_handlers();
-
     let m = CALLBACKS.get_or_init(|| Mutex::new(Vec::new()));
     let mut guard = match m.lock() {
         Ok(g) => g,

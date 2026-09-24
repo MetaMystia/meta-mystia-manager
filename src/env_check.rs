@@ -1,44 +1,33 @@
-use crate::config::{GAME_EXECUTABLE, GAME_PROCESS_NAME, GAME_STEAM_APP_ID};
+use crate::config::GAME_EXECUTABLE;
 use crate::error::{ManagerError, Result};
 use crate::metrics::report_event;
+use crate::platform;
 use crate::ui::Ui;
-use crate::win32::dword_len;
 
 use std::{
-    env, io,
-    mem::{size_of, zeroed},
+    env,
     path::PathBuf,
     sync::{Mutex, OnceLock, PoisonError},
     time::{Duration, Instant},
 };
+
+#[cfg(windows)]
+use crate::config::GAME_STEAM_APP_ID;
+#[cfg(windows)]
 use steamlocate::SteamDir;
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
-use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
-};
-
-struct SnapshotHandle(HANDLE);
-
-impl SnapshotHandle {
-    const fn new(handle: HANDLE) -> Self {
-        Self(handle)
-    }
-
-    const fn as_raw(&self) -> HANDLE {
-        self.0
-    }
-}
-
-impl Drop for SnapshotHandle {
-    fn drop(&mut self) {
-        unsafe {
-            CloseHandle(self.0);
-        }
-    }
-}
 
 /// 检查游戏根目录
 pub fn check_game_directory(ui: &dyn Ui) -> Result<PathBuf> {
+    // 开发模拟模式使用沙箱目录，不探测本机 Steam
+    #[cfg(not(windows))]
+    if platform::dev::dev_mode() {
+        let root = platform::dev::ensure_sandbox_root()?;
+        ui.message(&format!("[dev] 使用沙箱游戏目录：{}", root.display()))?;
+        report_event("Env.DevSandbox", Some(&root.display().to_string()));
+        return Ok(root);
+    }
+
+    #[cfg(windows)]
     if let Ok(steam_dir) = SteamDir::locate()
         && let Ok(Some((app, library))) = steam_dir.find_app(GAME_STEAM_APP_ID)
     {
@@ -88,63 +77,8 @@ pub fn check_game_running() -> Result<bool> {
         return Ok(cached_result);
     }
 
-    let result = check_game_running_impl()?;
+    let result = platform::is_game_running()?;
     *cache.lock().unwrap_or_else(PoisonError::into_inner) = (result, Instant::now());
 
     Ok(result)
-}
-
-fn check_game_running_impl() -> Result<bool> {
-    unsafe {
-        let raw_snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-        if raw_snapshot == INVALID_HANDLE_VALUE {
-            let e = io::Error::last_os_error();
-            report_event(
-                "Env.GameRunning.CheckFailed.CreateToolhelp32Snapshot",
-                Some(&format!("{e}")),
-            );
-            return Err(ManagerError::ProcessListError(format!(
-                "无法获取进程列表：{e}"
-            )));
-        }
-        let snapshot_handle = SnapshotHandle::new(raw_snapshot);
-        let snapshot = snapshot_handle.as_raw();
-
-        let mut entry: PROCESSENTRY32W = zeroed();
-        entry.dwSize = dword_len(size_of::<PROCESSENTRY32W>());
-
-        if Process32FirstW(snapshot, &raw mut entry) == 0 {
-            let e = io::Error::last_os_error();
-            report_event(
-                "Env.GameRunning.CheckFailed.Process32FirstW",
-                Some(&format!("{e}")),
-            );
-            return Err(ManagerError::ProcessListError(format!(
-                "读取进程列表失败：{e}"
-            )));
-        }
-
-        let target = GAME_PROCESS_NAME.to_lowercase();
-
-        loop {
-            let process_name = String::from_utf16_lossy(
-                &entry.szExeFile[..entry
-                    .szExeFile
-                    .iter()
-                    .position(|&c| c == 0)
-                    .unwrap_or(entry.szExeFile.len())],
-            );
-
-            if process_name.to_lowercase() == target {
-                report_event("Env.GameRunning", None);
-                return Ok(true);
-            }
-
-            if Process32NextW(snapshot, &raw mut entry) == 0 {
-                break;
-            }
-        }
-
-        Ok(false)
-    }
 }

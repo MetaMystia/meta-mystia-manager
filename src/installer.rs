@@ -10,6 +10,7 @@ use crate::file_ops::{
 };
 use crate::metrics::report_event;
 use crate::model::VersionInfo;
+use crate::platform;
 use crate::preflight;
 use crate::rollback::Rollback;
 use crate::temp_dir::create_temp_dir_with_guard;
@@ -325,12 +326,15 @@ impl<'a> Installer<'a> {
 
         // 部署前记录将被覆盖/新建的文件，失败时回滚
         let mut rollback = Rollback::new(&self.game_root, &temp_dir);
-        rollback.plan_zip(&bepinex_path, exclusions)?;
-        rollback.plan(&self.game_root.join(BEPINEX_VERSION_FILE))?;
-        rollback.plan(&bepinex_cfg_path)?;
-        rollback.plan(&dll_destination)?;
-        if let Some(destination) = &resourceex_destination {
-            rollback.plan(destination)?;
+        // 干跑模式下不会真正写文件，无需备份
+        if !platform::fs_dry_run() {
+            rollback.plan_zip(&bepinex_path, exclusions)?;
+            rollback.plan(&self.game_root.join(BEPINEX_VERSION_FILE))?;
+            rollback.plan(&bepinex_cfg_path)?;
+            rollback.plan(&dll_destination)?;
+            if let Some(destination) = &resourceex_destination {
+                rollback.plan(destination)?;
+            }
         }
 
         let deploy = || -> Result<()> {
@@ -342,7 +346,7 @@ impl<'a> Installer<'a> {
 
             // 写入默认配置（如果不存在）
             let bepinex_config_dir = self.game_root.join("BepInEx").join("config");
-            if !bepinex_config_dir.exists() {
+            if !bepinex_config_dir.exists() && !platform::fs_dry_run() {
                 fs::create_dir_all(&bepinex_config_dir).map_err(|e| {
                     ManagerError::from(io::Error::new(
                         e.kind(),
@@ -384,7 +388,7 @@ UnityBaseLibrariesSource = https://url.izakaya.cc/unity-library
                 }
                 bepinex_cfg.push_str(bepinex_cfg_il2cpp);
             }
-            if !bepinex_cfg.is_empty() {
+            if !bepinex_cfg.is_empty() && !platform::fs_dry_run() {
                 let bepinex_tmp_cfg = bepinex_cfg_path.with_extension("cfg.tmp");
 
                 fs::write(&bepinex_tmp_cfg, bepinex_cfg.as_bytes()).map_err(|e| {

@@ -5,7 +5,7 @@ use crate::file_ops::{
     scan_existing_files,
 };
 use crate::metrics::report_event;
-use crate::permission::{elevate_and_restart, is_elevated};
+use crate::platform::{elevate_and_restart, is_elevated};
 use crate::shutdown::run_shutdown;
 use crate::ui::Ui;
 

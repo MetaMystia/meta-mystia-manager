@@ -4,6 +4,7 @@ use crate::config::{
 use crate::env_check::check_game_running;
 use crate::error::ManagerError;
 use crate::model::VersionInfo;
+use crate::platform;
 use crate::ui::Ui;
 
 use glob::{MatchOptions, glob_with};
@@ -67,11 +68,21 @@ pub fn map_io_error_to_uninstall_error(err: &io::Error, path: &Path) -> ManagerE
         return ManagerError::FileInUse(path.display().to_string());
     }
 
+    // 非 Windows 平台没有共享冲突错误码
+    #[cfg(not(windows))]
+    let _ = path;
+
     ManagerError::from(io::Error::new(err.kind(), err.to_string()))
 }
 
 /// 原子重命名或回退到 copy + remove
 pub fn atomic_rename_or_copy(src: &Path, dst: &Path) -> Result<(), ManagerError> {
+    // 开发模拟模式的干跑：只打印将要执行的动作
+    if platform::fs_dry_run() {
+        eprintln!("[dev] 跳过文件写入（模拟）：{}", dst.display());
+        return Ok(());
+    }
+
     ensure_game_not_running_for_path(dst)?;
 
     if let Some(parent) = dst.parent() {
@@ -121,6 +132,11 @@ pub fn atomic_rename_or_copy(src: &Path, dst: &Path) -> Result<(), ManagerError>
 }
 
 pub fn write_bepinex_version_marker(game_root: &Path, version_info: &VersionInfo) {
+    if platform::fs_dry_run() {
+        eprintln!("[dev] 跳过写入版本标记（模拟）：{BEPINEX_VERSION_FILE}");
+        return;
+    }
+
     if let Ok(bep_version) = version_info.bepinex_version() {
         let version_file = game_root.join(BEPINEX_VERSION_FILE);
         let _ = fs::write(&version_file, bep_version.as_bytes());
@@ -186,6 +202,15 @@ pub struct RemoveGlobResult {
 
 /// 删除匹配 glob 模式的文件/目录
 pub fn remove_glob_files(pattern: &Path) -> RemoveGlobResult {
+    // 开发模拟模式的干跑：只打印将要执行的动作
+    if platform::fs_dry_run() {
+        eprintln!("[dev] 跳过删除（模拟）：{}", pattern.display());
+        return RemoveGlobResult {
+            removed: Vec::new(),
+            failed: Vec::new(),
+        };
+    }
+
     let mut removed = Vec::new();
     let mut failed = Vec::new();
 
@@ -355,6 +380,12 @@ fn delete_path<F>(path: &Path, remove: F, still_exists_message: &str) -> Deletio
 where
     F: Fn(&Path) -> io::Result<()>,
 {
+    // 开发模拟模式的干跑：只打印将要执行的动作
+    if platform::fs_dry_run() {
+        eprintln!("[dev] 跳过删除（模拟）：{}", path.display());
+        return deletion_success(path);
+    }
+
     if let Err(e) = ensure_game_not_running_for_path(path) {
         return deletion_failed(path, e);
     }

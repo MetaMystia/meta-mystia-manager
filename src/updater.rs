@@ -1,18 +1,23 @@
 use crate::downloader::Downloader;
-use crate::error::{ManagerError, Result};
+#[cfg(windows)]
+use crate::error::ManagerError;
+use crate::error::Result;
 use crate::metrics::report_event;
 use crate::model::VersionInfo;
+#[cfg(windows)]
+use crate::platform;
 use crate::temp_dir::create_temp_dir_with_guard;
 use crate::ui::Ui;
 
+use std::path::Path;
+
+#[cfg(windows)]
 use std::{
     env, fs, io,
-    os::windows::process::CommandExt,
-    path::Path,
     process::{self, Command},
 };
-use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
+#[cfg(windows)]
 pub fn perform_self_update(
     game_root: &Path,
     ui: &dyn Ui,
@@ -75,16 +80,17 @@ pub fn perform_self_update(
     let shells = ["pwsh.exe", "powershell.exe"];
 
     for shell in &shells {
-        let res = Command::new(shell)
+        let mut command = Command::new(shell);
+        command
             .arg("-NoProfile")
             .arg("-ExecutionPolicy")
             .arg("Bypass")
             .arg("-File")
-            .arg(&script_path)
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn();
+            .arg(&script_path);
 
-        if res.is_ok() {
+        platform::suppress_console_window(&mut command);
+
+        if command.spawn().is_ok() {
             report_event("SelfUpdate.Scheduled", Some(&version_info.manager));
             ui.manager_update_starting()?;
             return Ok(filename);
@@ -95,6 +101,38 @@ pub fn perform_self_update(
     Err(ManagerError::Other("无法启动 PowerShell".to_string()))
 }
 
+/// 开发模拟模式：走完自更新的下载与就位准备，但不替换正在运行的可执行文件
+///
+/// Windows 上替换自身要借助 PowerShell 脚本等待旧进程退出后再覆盖，
+/// 非 Windows 宿主没有这条链路，因此这里只模拟到“新版本已下载”为止。
+#[cfg(not(windows))]
+pub fn perform_self_update(
+    game_root: &Path,
+    ui: &dyn Ui,
+    downloader: &Downloader,
+    version_info: &VersionInfo,
+    _auto_launch: bool,
+) -> Result<String> {
+    report_event("SelfUpdate.Start", Some(&version_info.manager));
+
+    let (temp_dir, _guard) = create_temp_dir_with_guard(game_root)?;
+    let filename = version_info.manager_filename();
+    let temp_path = temp_dir.join(&filename);
+
+    if let Err(e) = downloader.download_manager(version_info, &temp_path) {
+        ui.manager_update_failed(&format!("下载失败：{e}"))?;
+        report_event("SelfUpdate.Failed.Download", Some(&format!("{e}")));
+        return Err(e);
+    }
+
+    report_event("SelfUpdate.Simulated", Some(&version_info.manager));
+    ui.manager_update_starting()?;
+    eprintln!("[dev] 已获取 {filename}，跳过替换正在运行的可执行文件（仅 Windows 支持）");
+
+    Ok(filename)
+}
+
+#[cfg(windows)]
 fn generate_powershell_script(target: &str, new_exe: &str, pid: u32, auto_launch: bool) -> String {
     let launch_script = if auto_launch {
         r"
