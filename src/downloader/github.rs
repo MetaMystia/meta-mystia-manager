@@ -5,6 +5,11 @@ use super::{
     get_json_with_retry_stopping_on_status, report_event,
 };
 
+#[cfg(not(windows))]
+use crate::platform;
+
+use std::result::Result as StdResult;
+
 impl Downloader<'_> {
     fn github_release_fallback_tag(version: &str) -> Option<String> {
         let normalized = VersionInfo::normalize_version(version);
@@ -57,7 +62,7 @@ impl Downloader<'_> {
     fn fetch_github_release_json_from_url(
         &self,
         api_url: &str,
-    ) -> std::result::Result<serde_json::Value, JsonRequestError> {
+    ) -> StdResult<serde_json::Value, JsonRequestError> {
         get_json_with_retry_stopping_on_status(
             &self.agent,
             self.ui,
@@ -133,18 +138,18 @@ impl Downloader<'_> {
         let parts: Vec<_> = normalized.split('.').collect();
 
         match parts.as_slice() {
-            [major, minor] if major.parse::<u64>().is_ok() && minor.parse::<u64>().is_ok() => {
-                vec![
-                    format!("MetaMystia-v{}.{}.dll", major, minor),
-                    format!("MetaMystia-v{}.{}.0.dll", major, minor),
-                ]
-            }
             [major, minor, patch]
                 if major.parse::<u64>().is_ok()
                     && minor.parse::<u64>().is_ok()
                     && patch.parse::<u64>().is_ok() =>
             {
                 vec![format!("MetaMystia-v{}.{}.{}.dll", major, minor, patch)]
+            }
+            [major, minor] if major.parse::<u64>().is_ok() && minor.parse::<u64>().is_ok() => {
+                vec![
+                    format!("MetaMystia-v{}.{}.dll", major, minor),
+                    format!("MetaMystia-v{}.{}.0.dll", major, minor),
+                ]
             }
             _ => Vec::new(),
         }
@@ -208,7 +213,8 @@ impl Downloader<'_> {
         ))
     }
 
-    fn get_github_release_notes(
+    /// 获取指定版本的 GitHub Release Notes（`None` 表示最新版本），返回 `(tag, name, body)`
+    pub fn get_github_release_notes(
         &self,
         version: Option<&str>,
     ) -> Result<Option<(String, String, String)>> {
@@ -237,7 +243,7 @@ impl Downloader<'_> {
     ) -> Result<Option<(String, String, String)>> {
         // 开发模拟模式的离线运行：跳过发行说明拉取
         #[cfg(not(windows))]
-        if crate::platform::dev::sim_download() {
+        if platform::dev::sim_download() {
             return Ok(None);
         }
 

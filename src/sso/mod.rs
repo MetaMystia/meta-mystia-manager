@@ -17,8 +17,10 @@ use crate::ui::Ui;
 use crate::window;
 
 use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
-use std::sync::{Mutex, OnceLock, PoisonError};
-use std::time::Duration;
+use std::{
+    sync::{Mutex, OnceLock, PoisonError},
+    time::Duration,
+};
 
 const SSO_CLIENT_ID: &str = "meta-mystia-manager";
 const AGENT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -28,9 +30,9 @@ const LOGIN_TIMEOUT: Duration = Duration::from_secs(60);
 #[derive(Clone)]
 pub struct AccountSession {
     pub download_token: String,
+    pub nickname: Option<String>,
     pub user_id: String,
     pub username: String,
-    pub nickname: Option<String>,
 }
 
 impl AccountSession {
@@ -60,7 +62,6 @@ pub fn ensure_logged_in(ui: &dyn Ui, config_url: &str) -> Result<bool> {
     #[cfg(not(windows))]
     if platform::dev::sim_login() {
         ui.message("[dev] 已跳过账号登录（MMM_DEV_SIM_LOGIN=1）")?;
-        ui.blank_line()?;
         store_session(dev_session());
         return Ok(true);
     }
@@ -72,9 +73,9 @@ pub fn ensure_logged_in(ui: &dyn Ui, config_url: &str) -> Result<bool> {
 fn dev_session() -> AccountSession {
     AccountSession {
         download_token: "dev-download-token".to_string(),
+        nickname: Some("开发模拟".to_string()),
         user_id: "dev-user".to_string(),
         username: "dev".to_string(),
-        nickname: Some("开发模拟".to_string()),
     }
 }
 
@@ -100,14 +101,12 @@ pub fn current_download_token() -> Option<String> {
 }
 
 fn login(ui: &dyn Ui, config_url: &str) -> Result<bool> {
-    ui.blank_line()?;
     ui.message("需要登录东方夜雀食堂小助手账号才能继续（登录在浏览器中完成）。")?;
 
     let config = remote_config::get(ui, config_url)?;
 
     if !ui.sso_ask_open_browser()? {
         ui.message("已取消登录，未执行任何操作")?;
-        ui.blank_line()?;
         return Ok(false);
     }
 
@@ -131,18 +130,16 @@ fn login(ui: &dyn Ui, config_url: &str) -> Result<bool> {
 
     let ticket = match server.wait_for_callback(&state, LOGIN_TIMEOUT)? {
         loopback::CallbackOutcome::Authorized { ticket } => {
-            window::focus_console();
+            window::focus_manager_window();
 
             ticket
         }
         loopback::CallbackOutcome::Cancelled => {
             ui.message("已取消登录，未执行任何操作")?;
-            ui.blank_line()?;
             return Ok(false);
         }
         loopback::CallbackOutcome::TimedOut => {
             ui.message("等待登录超时，未执行任何操作")?;
-            ui.blank_line()?;
             return Ok(false);
         }
     };
@@ -164,7 +161,6 @@ fn login(ui: &dyn Ui, config_url: &str) -> Result<bool> {
     store_session(session.clone());
     metrics::set_account_user_id(&session.user_id);
     ui.message(&format!("已登录：{}", session.display_name()))?;
-    ui.blank_line()?;
 
     Ok(true)
 }

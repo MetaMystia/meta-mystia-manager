@@ -10,8 +10,8 @@ use crate::file_ops::{
 };
 use crate::metrics::report_event;
 use crate::model::VersionInfo;
-use crate::platform;
-use crate::preflight;
+use crate::platform::fs_dry_run;
+use crate::preflight::check;
 use crate::rollback::Rollback;
 use crate::temp_dir::create_temp_dir_with_guard;
 use crate::ui::Ui;
@@ -24,8 +24,8 @@ use std::{
 };
 
 pub struct Installer<'a> {
-    game_root: PathBuf,
     downloader: Downloader<'a>,
+    game_root: PathBuf,
     ui: &'a dyn Ui,
 }
 
@@ -33,8 +33,8 @@ impl<'a> Installer<'a> {
     pub fn new(game_root: PathBuf, ui: &'a dyn Ui) -> Self {
         let downloader = Downloader::new(ui);
         Self {
-            game_root,
             downloader,
+            game_root,
             ui,
         }
     }
@@ -72,7 +72,6 @@ impl<'a> Installer<'a> {
         let mut targets = Vec::new();
         let mut seen = HashSet::new();
 
-        // 添加路径到删除列表
         let mut push = |p: PathBuf| {
             if seen.insert(p.clone()) {
                 targets.push(p);
@@ -221,7 +220,6 @@ impl<'a> Installer<'a> {
             )),
         );
 
-        // 显示 GitHub Release Notes（获取所选版本的发行说明）
         if let Ok(Some(_)) = self
             .downloader
             .fetch_and_display_github_release_notes(Some(&dll_version))
@@ -238,7 +236,7 @@ impl<'a> Installer<'a> {
         // 4. 下载文件
         self.ui.install_display_step(2, "下载必要文件")?;
 
-        preflight::check(self.ui, &self.game_root, &temp_dir)?;
+        check(self.ui, &self.game_root, &temp_dir)?;
 
         let bepinex_path = temp_dir.join(version_info.bepinex_filename()?);
         let dll_path = temp_dir.join(VersionInfo::metamystia_filename(&dll_version));
@@ -333,7 +331,7 @@ impl<'a> Installer<'a> {
         // 部署前记录将被覆盖/新建的文件，失败时回滚
         let mut rollback = Rollback::new(&self.game_root, &temp_dir);
         // 干跑模式下不会真正写文件，无需备份
-        if !platform::fs_dry_run() {
+        if !fs_dry_run() {
             rollback.plan_zip(&bepinex_path, exclusions)?;
             rollback.plan(&self.game_root.join(BEPINEX_VERSION_FILE))?;
             rollback.plan(&bepinex_cfg_path)?;
@@ -347,12 +345,11 @@ impl<'a> Installer<'a> {
             // 安装 BepInEx（如果之前存在则保留 plugins 目录）
             Extractor::deploy_bepinex(&bepinex_path, &self.game_root, exclusions)?;
 
-            // 写入 BepInEx 版本标记文件
             write_bepinex_version_marker(&self.game_root, &version_info)?;
 
-            // 写入默认配置（如果不存在）
+            // 确保配置目录存在
             let bepinex_config_dir = self.game_root.join("BepInEx").join("config");
-            if !bepinex_config_dir.exists() && !platform::fs_dry_run() {
+            if !bepinex_config_dir.exists() && !fs_dry_run() {
                 fs::create_dir_all(&bepinex_config_dir).map_err(|e| {
                     ManagerError::from(io::Error::new(
                         e.kind(),
@@ -365,68 +362,10 @@ impl<'a> Installer<'a> {
                 })?;
             }
 
-            let bepinex_cfg_logging = r"[Logging.Console]
+            update_bepinex_config(&self.game_root, show_bepinex_console, !bepinex_from_primary)?;
 
-## Enables showing a console for log output.
-# Setting type: Boolean
-# Default value: true
-Enabled = false
-";
-            let bepinex_cfg_il2cpp = r"[IL2CPP]
-
-## URL to a ZIP file with managed Unity base libraries. They are used by Il2CppInterop to generate interop assemblies.
-## The URL can include {VERSION} template which will be replaced with the game's Unity engine version.
-## If a .zip file with the same filename as the URL (after template replacement) already exists in unity-libs, it will be used instead of downloading a new copy.
-## If you want to ensure BepInEx doesn't try to connect to the internet, set this to only the .zip filename (without a URL) and manually place the file in the unity-libs directory.
-##
-# Setting type: String
-# Default value: https://unity.bepinex.dev/libraries/{VERSION}.zip
-UnityBaseLibrariesSource = https://url.izakaya.cc/unity-library
-";
-
-            let mut bepinex_cfg = String::new();
-            if !show_bepinex_console {
-                bepinex_cfg.push_str(bepinex_cfg_logging);
-            }
-            if !bepinex_from_primary {
-                if !bepinex_cfg.is_empty() {
-                    bepinex_cfg.push('\n');
-                }
-                bepinex_cfg.push_str(bepinex_cfg_il2cpp);
-            }
-            if !bepinex_cfg.is_empty() && !platform::fs_dry_run() {
-                let bepinex_tmp_cfg = bepinex_cfg_path.with_extension("cfg.tmp");
-
-                fs::write(&bepinex_tmp_cfg, bepinex_cfg.as_bytes()).map_err(|e| {
-                    ManagerError::from(io::Error::new(
-                        e.kind(),
-                        format!(
-                            "写入 BepInEx 临时配置文件 {} 失败：{}",
-                            bepinex_tmp_cfg.display(),
-                            e
-                        ),
-                    ))
-                })?;
-
-                match atomic_rename_or_copy(&bepinex_tmp_cfg, &bepinex_cfg_path) {
-                    Ok(()) => {
-                        let _ = fs::remove_file(&bepinex_tmp_cfg);
-                    }
-                    Err(e) => {
-                        let _ = fs::remove_file(&bepinex_tmp_cfg);
-                        return Err(ManagerError::from(io::Error::other(format!(
-                            "写入 BepInEx 配置文件 {} 失败：{}",
-                            bepinex_cfg_path.display(),
-                            e
-                        ))));
-                    }
-                }
-            }
-
-            // 安装 MetaMystia DLL
             Extractor::deploy_metamystia(&dll_path, &self.game_root)?;
 
-            // 安装 ResourceExample ZIP
             if let Some(ref path) = resourceex_path {
                 Extractor::deploy_resourceex(path, &self.game_root)?;
             }
@@ -448,4 +387,181 @@ UnityBaseLibrariesSource = https://url.izakaya.cc/unity-library
 
         Ok(())
     }
+}
+
+const UNITY_LIBRARIES_MIRROR: &str = "https://url.izakaya.cc/unity-library";
+
+/// 更新 BepInEx 配置：只写需要改的键，值没变就不动文件
+pub fn update_bepinex_config(
+    game_root: &Path,
+    show_console: bool,
+    mirror_unity_libraries: bool,
+) -> Result<()> {
+    if fs_dry_run() {
+        return Ok(());
+    }
+
+    let config_path = game_root.join("BepInEx").join("config").join("BepInEx.cfg");
+    let mut text = fs::read_to_string(&config_path).unwrap_or_default();
+    let mut changed = false;
+
+    // BepInEx 默认开启控制台，配置里没写这个键时按开启比较
+    let console_now =
+        read_ini_value(&text, "Logging.Console", "Enabled").unwrap_or_else(|| "true".to_string());
+    let console_wanted = if show_console { "true" } else { "false" };
+
+    if !console_now.eq_ignore_ascii_case(console_wanted) {
+        text = set_ini_value(&text, "Logging.Console", "Enabled", console_wanted);
+        changed = true;
+    }
+
+    if mirror_unity_libraries {
+        let source_now =
+            read_ini_value(&text, "IL2CPP", "UnityBaseLibrariesSource").unwrap_or_default();
+
+        if !source_now.eq_ignore_ascii_case(UNITY_LIBRARIES_MIRROR) {
+            text = set_ini_value(
+                &text,
+                "IL2CPP",
+                "UnityBaseLibrariesSource",
+                UNITY_LIBRARIES_MIRROR,
+            );
+            changed = true;
+        }
+    }
+
+    if !changed {
+        return Ok(());
+    }
+
+    if let Some(parent) = config_path.parent()
+        && !parent.exists()
+    {
+        fs::create_dir_all(parent).map_err(|e| {
+            ManagerError::from(io::Error::new(
+                e.kind(),
+                format!("创建 BepInEx 配置目录 {} 失败：{}", parent.display(), e),
+            ))
+        })?;
+    }
+
+    let tmp_path = config_path.with_extension("cfg.tmp");
+    fs::write(&tmp_path, text.as_bytes()).map_err(|e| {
+        ManagerError::from(io::Error::new(
+            e.kind(),
+            format!(
+                "写入 BepInEx 临时配置文件 {} 失败：{}",
+                tmp_path.display(),
+                e
+            ),
+        ))
+    })?;
+
+    match atomic_rename_or_copy(&tmp_path, &config_path) {
+        Ok(()) => {
+            let _ = fs::remove_file(&tmp_path);
+            Ok(())
+        }
+        Err(e) => {
+            let _ = fs::remove_file(&tmp_path);
+            Err(ManagerError::from(io::Error::other(format!(
+                "写入 BepInEx 配置文件 {} 失败：{}",
+                config_path.display(),
+                e
+            ))))
+        }
+    }
+}
+
+/// 读取 INI 文本里 `[section]` 下的 `key` 值；不存在时返回 `None`
+fn read_ini_value(text: &str, section: &str, key: &str) -> Option<String> {
+    let header = format!("[{section}]");
+    let mut in_section = false;
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_section = trimmed.eq_ignore_ascii_case(&header);
+            continue;
+        }
+
+        if in_section
+            && let Some((name, value)) = trimmed.split_once('=')
+            && name.trim().eq_ignore_ascii_case(key)
+        {
+            return Some(value.trim().to_string());
+        }
+    }
+
+    None
+}
+
+/// BepInEx 是否配置为显示日志控制台；配置缺失或没有该键时按不勾选处理
+pub fn bepinex_console_enabled(game_root: &Path) -> bool {
+    let path = game_root.join("BepInEx").join("config").join("BepInEx.cfg");
+    let Ok(text) = fs::read_to_string(path) else {
+        return false;
+    };
+
+    read_ini_value(&text, "Logging.Console", "Enabled")
+        .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+}
+
+/// 设置 INI 文本里 `[section]` 下的 `key = value`：存在则替换，不存在则追加，保留其它内容
+fn set_ini_value(text: &str, section: &str, key: &str, value: &str) -> String {
+    let mut lines: Vec<String> = text.lines().map(ToString::to_string).collect();
+    let header = format!("[{section}]");
+    let mut section_start = None;
+    let mut section_end = lines.len();
+
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+
+        if !(trimmed.starts_with('[') && trimmed.ends_with(']')) {
+            continue;
+        }
+
+        if section_start.is_some() {
+            section_end = index;
+            break;
+        }
+
+        if trimmed.eq_ignore_ascii_case(&header) {
+            section_start = Some(index);
+        }
+    }
+
+    let entry = format!("{key} = {value}");
+
+    if let Some(start) = section_start {
+        let existing = (start + 1..section_end).find(|index| {
+            lines[*index]
+                .trim()
+                .split_once('=')
+                .is_some_and(|(name, _)| name.trim().eq_ignore_ascii_case(key))
+        });
+
+        if let Some(index) = existing {
+            lines[index] = entry;
+        } else {
+            lines.insert(start + 1, entry);
+        }
+
+        return with_trailing_newline(&lines);
+    }
+
+    if lines.last().is_some_and(|line| !line.trim().is_empty()) {
+        lines.push(String::new());
+    }
+    lines.push(header);
+    lines.push(entry);
+
+    with_trailing_newline(&lines)
+}
+
+fn with_trailing_newline(lines: &[String]) -> String {
+    let mut text = lines.join("\n");
+    text.push('\n');
+    text
 }

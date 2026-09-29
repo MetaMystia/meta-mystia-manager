@@ -1,4 +1,4 @@
-use crate::config::{OfflineMode, OperationMode, UninstallMode};
+use crate::config::UninstallMode;
 use crate::error::Result;
 use crate::model::VersionInfo;
 
@@ -6,35 +6,15 @@ use std::path::{Path, PathBuf};
 
 /// UI 抽象接口
 pub trait Ui: Send + Sync {
-    fn display_welcome(&self) -> Result<()>;
     fn display_version(&self, manager_version: Option<&str>) -> Result<()>;
     fn display_game_running_warning(&self) -> Result<()>;
-    fn display_available_updates(
-        &self,
-        bepinex_available: bool,
-        dll_available: bool,
-        resourceex_available: bool,
-    ) -> Result<()>;
-    fn select_operation_mode(&self) -> Result<OperationMode>;
-    /// 离线模式（获取不到版本信息）下的菜单：只提供卸载与诊断包
-    fn select_offline_mode(&self) -> Result<OfflineMode>;
-
-    fn blank_line(&self) -> Result<()>;
-    fn wait_for_key(&self) -> Result<()>;
 
     // 通用输出
     fn message(&self, text: &str) -> Result<()>;
-    #[allow(dead_code)]
     fn warn(&self, text: &str) -> Result<()>;
-    #[allow(dead_code)]
-    fn error(&self, text: &str) -> Result<()>;
 
     // 目录相关
-    #[allow(dead_code)]
     fn path_display_steam_found(&self, app_id: u32, name: Option<&str>, path: &Path) -> Result<()>;
-    #[allow(dead_code)]
-    fn path_confirm_use_steam_found(&self) -> Result<bool>;
-
     // 安装相关
     fn install_display_step(&self, step: usize, description: &str) -> Result<()>;
     fn install_display_version_info(&self, version_info: &VersionInfo) -> Result<()>;
@@ -66,11 +46,11 @@ pub trait Ui: Send + Sync {
         latest: &str,
     ) -> Result<()>;
     fn upgrade_no_update_needed(&self) -> Result<()>;
-    fn upgrade_bepinex_needs_upgrade(&self) -> Result<()>;
+    fn upgrade_bepinex_needs_upgrade(&self, installed: bool) -> Result<()>;
     fn upgrade_bepinex_already_latest(&self) -> Result<()>;
     fn upgrade_detected_new_dll(&self, current: &str, new: &str) -> Result<()>;
     fn upgrade_dll_already_latest(&self) -> Result<()>;
-    fn upgrade_resourceex_needs_upgrade(&self) -> Result<()>;
+    fn upgrade_resourceex_needs_upgrade(&self, installed: bool) -> Result<()>;
     fn upgrade_downloading_bepinex(&self) -> Result<()>;
     fn upgrade_downloading_dll(&self) -> Result<()>;
     fn upgrade_downloading_resourceex(&self) -> Result<()>;
@@ -112,6 +92,12 @@ pub trait Ui: Send + Sync {
     ) -> Result<()>;
 
     // 下载相关
+    /// 下载过程中是否被用户取消
+    fn download_cancelled(&self) -> bool;
+    /// 下载是否被暂停（确认“是否停止下载”时先暂停，避免边确认边下完）
+    fn download_paused(&self) -> bool;
+    /// 登记本次下载会出现的组件，界面先把进度行建好，避免逐个出现留下空行
+    fn download_plan(&self, names: &[&str]) -> Result<()>;
     /// 开始一个下载任务，返回一个用于后续更新的 id
     fn download_start(&self, filename: &str, total: Option<u64>) -> Result<usize>;
     /// 更新下载进度（传入 `download_start` 返回的 id）
@@ -152,10 +138,8 @@ pub trait Ui: Send + Sync {
     fn network_rate_limited(&self, secs: u64) -> Result<()>;
 
     // 自升级相关
-    fn manager_ask_self_update(&self, current_version: &str, latest_version: &str) -> Result<bool>;
     fn manager_update_starting(&self) -> Result<()>;
     fn manager_update_failed(&self, err: &str) -> Result<()>;
-    #[allow(dead_code)]
     fn manager_prompt_manual_update(&self) -> Result<()>;
 
     // 版本选择相关
@@ -169,4 +153,6 @@ pub trait Ui: Send + Sync {
     // 诊断相关
     /// 展示将要收集的内容并确认是否导出诊断包
     fn diagnostics_confirm_export(&self, entries: &[String]) -> Result<bool>;
+    /// 诊断包导出完成；界面据此显示路径
+    fn diagnostics_exported(&self, path: &Path) -> Result<()>;
 }

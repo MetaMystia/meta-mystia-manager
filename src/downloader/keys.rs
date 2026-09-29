@@ -5,7 +5,10 @@ use super::{
     PathBuf, Read, RemoteConfig, Result, Write, check_response_status, fs, io, remote_config,
     report_event, service_error, sso,
 };
-use crate::downloader::transfer::sleep_for_rate_limit;
+use crate::downloader::transfer::{sleep_for_rate_limit, wait_while_paused};
+use crate::preflight::format_bytes;
+
+use std::result::Result as StdResult;
 
 /// 一次性下载密钥
 struct DownloadKey {
@@ -33,9 +36,9 @@ struct DownloadKeyEnvelope {
 
 /// 一次性密钥下载的失败原因
 enum KeyedDownloadError {
+    Failed(ManagerError),
     /// 密钥已消费或过期，可重新申请
     KeyExpired,
-    Failed(ManagerError),
 }
 
 /// 部分下载文件：与目标同目录、同名追加 `.part`
@@ -170,7 +173,7 @@ impl Downloader<'_> {
             );
 
             return Err(ManagerError::NetworkError(
-                "下载服务响应异常，请升级管理器后重试".to_string(),
+                "下载服务响应异常，请升级管理工具后重试".to_string(),
             ));
         };
         let Some(md5) = envelope.md5 else {
@@ -180,7 +183,7 @@ impl Downloader<'_> {
             );
 
             return Err(ManagerError::NetworkError(
-                "下载服务响应异常，请升级管理器后重试".to_string(),
+                "下载服务响应异常，请升级管理工具后重试".to_string(),
             ));
         };
         let rate_limit_bps = remote_config::rate_limit_bytes_per_second(rate_limit_kb_per_second);
@@ -204,7 +207,7 @@ impl Downloader<'_> {
         &self,
         ticket: &DownloadKey,
         dest: &Path,
-    ) -> std::result::Result<(), KeyedDownloadError> {
+    ) -> StdResult<(), KeyedDownloadError> {
         let resume_from = resume_offset(&part_path(dest), ticket.size);
 
         let mut request = self.agent.get(&ticket.url);
@@ -232,10 +235,7 @@ impl Downloader<'_> {
         );
         // 续传时进度条只统计本次传输量，否则速度会瞬间跳到"已完成大小/0s"
         let label = if append_from > 0 {
-            format!(
-                "{filename}（续传，已完成 {}）",
-                crate::preflight::format_bytes(append_from)
-            )
+            format!("{filename}（续传，已完成 {}）", format_bytes(append_from))
         } else {
             filename
         };
@@ -328,6 +328,16 @@ impl Downloader<'_> {
 
             transferred += read as u64;
             self.ui.download_update(id, transferred)?;
+
+            if self.ui.download_cancelled() {
+                let _ = fs::remove_file(&part);
+                return Err(ManagerError::UserCancelled);
+            }
+
+            if self.ui.download_paused() && wait_while_paused(self.ui).is_err() {
+                let _ = fs::remove_file(&part);
+                return Err(ManagerError::UserCancelled);
+            }
 
             if let Some(rate_limit_bps) = ticket.rate_limit_bps {
                 sleep_for_rate_limit(transferred, start.elapsed(), rate_limit_bps);

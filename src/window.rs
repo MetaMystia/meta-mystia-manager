@@ -1,24 +1,37 @@
-//! 窗口辅助：需要用户在浏览器里操作（登录授权）之后，把管理器窗口带回前台。
+//! 窗口辅助：需要用户在浏览器里操作（登录授权）之后，把管理工具窗口带回前台。
 
-/// 把管理器控制台窗口还原并切到前台；抢不到前台时闪烁任务栏提醒
+use std::sync::atomic::{AtomicIsize, Ordering};
+
 #[cfg(windows)]
-pub fn focus_console() {
-    use windows_sys::Win32::System::Console::GetConsoleWindow;
-    use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetWindowThreadProcessId, IsWindowVisible, SW_RESTORE,
-        SetForegroundWindow, ShowWindow,
-    };
+use std::{ffi::c_void, ptr::null_mut};
+#[cfg(windows)]
+use windows_sys::Win32::{
+    System::Threading::{AttachThreadInput, GetCurrentThreadId},
+    UI::WindowsAndMessaging::{
+        FLASHW_ALL, FLASHW_TIMERNOFG, FLASHWINFO, FlashWindowEx, GetForegroundWindow,
+        GetWindowThreadProcessId, IsWindow, SW_RESTORE, SetForegroundWindow, ShowWindow,
+    },
+};
 
-    let window = unsafe { GetConsoleWindow() };
-    if window.is_null() || unsafe { IsWindowVisible(window) } == 0 {
+static MAIN_WINDOW: AtomicIsize = AtomicIsize::new(0);
+
+/// 界面创建主窗口后登记句柄，供登录回跳时切回前台
+pub fn set_main_window(hwnd: isize) {
+    MAIN_WINDOW.store(hwnd, Ordering::Relaxed);
+}
+
+/// 把管理工具窗口还原并切到前台；抢不到前台时闪烁任务栏提醒
+#[cfg(windows)]
+pub fn focus_manager_window() {
+    let window = MAIN_WINDOW.load(Ordering::Relaxed) as *mut c_void;
+    if window.is_null() || unsafe { IsWindow(window) } == 0 {
         return;
     }
 
     // 直接 SetForegroundWindow 会被前台锁定拦下，先把自己挂到当前前台线程上
     let focused = unsafe {
         let foreground = GetForegroundWindow();
-        let foreground_thread = GetWindowThreadProcessId(foreground, std::ptr::null_mut());
+        let foreground_thread = GetWindowThreadProcessId(foreground, null_mut());
         let current_thread = GetCurrentThreadId();
         let attached = foreground_thread != 0
             && foreground_thread != current_thread
@@ -40,11 +53,7 @@ pub fn focus_console() {
 }
 
 #[cfg(windows)]
-fn flash_window(window: *mut core::ffi::c_void) {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        FLASHW_ALL, FLASHW_TIMERNOFG, FLASHWINFO, FlashWindowEx,
-    };
-
+fn flash_window(window: *mut c_void) {
     let info = FLASHWINFO {
         cbSize: u32::try_from(size_of::<FLASHWINFO>()).unwrap_or(u32::MAX),
         dwFlags: FLASHW_ALL | FLASHW_TIMERNOFG,
@@ -59,4 +68,4 @@ fn flash_window(window: *mut core::ffi::c_void) {
 }
 
 #[cfg(not(windows))]
-pub const fn focus_console() {}
+pub const fn focus_manager_window() {}

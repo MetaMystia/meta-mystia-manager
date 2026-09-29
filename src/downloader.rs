@@ -8,7 +8,7 @@ use crate::net::{
     get_response_with_retry, with_retry,
 };
 #[cfg(not(windows))]
-use crate::platform;
+use crate::platform::dev::{FakeArtifact, fake_version_info, sim_download, write_fake_artifact};
 use crate::remote_config::{self, RemoteConfig};
 use crate::sso;
 use crate::ui::Ui;
@@ -21,7 +21,7 @@ use std::{
     io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::{Mutex, PoisonError},
-    thread::sleep,
+    thread::{self, sleep},
     time::{Duration, Instant},
 };
 use ureq::ResponseExt;
@@ -35,25 +35,25 @@ const VERSION_API: &str = "https://api.izakaya.cc/version/meta-mystia";
 
 const DOWNLOAD_BUFFER_SIZE: usize = 8192;
 const KEY_ATTEMPTS: usize = 2; // 密钥失效（410）后重新申请的上限
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(5); // 连接超时
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-const EXTERNAL_SOURCE_MIN_SPEED_BPS: usize = 128 * 1024; // 128KB/s，外部源最低速度阈值
+const EXTERNAL_SOURCE_MIN_SPEED_BPS: usize = 128 * 1024;
 const SPEED_CHECK_INTERVAL: Duration = Duration::from_secs(10); // 滑动窗口长度
-const OVERALL_CHECK_INTERVAL: Duration = Duration::from_secs(5); // 整体均速采样间隔
-const WARMUP_DURATION: Duration = Duration::from_secs(5); // 启动期豁免
-const MAX_CONSECUTIVE_SLOW_WINDOWS: u32 = 2; // 滑动窗口连续低速换源阈值
-const MAX_CONSECUTIVE_SLOW_OVERALL: u32 = 2; // 整体均速连续低速换源阈值
-const TAIL_SKIP_RATIO: f64 = 0.90; // 已下载比例豁免阈值
-const TAIL_SKIP_MIN_REMAINING_CAP: u64 = 384 * 1024; // 剩余字节豁免阈值上限
+const OVERALL_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+const WARMUP_DURATION: Duration = Duration::from_secs(5);
+const MAX_CONSECUTIVE_SLOW_WINDOWS: u32 = 2;
+const MAX_CONSECUTIVE_SLOW_OVERALL: u32 = 2;
+const TAIL_SKIP_RATIO: f64 = 0.90;
+const TAIL_SKIP_MIN_REMAINING_CAP: u64 = 384 * 1024;
 
 /// 一个下载任务：名称（用于错误提示）+ 执行体
 pub type DownloadJob<'a> = (&'a str, Box<dyn Fn() -> Result<()> + Send + Sync + 'a>);
 
 pub struct Downloader<'a> {
     agent: ureq::Agent,
-    ui: &'a dyn Ui,
     cached_github_releases: Mutex<HashMap<String, serde_json::Value>>,
     cached_version: Mutex<Option<VersionInfo>>,
+    ui: &'a dyn Ui,
 }
 
 impl<'a> Downloader<'a> {
@@ -61,9 +61,9 @@ impl<'a> Downloader<'a> {
         let agent = build_agent(Some(CONNECT_TIMEOUT), None);
         Self {
             agent,
-            ui,
             cached_github_releases: Mutex::new(HashMap::new()),
             cached_version: Mutex::new(None),
+            ui,
         }
     }
 
@@ -76,7 +76,7 @@ impl<'a> Downloader<'a> {
 
     fn convert_ureq_error(e: &ureq::Error) -> String {
         match e {
-            ureq::Error::Timeout(_) => "请求超时".to_string(),
+            ureq::Error::ConnectionFailed | ureq::Error::HostNotFound => "连接失败".to_string(),
             ureq::Error::Io(err) => match err.kind() {
                 io::ErrorKind::TimedOut => "请求超时".to_string(),
                 io::ErrorKind::ConnectionRefused
@@ -87,7 +87,7 @@ impl<'a> Downloader<'a> {
                 | io::ErrorKind::AddrInUse => "连接失败".to_string(),
                 _ => format!("请求失败：{e}"),
             },
-            ureq::Error::ConnectionFailed | ureq::Error::HostNotFound => "连接失败".to_string(),
+            ureq::Error::Timeout(_) => "请求超时".to_string(),
             _ => format!("请求失败：{e}"),
         }
     }
@@ -123,9 +123,12 @@ impl<'a> Downloader<'a> {
             return Ok(());
         }
 
+        let names = jobs.iter().map(|(name, _)| *name).collect::<Vec<_>>();
+        self.ui.download_plan(&names)?;
+
         // 开发模拟模式：占位产物由各下载函数直接生成，跳过远程配置与并发调度
         #[cfg(not(windows))]
-        if platform::dev::sim_download() {
+        if sim_download() {
             for (name, job) in jobs {
                 if let Err(e) = job() {
                     let message = format!("{name}失败：{e}");
@@ -140,7 +143,7 @@ impl<'a> Downloader<'a> {
         let concurrency = self.max_concurrent_downloads()?;
 
         for chunk in jobs.chunks(concurrency) {
-            let failed = std::thread::scope(|scope| {
+            let failed = thread::scope(|scope| {
                 let handles = chunk
                     .iter()
                     .map(|(name, job)| (*name, scope.spawn(job)))
@@ -166,6 +169,10 @@ impl<'a> Downloader<'a> {
             }
         }
 
+        if self.ui.download_cancelled() {
+            return Err(ManagerError::UserCancelled);
+        }
+
         Ok(())
     }
 
@@ -189,9 +196,9 @@ impl<'a> Downloader<'a> {
     pub fn get_version_info(&self) -> Result<VersionInfo> {
         // 开发模拟模式：不联网，直接返回伪版本信息
         #[cfg(not(windows))]
-        if platform::dev::sim_download() {
+        if sim_download() {
             self.ui.download_version_info_start()?;
-            let version_info = platform::dev::fake_version_info();
+            let version_info = fake_version_info();
             self.ui.download_version_info_success()?;
             return Ok(version_info);
         }
@@ -257,7 +264,7 @@ impl<'a> Downloader<'a> {
     fn get_share_code(&self, redirect_url: &str) -> Result<String> {
         // 开发模拟模式：不联网，直接返回占位分享码
         #[cfg(not(windows))]
-        if platform::dev::sim_download() {
+        if sim_download() {
             self.ui.download_share_code_start()?;
             self.ui.download_share_code_success()?;
             return Ok("dev".to_string());
@@ -307,9 +314,9 @@ impl<'a> Downloader<'a> {
         try_github: bool,
     ) -> Result<()> {
         #[cfg(not(windows))]
-        if platform::dev::sim_download() {
+        if sim_download() {
             report_event("Download.Metamystia.Success.Dev", Some(version));
-            return platform::dev::write_fake_artifact(dest, &platform::dev::FakeArtifact::Dll);
+            return write_fake_artifact(dest, &FakeArtifact::Dll);
         }
 
         report_event("Download.Metamystia.Start", Some(version));
@@ -367,9 +374,9 @@ impl<'a> Downloader<'a> {
         category: Option<&str>,
     ) -> Result<()> {
         #[cfg(not(windows))]
-        if platform::dev::sim_download() {
+        if sim_download() {
             report_event("Download.ResourceEx.Success.Dev", Some(version));
-            return platform::dev::write_fake_artifact(dest, &platform::dev::FakeArtifact::Zip);
+            return write_fake_artifact(dest, &FakeArtifact::Zip);
         }
 
         report_event("Download.ResourceEx.Start", Some(version));
@@ -391,9 +398,9 @@ impl<'a> Downloader<'a> {
     /// 下载 BepInEx；返回是否来自上游主源
     pub fn download_bepinex(&self, version_info: &VersionInfo, dest: &Path) -> Result<bool> {
         #[cfg(not(windows))]
-        if platform::dev::sim_download() {
+        if sim_download() {
             report_event("Download.BepInEx.Success.Dev", None);
-            platform::dev::write_fake_artifact(dest, &platform::dev::FakeArtifact::Zip)?;
+            write_fake_artifact(dest, &FakeArtifact::Zip)?;
             return Ok(true);
         }
 
@@ -467,14 +474,15 @@ impl<'a> Downloader<'a> {
     /// 下载管理工具可执行文件（自更新，不需要登录）
     pub fn download_manager(&self, version_info: &VersionInfo, dest: &Path) -> Result<()> {
         #[cfg(not(windows))]
-        if platform::dev::sim_download() {
+        if sim_download() {
             report_event("Download.Manager.Success.Dev", Some(&version_info.manager));
-            return platform::dev::write_fake_artifact(dest, &platform::dev::FakeArtifact::Exe);
+            return write_fake_artifact(dest, &FakeArtifact::Exe);
         }
 
         let filename = version_info.manager_filename();
 
         report_event("Download.Manager.Start", Some(&version_info.manager));
+        self.ui.download_plan(&["管理工具"])?;
 
         let config = self.remote_config()?;
         let rate_limit_bps =

@@ -6,6 +6,22 @@ use super::{
     Result, SPEED_CHECK_INTERVAL, TAIL_SKIP_MIN_REMAINING_CAP, TAIL_SKIP_RATIO, WARMUP_DURATION,
     Write, atomic_rename_or_copy, check_response_status, cmp, fs, io, report_event, sleep,
 };
+use crate::ui::Ui;
+
+const PAUSE_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// 等待暂停结束；期间被确认停止时返回取消错误
+pub(super) fn wait_while_paused(ui: &dyn Ui) -> Result<()> {
+    while ui.download_paused() {
+        if ui.download_cancelled() {
+            return Err(ManagerError::UserCancelled);
+        }
+
+        sleep(PAUSE_POLL_INTERVAL);
+    }
+
+    Ok(())
+}
 
 /// 平均速度低于阈值时返回 `(平均速度 KB/s, 阈值 KB/s)`
 #[allow(
@@ -178,6 +194,10 @@ impl Downloader<'_> {
         result
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "下载循环里进度、取消、暂停、低速检测与限速依次处理，拆开反而看不清顺序"
+    )]
     fn write_response_to_file_inner<R: Read>(
         &self,
         resp: &mut R,
@@ -195,6 +215,7 @@ impl Downloader<'_> {
 
         let mut downloaded = 0u64;
         let start = Instant::now();
+        let mut paused = Duration::ZERO;
 
         let mut window_start = Instant::now();
         let mut window_bytes = 0u64;
@@ -221,8 +242,29 @@ impl Downloader<'_> {
 
             self.ui.download_update(id, downloaded)?;
 
+            if self.ui.download_cancelled() {
+                let _ = fs::remove_file(&tmp_path);
+                return Err(ManagerError::UserCancelled);
+            }
+
+            if self.ui.download_paused() {
+                let paused_at = Instant::now();
+
+                if wait_while_paused(self.ui).is_err() {
+                    let _ = fs::remove_file(&tmp_path);
+                    return Err(ManagerError::UserCancelled);
+                }
+
+                paused += paused_at.elapsed();
+                window_start = Instant::now();
+                window_bytes = 0;
+                slow_window_count = 0;
+                last_overall_check = Instant::now();
+                slow_overall_count = 0;
+            }
+
             if let Some(min_speed) = min_speed_bps {
-                let elapsed = start.elapsed();
+                let elapsed = start.elapsed().saturating_sub(paused);
 
                 // 启动期豁免
                 if elapsed >= WARMUP_DURATION {

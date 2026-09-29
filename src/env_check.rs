@@ -1,7 +1,9 @@
 use crate::config::GAME_EXECUTABLE;
 use crate::error::{ManagerError, Result};
 use crate::metrics::report_event;
-use crate::platform;
+#[cfg(not(windows))]
+use crate::platform::dev::{dev_mode, ensure_sandbox_root};
+use crate::platform::is_game_running;
 use crate::ui::Ui;
 
 use std::{
@@ -20,8 +22,8 @@ use steamlocate::SteamDir;
 pub fn check_game_directory(ui: &dyn Ui) -> Result<PathBuf> {
     // 开发模拟模式使用沙箱目录，不探测本机 Steam
     #[cfg(not(windows))]
-    if platform::dev::dev_mode() {
-        let root = platform::dev::ensure_sandbox_root()?;
+    if dev_mode() {
+        let root = ensure_sandbox_root()?;
         ui.message(&format!("[dev] 使用沙箱游戏目录：{}", root.display()))?;
         report_event("Env.DevSandbox", Some(&root.display().to_string()));
         return Ok(root);
@@ -39,12 +41,9 @@ pub fn check_game_directory(ui: &dyn Ui) -> Result<PathBuf> {
             .join(&install_dir);
         if candidate.join(GAME_EXECUTABLE).is_file() {
             ui.path_display_steam_found(app.app_id, app.name.as_deref(), &candidate)?;
-            if ui.path_confirm_use_steam_found()? {
-                ui.blank_line()?;
-                report_event("Env.SteamFound", Some(&candidate.display().to_string()));
-                return Ok(candidate);
-            }
-            ui.blank_line()?;
+            report_event("Env.SteamFound", Some(&candidate.display().to_string()));
+
+            return Ok(candidate);
         }
     }
 
@@ -77,7 +76,7 @@ pub fn check_game_running() -> Result<bool> {
         return Ok(result);
     }
 
-    let result = platform::is_game_running()?;
+    let result = is_game_running()?;
     *cache.lock().unwrap_or_else(PoisonError::into_inner) = Some((result, Instant::now()));
 
     Ok(result)

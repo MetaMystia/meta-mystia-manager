@@ -20,23 +20,18 @@ pub const USER_AGENT: &str = concat!(
     ")"
 );
 
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub enum OperationMode {
+    Diagnostics,
     Install,
+    Uninstall,
     Upgrade,
-    Uninstall,
-    Diagnostics,
-}
-
-/// 获取不到版本信息时的离线模式：只提供不依赖服务端的功能
-pub enum OfflineMode {
-    Uninstall,
-    Diagnostics,
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum UninstallMode {
-    Light,
     Full,
+    Light,
 }
 
 impl UninstallMode {
@@ -58,16 +53,16 @@ impl UninstallMode {
     /// 获取卸载模式描述
     pub const fn description(&self) -> &str {
         match self {
-            Self::Light => "仅移除 MetaMystia 相关文件（保留 BepInEx 框架和其他 Mod 相关文件）",
             Self::Full => "移除所有和 Mod 有关的文件（还原为原版游戏）",
+            Self::Light => "仅移除 MetaMystia 相关文件（保留 BepInEx 框架和其他 Mod 相关文件）",
         }
     }
 
     /// 获取卸载目标列表（模式字符串，是否为目录）
     pub const fn targets(self) -> &'static [(&'static str, bool)] {
         match self {
-            Self::Light => Self::LIGHT_TARGETS,
             Self::Full => Self::FULL_TARGETS,
+            Self::Light => Self::LIGHT_TARGETS,
         }
     }
 }
@@ -77,10 +72,10 @@ pub struct RetryConfig {
     pub attempts: usize,
     /// 基础延迟（秒）
     pub base_delay_secs: u64,
-    /// 指数倍数（例如 2.0 表示每次延迟翻倍）
-    pub multiplier: f64,
     /// 最大延迟（秒）上限
     pub max_delay_secs: u64,
+    /// 指数倍数（例如 2.0 表示每次延迟翻倍）
+    pub multiplier: f64,
 }
 
 impl RetryConfig {
@@ -89,8 +84,8 @@ impl RetryConfig {
         Self {
             attempts: 3,
             base_delay_secs: 5,
-            multiplier: 2.0,
             max_delay_secs: 15,
+            multiplier: 2.0,
         }
     }
 
@@ -99,8 +94,8 @@ impl RetryConfig {
         Self {
             attempts: 2,
             base_delay_secs: 5,
-            multiplier: 1.0,
             max_delay_secs: 5,
+            multiplier: 1.0,
         }
     }
 
@@ -109,8 +104,8 @@ impl RetryConfig {
         Self {
             attempts: 3,
             base_delay_secs: 10,
-            multiplier: 2.0,
             max_delay_secs: 60,
+            multiplier: 2.0,
         }
     }
 

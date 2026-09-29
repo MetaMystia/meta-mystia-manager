@@ -39,11 +39,6 @@ glob = "0.3"
 # ZIP 解压
 zip = { version = "8.6", features = ["deflate"], default-features = false }
 
-# 用户交互
-console = "0.16"
-dialoguer = "0.12"
-indicatif = "0.18"
-
 # 错误处理
 thiserror = "2.0"
 
@@ -51,15 +46,19 @@ thiserror = "2.0"
 # Windows API
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
+  "Win32_Graphics_Gdi",
   "Win32_Security",
   "Win32_Security_Cryptography",
   "Win32_Storage_FileSystem",
   "Win32_System_Console",
   "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_LibraryLoader",
   "Win32_System_Registry",
   "Win32_System_Threading",
+  "Win32_UI_Controls",
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_Shell",
+  "Win32_UI_Shell_Common",
   "Win32_UI_WindowsAndMessaging",
 ] }
 
