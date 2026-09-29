@@ -1,4 +1,4 @@
-use crate::metrics;
+use crate::metrics::{report_event, shutdown};
 
 use std::{
     mem::take,
@@ -40,7 +40,7 @@ pub fn run_shutdown() {
         return;
     }
 
-    metrics::report_event("Shutdown", None);
+    report_event("Shutdown", None);
 
     let to = SHUTDOWN_TIMEOUT;
     let callbacks: Vec<CleanupCallback> = CALLBACKS.get().map_or_else(Vec::new, |m| {
@@ -52,7 +52,7 @@ pub fn run_shutdown() {
     });
 
     if callbacks.is_empty() {
-        metrics::shutdown(Some(to));
+        shutdown(Some(to));
         return;
     }
 
@@ -88,5 +88,5 @@ pub fn run_shutdown() {
     let elapsed = start.elapsed();
     let remaining = to.checked_sub(elapsed).unwrap_or(Duration::ZERO);
 
-    metrics::shutdown(Some(remaining));
+    shutdown(Some(remaining));
 }

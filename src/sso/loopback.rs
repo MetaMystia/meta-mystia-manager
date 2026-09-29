@@ -7,9 +7,12 @@
 use crate::error::{ManagerError, Result};
 
 use percent_encoding::percent_decode_str;
-use std::io::{ErrorKind, Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::time::{Duration, Instant};
+use std::{
+    io::{ErrorKind, Read, Write},
+    net::{TcpListener, TcpStream},
+    thread::sleep,
+    time::{Duration, Instant},
+};
 
 pub const CALLBACK_PATH: &str = "/sso/callback";
 
@@ -26,7 +29,7 @@ pub enum CallbackOutcome {
 #[derive(Debug, PartialEq, Eq)]
 enum CallbackRequest {
     /// 授权成功
-    Authorized { ticket: String, state: String },
+    Authorized { state: String, ticket: String },
     /// 用户取消授权
     Cancelled,
     /// 不是回调路径（例如浏览器自动请求 favicon），忽略
@@ -81,7 +84,7 @@ impl CallbackServer {
                     }
                 }
                 Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                    std::thread::sleep(ACCEPT_POLL_INTERVAL);
+                    sleep(ACCEPT_POLL_INTERVAL);
                 }
                 Err(e) => {
                     return Err(ManagerError::SsoLoginFailed(format!(
@@ -103,32 +106,16 @@ fn handle_connection(mut stream: TcpStream, expected_state: &str) -> Option<Call
             &mut stream,
             "400 Bad Request",
             "无法读取请求",
-            "请返回管理器重试。",
+            "请返回管理工具重试。",
+            false,
         );
         return None;
     };
 
     match parse_request_target(&request_target) {
-        CallbackRequest::Ignored => {
-            write_response(&mut stream, "404 Not Found", "页面不存在", "");
-            None
-        }
-        CallbackRequest::Malformed => {
-            write_response(&mut stream, "400 Bad Request", "回调参数不完整", "");
-            None
-        }
-        CallbackRequest::Cancelled => {
-            write_response(
-                &mut stream,
-                "200 OK",
-                "已取消登录",
-                "可以关闭本页面并返回管理器。",
-            );
-            Some(CallbackOutcome::Cancelled)
-        }
-        CallbackRequest::Authorized { ticket, state } => {
+        CallbackRequest::Authorized { state, ticket } => {
             if state != expected_state {
-                write_response(&mut stream, "400 Bad Request", "回调校验失败", "");
+                write_response(&mut stream, "400 Bad Request", "回调校验失败", "", false);
                 return None;
             }
 
@@ -136,9 +123,28 @@ fn handle_connection(mut stream: TcpStream, expected_state: &str) -> Option<Call
                 &mut stream,
                 "200 OK",
                 "登录完成",
-                "可以关闭本页面并返回管理器。",
+                "正在关闭页面…如未自动关闭，请手动关闭并返回管理工具。",
+                true,
             );
             Some(CallbackOutcome::Authorized { ticket })
+        }
+        CallbackRequest::Cancelled => {
+            write_response(
+                &mut stream,
+                "200 OK",
+                "已取消登录",
+                "可以关闭本页面并返回管理工具。",
+                false,
+            );
+            Some(CallbackOutcome::Cancelled)
+        }
+        CallbackRequest::Ignored => {
+            write_response(&mut stream, "404 Not Found", "页面不存在", "", false);
+            None
+        }
+        CallbackRequest::Malformed => {
+            write_response(&mut stream, "400 Bad Request", "回调参数不完整", "", false);
+            None
         }
     }
 }
@@ -171,8 +177,8 @@ fn read_request_target(stream: &mut TcpStream) -> Option<String> {
 
 fn parse_request_target(target: &str) -> CallbackRequest {
     let (path, query) = match target.split_once('?') {
-        Some((path, query)) => (path, query),
         None => (target, ""),
+        Some((path, query)) => (path, query),
     };
     if path != CALLBACK_PATH {
         return CallbackRequest::Ignored;
@@ -184,16 +190,16 @@ fn parse_request_target(target: &str) -> CallbackRequest {
 
     for pair in query.split('&').filter(|pair| !pair.is_empty()) {
         let (raw_key, raw_value) = match pair.split_once('=') {
-            Some((key, value)) => (key, value),
             None => (pair, ""),
+            Some((key, value)) => (key, value),
         };
         let key = decode_query_component(raw_key);
         let value = decode_query_component(raw_value);
 
         match key.as_str() {
             "error" => error = Some(value),
-            "ticket" => ticket = Some(value),
             "state" => state = Some(value),
+            "ticket" => ticket = Some(value),
             _ => {}
         }
     }
@@ -204,7 +210,7 @@ fn parse_request_target(target: &str) -> CallbackRequest {
 
     match (ticket, state) {
         (Some(ticket), Some(state)) if !ticket.is_empty() && !state.is_empty() => {
-            CallbackRequest::Authorized { ticket, state }
+            CallbackRequest::Authorized { state, ticket }
         }
         _ => CallbackRequest::Malformed,
     }
@@ -216,11 +222,19 @@ fn decode_query_component(value: &str) -> String {
         .into_owned()
 }
 
-/// 回写一个极简页面；浏览器可能提前断开，写失败不影响回调结论
-fn write_response(stream: &mut TcpStream, status: &str, title: &str, hint: &str) {
+/// 回写一个极简页面；浏览器可能提前断开，写失败不影响回调结论。
+///
+/// `auto_close` 为真时尝试关掉标签页：只有浏览器允许脚本关闭该标签时才会生效，
+/// 不允许时页面继续显示提示。
+fn write_response(stream: &mut TcpStream, status: &str, title: &str, hint: &str, auto_close: bool) {
+    let script = if auto_close {
+        "<script>try{window.open('', '_self', '');}catch(e){}window.close();</script>"
+    } else {
+        ""
+    };
     let body = format!(
         "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">\
-         <title>{title}</title></head><body><h1>{title}</h1><p>{hint}</p></body></html>"
+         <title>{title}</title></head><body><h1>{title}</h1><p>{hint}</p>{script}</body></html>"
     );
     let response = format!(
         "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\n\

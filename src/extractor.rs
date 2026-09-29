@@ -1,7 +1,7 @@
 use crate::error::{ManagerError, Result};
 use crate::file_ops::atomic_rename_or_copy;
 use crate::metrics::report_event;
-use crate::platform;
+use crate::platform::fs_dry_run;
 
 use std::{
     fs, io,
@@ -221,7 +221,7 @@ impl Extractor {
         game_root: &Path,
         exclude_patterns: &[&str],
     ) -> Result<()> {
-        if platform::fs_dry_run() {
+        if fs_dry_run() {
             eprintln!("[dev] 跳过解压（模拟）：{}", zip_path.display());
             return Ok(());
         }
@@ -253,7 +253,7 @@ impl Extractor {
 
     fn copy_to_destination_atomically(src: &Path, dest: &Path, temp_extension: &str) -> Result<()> {
         // 开发模拟模式的干跑：只打印将要执行的动作
-        if platform::fs_dry_run() {
+        if fs_dry_run() {
             eprintln!("[dev] 跳过文件部署（模拟）：{}", dest.display());
             return Ok(());
         }
@@ -317,7 +317,7 @@ impl Extractor {
     /// 安装 ResourceExample ZIP 到 ResourceEx/ 目录
     pub fn deploy_resourceex(zip_path: &Path, game_root: &Path) -> Result<()> {
         // 开发模拟模式的干跑：只打印将要执行的动作
-        if platform::fs_dry_run() {
+        if fs_dry_run() {
             eprintln!("[dev] 跳过文件部署（模拟）：{}", zip_path.display());
             return Ok(());
         }

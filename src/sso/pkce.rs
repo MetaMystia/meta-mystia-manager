@@ -6,8 +6,8 @@ use crate::sso::crypto::{base64url_encode, random_bytes, sha256};
 const TOKEN_BYTE_LENGTH: usize = 32;
 
 pub struct PkcePair {
-    pub code_verifier: String,
     pub code_challenge: String,
+    pub code_verifier: String,
 }
 
 /// 生成 PKCE 参数对
@@ -16,8 +16,8 @@ pub fn create_pkce_pair() -> Result<PkcePair> {
     let code_challenge = base64url_encode(&sha256(code_verifier.as_bytes())?);
 
     Ok(PkcePair {
-        code_verifier,
         code_challenge,
+        code_verifier,
     })
 }
 

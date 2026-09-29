@@ -1,10 +1,10 @@
-//! 诊断包：把管理器信息、最近操作、BepInEx 与 Unity 日志打包成 zip，
-//! 生成在管理器所在目录，只保存在本机，便于用户报障时提供。
+//! 诊断包：把管理工具信息、最近操作、BepInEx 与 Unity 日志打包成 zip，
+//! 生成在管理工具所在目录，只保存在本机，便于用户报障时提供。
 
 use crate::config::BEPINEX_VERSION_FILE;
 use crate::error::{ManagerError, Result};
 use crate::file_ops::glob_matches_by_filename;
-use crate::metrics;
+use crate::metrics::{get_user_id, recent_events};
 use crate::model::VersionInfo;
 use crate::preflight::format_bytes;
 use crate::ui::Ui;
@@ -19,6 +19,8 @@ use std::{
 };
 use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
+/// Unity 日志目录（相对 `%USERPROFILE%\AppData\LocalLow`）
+const UNITY_LOG_DIR: &str = "Epicomic/Touhou Mystia Izakaya";
 /// Unity 日志最多收集几个文件 / 单文件上限
 const MAX_UNITY_LOGS: usize = 5;
 const MAX_UNITY_LOG_BYTES: u64 = 20 * 1024 * 1024;
@@ -37,7 +39,7 @@ struct Entry {
 pub fn export(ui: &dyn Ui, game_root: &Path) -> Result<PathBuf> {
     let mut entries = Vec::new();
     let mut descriptions = vec![
-        "manager-info.txt（管理器版本、系统信息、已安装组件与插件列表、最近操作）".to_string(),
+        "manager-info.txt（管理工具信息、系统信息、已安装组件与插件列表、最近操作）".to_string(),
     ];
 
     for (relative, archive_name, description) in [
@@ -147,66 +149,38 @@ fn walk_configs(root: &Path, dir: &Path, depth: usize, found: &mut Vec<Entry>) {
     }
 }
 
-/// 收集 `%USERPROFILE%\AppData\LocalLow` 下的 Unity 日志（深度 ≤ 3）
+/// 收集本作的 Unity 日志
 fn collect_unity_logs() -> Vec<Entry> {
-    let Some(local_low) = env::var_os("USERPROFILE")
-        .map(|profile| PathBuf::from(profile).join("AppData").join("LocalLow"))
-    else {
+    let Some(profile) = env::var_os("USERPROFILE") else {
         return Vec::new();
     };
 
+    let dir = PathBuf::from(profile)
+        .join("AppData")
+        .join("LocalLow")
+        .join(UNITY_LOG_DIR);
     let mut found = Vec::new();
-    walk_logs(&local_low, &local_low, 0, &mut found);
 
-    found
-}
-
-fn walk_logs(root: &Path, dir: &Path, depth: usize, found: &mut Vec<Entry>) {
-    if depth > 3 || found.len() >= MAX_UNITY_LOGS {
-        return;
-    }
-
-    let Ok(read_dir) = fs::read_dir(dir) else {
-        return;
-    };
-
-    for entry in read_dir.flatten() {
+    for name in UNITY_LOG_NAMES {
         if found.len() >= MAX_UNITY_LOGS {
-            return;
+            break;
         }
 
-        let path = entry.path();
-
-        if path.is_dir() {
-            walk_logs(root, &path, depth + 1, found);
+        let path = dir.join(name);
+        if fs::metadata(&path).map_or(true, |meta| {
+            !meta.is_file() || meta.len() > MAX_UNITY_LOG_BYTES
+        }) {
             continue;
         }
-
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if !UNITY_LOG_NAMES.contains(&name) {
-            continue;
-        }
-        if entry
-            .metadata()
-            .map_or(true, |meta| meta.len() > MAX_UNITY_LOG_BYTES)
-        {
-            continue;
-        }
-
-        let relative = path
-            .strip_prefix(root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .replace('\\', "/");
 
         found.push(Entry {
-            archive_name: format!("unity/{relative}"),
-            description: format!("Unity 日志：{relative}"),
+            archive_name: format!("unity/{name}"),
+            description: format!("Unity 日志：{name}"),
             source: path,
         });
     }
+
+    found
 }
 
 fn build_manager_info(game_root: &Path) -> String {
@@ -217,8 +191,9 @@ fn build_manager_info(game_root: &Path) -> String {
 
     let _ = write!(
         info,
-        "管理器版本：{}\n导出时间：{} UTC（epoch {now}）\n系统：{} {}\nCPU：{}\n",
+        "管理工具版本：{} - {}\n导出时间：{} UTC（epoch {now}）\n系统：{} {}\nCPU：{}\n",
         env!("CARGO_PKG_VERSION"),
+        get_user_id(),
         format_timestamp(now),
         env::consts::OS,
         env::consts::ARCH,
@@ -262,7 +237,7 @@ fn build_manager_info(game_root: &Path) -> String {
     }
 
     info.push_str("\n最近操作：\n");
-    for event in metrics::recent_events() {
+    for event in recent_events() {
         let _ = writeln!(info, "  {event}");
     }
 
@@ -339,7 +314,7 @@ fn walk_plugin_files(root: &Path, dir: &Path, depth: usize, found: &mut Vec<Stri
     }
 }
 
-/// 诊断包路径：优先管理器所在目录，不可写时回落到临时目录
+/// 诊断包路径：优先管理工具所在目录，不可写时回落到临时目录
 fn archive_path() -> Result<PathBuf> {
     let stamp = format_timestamp(
         SystemTime::now()
@@ -366,7 +341,7 @@ fn archive_path() -> Result<PathBuf> {
     }
 
     Err(ManagerError::PermissionDenied(
-        "无法在管理器目录或临时目录创建诊断包".to_string(),
+        "无法在管理工具目录或临时目录创建诊断包".to_string(),
     ))
 }
 

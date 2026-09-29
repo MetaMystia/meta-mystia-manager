@@ -27,9 +27,9 @@ struct SessionResponse {
 #[derive(Deserialize)]
 struct SessionUser {
     id: String,
-    username: String,
     #[serde(default)]
     nickname: Option<String>,
+    username: String,
 }
 
 /// 用 `ticket` 与 `code_verifier` 向下载服务换取下载会话

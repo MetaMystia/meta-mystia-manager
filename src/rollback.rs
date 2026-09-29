@@ -12,9 +12,9 @@ use std::{
 
 /// 回滚上下文；生命周期内只用于一次部署
 pub struct Rollback {
-    game_root: PathBuf,
     backup_dir: PathBuf,
     created: Vec<PathBuf>,
+    game_root: PathBuf,
     overwritten: Vec<PathBuf>,
 }
 

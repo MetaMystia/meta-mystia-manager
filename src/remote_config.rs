@@ -37,8 +37,8 @@ pub struct DownloadConfig {
 
 #[derive(Clone, Deserialize)]
 pub struct SelfUpdateConfig {
-    pub entry_url: String,
     pub api_base: String,
+    pub entry_url: String,
 }
 
 #[derive(Clone, Deserialize)]

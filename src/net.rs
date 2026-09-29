@@ -4,7 +4,7 @@ use crate::metrics::report_event;
 use crate::ui::Ui;
 
 use serde::de::DeserializeOwned;
-use std::{env, thread::sleep, time::Duration};
+use std::{env, result::Result as StdResult, thread::sleep, time::Duration};
 use ureq::{Body, http::Response};
 
 #[cfg(windows)]
@@ -43,7 +43,10 @@ where
         match f() {
             Ok(v) => return Ok(v),
             Err(e) => {
-                if matches!(e, ManagerError::SlowDownload(_)) {
+                if matches!(
+                    e,
+                    ManagerError::SlowDownload(_) | ManagerError::UserCancelled
+                ) {
                     return Err(e);
                 }
 
@@ -149,7 +152,7 @@ pub fn get_json_with_retry_stopping_on_status<T: DeserializeOwned>(
     op_desc: &str,
     cfg: Option<RetryConfig>,
     stop_statuses: &[u16],
-) -> std::result::Result<T, JsonRequestError> {
+) -> StdResult<T, JsonRequestError> {
     let cfg = cfg.unwrap_or_else(RetryConfig::network);
 
     if cfg.attempts == 0 {

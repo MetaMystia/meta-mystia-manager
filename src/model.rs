@@ -5,7 +5,7 @@ use serde::Deserialize;
 
 use std::{
     collections::HashSet,
-    fmt::{Display, Formatter},
+    fmt::{self, Display, Formatter},
 };
 
 #[derive(Clone, Deserialize)]
@@ -15,11 +15,11 @@ pub struct VersionInfo {
     /// 上游 BepInEx 文件名（如 `BepInEx-Unity.IL2CPP-win-x64-6.0.0-be.785+6abdba4.zip`）
     #[serde(rename = "bepInExFileName", default)]
     pub bep_in_ex_file_name: Option<String>,
-    pub manager: String,
     /// 运行期配置地址
     #[serde(rename = "configUrl")]
     pub config_url: String,
     pub dlls: Vec<String>,
+    pub manager: String,
     pub paths: DownloadPaths,
     pub zips: Vec<String>,
 }
@@ -260,7 +260,7 @@ impl VersionInfo {
 }
 
 impl Display for VersionInfo {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(
             f,
             "BepInEx: {}, dll: {}, zip: {}",

@@ -13,8 +13,8 @@ type PathRegistry = Vec<(PathBuf, RefCounter)>;
 
 /// 临时目录守卫：引用计数归零时删除目录，进程退出时由清理回调兜底
 pub struct DirGuard {
-    path: PathBuf,
     counter: RefCounter,
+    path: PathBuf,
 }
 
 static REGISTERED_PATHS: OnceLock<Mutex<PathRegistry>> = OnceLock::new();
@@ -29,7 +29,7 @@ impl DirGuard {
             if let Ok(mut count) = counter.lock() {
                 *count += 1;
             }
-            return Self { path, counter };
+            return Self { counter, path };
         }
 
         let counter = Arc::new(Mutex::new(1));
@@ -44,7 +44,7 @@ impl DirGuard {
         guard.push((path.clone(), counter.clone()));
         drop(guard);
 
-        Self { path, counter }
+        Self { counter, path }
     }
 }
 

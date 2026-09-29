@@ -6,9 +6,16 @@
 use crate::error::{ManagerError, Result};
 use crate::metrics::report_event;
 use crate::net::build_agent;
+#[cfg(not(windows))]
+use crate::platform::dev::sim_download;
 use crate::ui::Ui;
 
-use std::{path::Path, time::Duration};
+use std::{path::Path, thread, time::Duration};
+
+#[cfg(windows)]
+use std::{os::windows::ffi::OsStrExt, ptr::null_mut};
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 
 /// 下载 + 解压需要的余量（BepInEx 压缩包约 34MB，解压后约 100MB+）
 const MIN_FREE_BYTES: u64 = 512 * 1024 * 1024;
@@ -30,7 +37,7 @@ const PROBE_ENDPOINTS: &[(&str, &str)] = &[
 pub fn check(ui: &dyn Ui, game_root: &Path, temp_dir: &Path) -> Result<()> {
     // 开发模拟模式的离线运行：跳过磁盘与站点探测
     #[cfg(not(windows))]
-    if crate::platform::dev::sim_download() {
+    if sim_download() {
         return Ok(());
     }
 
@@ -64,7 +71,7 @@ fn check_free_space(label: &str, path: &Path) -> Result<()> {
 fn check_endpoints(ui: &dyn Ui) -> Result<()> {
     let agent = build_agent(Some(PROBE_TIMEOUT), Some(PROBE_TIMEOUT));
 
-    let unreachable = std::thread::scope(|scope| {
+    let unreachable = thread::scope(|scope| {
         PROBE_ENDPOINTS
             .iter()
             .map(|(name, url)| {
@@ -105,10 +112,6 @@ pub fn format_bytes(bytes: u64) -> String {
 
 #[cfg(windows)]
 fn free_space(path: &Path) -> Option<u64> {
-    use std::os::windows::ffi::OsStrExt;
-    use std::ptr::null_mut;
-    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
-
     let wide = path
         .as_os_str()
         .encode_wide()

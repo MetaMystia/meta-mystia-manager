@@ -5,7 +5,7 @@ use crate::error::Result;
 use crate::metrics::report_event;
 use crate::model::VersionInfo;
 #[cfg(windows)]
-use crate::platform;
+use crate::platform::suppress_console_window;
 use crate::temp_dir::create_temp_dir_with_guard;
 use crate::ui::Ui;
 
@@ -88,7 +88,7 @@ pub fn perform_self_update(
             .arg("-File")
             .arg(&script_path);
 
-        platform::suppress_console_window(&mut command);
+        suppress_console_window(&mut command);
 
         if command.spawn().is_ok() {
             report_event("SelfUpdate.Scheduled", Some(&version_info.manager));
@@ -133,6 +133,8 @@ pub fn perform_self_update(
 
 #[cfg(windows)]
 fn generate_powershell_script(target: &str, new_exe: &str, pid: u32, auto_launch: bool) -> String {
+    let target = target.replace('\'', "''");
+    let new_exe = new_exe.replace('\'', "''");
     let launch_script = if auto_launch {
         r"
 # 启动新 exe

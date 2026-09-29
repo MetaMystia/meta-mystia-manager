@@ -6,14 +6,17 @@
 
 use crate::config::GAME_EXECUTABLE;
 use crate::error::{ManagerError, Result};
+use crate::metrics;
 use crate::model::{DownloadPaths, VersionInfo};
 
+use sha2::{Digest, Sha256};
 use std::{
     env, fs, io,
     io::{Read, Write},
     path::{Path, PathBuf},
     process::Command,
 };
+use zip::write::SimpleFileOptions;
 
 const ENV_MODE: &str = "MMM_DEV_MODE";
 const ENV_ROOT: &str = "MMM_DEV_ROOT";
@@ -29,10 +32,10 @@ const SHA256_LENGTH: usize = 32;
 pub enum FakeArtifact {
     /// MetaMystia DLL
     Dll,
-    /// ResourceExample / BepInEx ZIP
-    Zip,
     /// 管理工具可执行文件
     Exe,
+    /// ResourceExample / BepInEx ZIP
+    Zip,
 }
 
 fn flag(name: &str, default: bool) -> bool {
@@ -99,7 +102,7 @@ pub fn init() {
         return;
     }
 
-    crate::metrics::disable();
+    metrics::disable();
 
     eprintln!("[dev] 开发模拟模式：Windows 特有行为已由开发实现替代");
     eprintln!("[dev] 沙箱游戏目录：{}", sandbox_root().display());
@@ -190,8 +193,6 @@ pub fn random_bytes(buffer: &mut [u8]) -> Result<()> {
 /// SHA-256 摘要
 #[allow(clippy::unnecessary_wraps, reason = "与 Windows 实现保持相同签名")]
 pub fn sha256(data: &[u8]) -> Result<[u8; SHA256_LENGTH]> {
-    use sha2::{Digest, Sha256};
-
     let mut hasher = Sha256::new();
     hasher.update(data);
 
@@ -224,7 +225,6 @@ pub fn write_fake_artifact(dest: &Path, kind: &FakeArtifact) -> Result<()> {
     }
 
     match kind {
-        FakeArtifact::Zip => write_fake_zip(dest),
         FakeArtifact::Dll | FakeArtifact::Exe => {
             let name = dest
                 .file_name()
@@ -232,12 +232,11 @@ pub fn write_fake_artifact(dest: &Path, kind: &FakeArtifact) -> Result<()> {
 
             fs::write(dest, format!("[dev] 占位产物：{name}\n")).map_err(ManagerError::from)
         }
+        FakeArtifact::Zip => write_fake_zip(dest),
     }
 }
 
 fn write_fake_zip(dest: &Path) -> Result<()> {
-    use zip::write::SimpleFileOptions;
-
     let file = fs::File::create(dest).map_err(ManagerError::from)?;
     let mut writer = zip::ZipWriter::new(file);
 

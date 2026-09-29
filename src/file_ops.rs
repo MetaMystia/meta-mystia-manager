@@ -4,7 +4,7 @@ use crate::config::{
 use crate::env_check::check_game_running;
 use crate::error::ManagerError;
 use crate::model::VersionInfo;
-use crate::platform;
+use crate::platform::fs_dry_run;
 use crate::ui::Ui;
 
 use glob::{MatchOptions, glob_with};
@@ -14,11 +14,14 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 const fn case_insensitive_match_options() -> MatchOptions {
     MatchOptions {
         case_sensitive: false,
-        require_literal_separator: false,
         require_literal_leading_dot: false,
+        require_literal_separator: false,
     }
 }
 
@@ -42,7 +45,6 @@ fn ensure_owner_writable(metadata: &fs::Metadata) -> fs::Permissions {
 
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
         let mode = perms.mode() | 0o200;
         perms.set_mode(mode);
     }
@@ -78,7 +80,7 @@ pub fn map_io_error_to_uninstall_error(err: &io::Error, path: &Path) -> ManagerE
 /// 原子重命名或回退到 copy + remove
 pub fn atomic_rename_or_copy(src: &Path, dst: &Path) -> Result<(), ManagerError> {
     // 开发模拟模式的干跑：只打印将要执行的动作
-    if platform::fs_dry_run() {
+    if fs_dry_run() {
         eprintln!("[dev] 跳过文件写入（模拟）：{}", dst.display());
         return Ok(());
     }
@@ -136,7 +138,7 @@ pub fn write_bepinex_version_marker(
     game_root: &Path,
     version_info: &VersionInfo,
 ) -> Result<(), ManagerError> {
-    if platform::fs_dry_run() {
+    if fs_dry_run() {
         eprintln!("[dev] 跳过写入版本标记（模拟）：{BEPINEX_VERSION_FILE}");
         return Ok(());
     }
@@ -209,18 +211,18 @@ fn matches_target_filename(pattern: &str, path: &Path) -> bool {
 }
 
 pub struct RemoveGlobResult {
-    pub removed: Vec<PathBuf>,
     pub failed: Vec<(PathBuf, ManagerError)>,
+    pub removed: Vec<PathBuf>,
 }
 
 /// 删除匹配 glob 模式的文件/目录
 pub fn remove_glob_files(pattern: &Path) -> RemoveGlobResult {
     // 开发模拟模式的干跑：只打印将要执行的动作
-    if platform::fs_dry_run() {
+    if fs_dry_run() {
         eprintln!("[dev] 跳过删除（模拟）：{}", pattern.display());
         return RemoveGlobResult {
-            removed: Vec::new(),
             failed: Vec::new(),
+            removed: Vec::new(),
         };
     }
 
@@ -250,7 +252,7 @@ pub fn remove_glob_files(pattern: &Path) -> RemoveGlobResult {
         }
     }
 
-    RemoveGlobResult { removed, failed }
+    RemoveGlobResult { failed, removed }
 }
 
 /// 根据 glob 模式获取匹配的路径列表，并通过 matcher 进行额外过滤
@@ -299,9 +301,9 @@ pub fn glob_matches(pattern: &Path) -> Vec<PathBuf> {
 
 #[derive(Clone)]
 pub enum DeletionStatus {
-    Success,
     Failed(Arc<ManagerError>),
     Skipped,
+    Success,
 }
 
 #[derive(Clone)]
@@ -356,15 +358,15 @@ pub fn execute_deletion(files: &[PathBuf], ui: &dyn Ui) -> Vec<DeletionResult> {
         };
 
         match &result.status {
-            DeletionStatus::Success => {
-                let _ = ui.deletion_display_success(&path.display().to_string());
-            }
             DeletionStatus::Failed(error) => {
                 let _ =
                     ui.deletion_display_failure(&path.display().to_string(), &error.to_string());
             }
             DeletionStatus::Skipped => {
                 let _ = ui.deletion_display_skipped(&path.display().to_string());
+            }
+            DeletionStatus::Success => {
+                let _ = ui.deletion_display_success(&path.display().to_string());
             }
         }
 
@@ -391,7 +393,7 @@ where
     F: Fn(&Path) -> io::Result<()>,
 {
     // 开发模拟模式的干跑：只打印将要执行的动作
-    if platform::fs_dry_run() {
+    if fs_dry_run() {
         eprintln!("[dev] 跳过删除（模拟）：{}", path.display());
         return deletion_success(path);
     }
@@ -484,9 +486,9 @@ pub fn count_results(results: &[DeletionResult]) -> (usize, usize, usize) {
 
     for result in results {
         match &result.status {
-            DeletionStatus::Success => success += 1,
             DeletionStatus::Failed(_) => failed += 1,
             DeletionStatus::Skipped => skipped += 1,
+            DeletionStatus::Success => success += 1,
         }
     }
 

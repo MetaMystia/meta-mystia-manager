@@ -5,7 +5,6 @@ use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
 use std::{
     collections::{HashMap, VecDeque},
     env,
-    process::Command,
     sync::{
         Mutex, OnceLock, PoisonError,
         mpsc::{RecvTimeoutError, Sender, channel},
@@ -13,6 +12,15 @@ use std::{
     thread::{JoinHandle, spawn},
     time::{Duration, Instant},
 };
+
+#[cfg(all(unix, not(target_os = "macos")))]
+use std::fs;
+#[cfg(windows)]
+use std::ptr::null_mut;
+#[cfg(not(windows))]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(windows)]
+use windows_sys::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW};
 
 const ID_SITE: &str = "13";
 const TRACKING_ENDPOINT: &str = "https://track.izakaya.cc/api.php";
@@ -24,12 +32,12 @@ static RECENT_EVENTS: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
 
 /// 埋点上报开关（仅开发模拟模式需要）
 #[cfg(not(windows))]
-static ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+static ENABLED: AtomicBool = AtomicBool::new(true);
 
 /// 关闭埋点上报
 #[cfg(not(windows))]
 pub fn disable() {
-    ENABLED.store(false, std::sync::atomic::Ordering::Relaxed);
+    ENABLED.store(false, Ordering::Relaxed);
 }
 
 #[cfg(windows)]
@@ -39,7 +47,7 @@ const fn enabled() -> bool {
 
 #[cfg(not(windows))]
 fn enabled() -> bool {
-    ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+    ENABLED.load(Ordering::Relaxed)
 }
 
 fn build_tracking_url(
@@ -72,31 +80,34 @@ fn build_tracking_url(
 /// 读取机器标识：Windows 取 `MachineGuid`，macOS 取 `IOPlatformUUID`，Linux 取 `machine-id`
 #[cfg(windows)]
 fn read_machine_id() -> Option<String> {
-    let out = Command::new("reg")
-        .args([
-            "query",
-            r"HKLM\SOFTWARE\Microsoft\Cryptography",
-            "/v",
-            "MachineGuid",
-        ])
-        .output()
-        .ok()?;
-    if !out.status.success() {
+    let subkey: Vec<u16> = "SOFTWARE\\Microsoft\\Cryptography\0"
+        .encode_utf16()
+        .collect();
+    let value_name: Vec<u16> = "MachineGuid\0".encode_utf16().collect();
+
+    let mut buffer = [0u16; 128];
+    let mut size = u32::try_from(buffer.len() * size_of::<u16>()).unwrap_or(u32::MAX);
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            subkey.as_ptr(),
+            value_name.as_ptr(),
+            RRF_RT_REG_SZ,
+            null_mut(),
+            buffer.as_mut_ptr().cast(),
+            &raw mut size,
+        )
+    };
+
+    if status != 0 {
         return None;
     }
 
-    let s = String::from_utf8_lossy(&out.stdout);
-    for line in s.lines() {
-        let t = line.trim();
-        if t.starts_with("MachineGuid") {
-            let parts: Vec<&str> = t.split_whitespace().collect();
-            if let Some(val) = parts.last() {
-                return Some(val.to_string());
-            }
-        }
-    }
+    let len = (size as usize / size_of::<u16>()).min(buffer.len());
+    let value = String::from_utf16_lossy(&buffer[..len]);
+    let value = value.trim_matches(['\0', ' ']).to_string();
 
-    None
+    (!value.is_empty()).then_some(value)
 }
 
 #[cfg(target_os = "macos")]
@@ -122,7 +133,7 @@ fn read_machine_id() -> Option<String> {
 fn read_machine_id() -> Option<String> {
     ["/etc/machine-id", "/var/lib/dbus/machine-id"]
         .iter()
-        .find_map(|path| std::fs::read_to_string(path).ok())
+        .find_map(|path| fs::read_to_string(path).ok())
         .map(|id| id.trim().to_string())
         .filter(|id| !id.is_empty())
 }
@@ -181,8 +192,8 @@ fn send_with_client(url: &str) {
 }
 
 struct TrackingWorker {
-    sender: Sender<String>,
     handle: JoinHandle<()>,
+    sender: Sender<String>,
 }
 
 static TRACKING_WORKER: OnceLock<Mutex<Option<TrackingWorker>>> = OnceLock::new();
@@ -203,8 +214,8 @@ fn start_tracking_worker() -> Sender<String> {
         }
     });
     let worker = TrackingWorker {
-        sender: tx.clone(),
         handle,
+        sender: tx.clone(),
     };
 
     let m = TRACKING_WORKER.get_or_init(|| Mutex::new(None));

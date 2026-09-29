@@ -8,31 +8,31 @@ use crate::win32::dword_len;
 
 use std::{
     env, fs, io,
-    mem::size_of,
+    mem::{size_of, zeroed},
     os::windows::process::CommandExt,
     path::PathBuf,
     process::{self, Command},
-    ptr::null_mut,
+    ptr::{null, null_mut},
 };
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
-use windows_sys::Win32::Security::{
-    GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
-};
-use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
-};
-use windows_sys::Win32::System::Threading::{
-    CREATE_NO_WINDOW, GetCurrentProcess, OpenProcessToken,
-};
-use windows_sys::Win32::UI::Shell::ShellExecuteW;
-use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-
-use windows_sys::Win32::Foundation::NTSTATUS;
-use windows_sys::Win32::Security::Cryptography::{
-    BCRYPT_ALG_HANDLE, BCRYPT_HASH_HANDLE, BCRYPT_SHA256_ALGORITHM,
-    BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptCloseAlgorithmProvider, BCryptCreateHash,
-    BCryptDestroyHash, BCryptFinishHash, BCryptGenRandom, BCryptHashData,
-    BCryptOpenAlgorithmProvider,
+use windows_sys::Win32::{
+    Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, NTSTATUS},
+    Security::{
+        Cryptography::{
+            BCRYPT_ALG_HANDLE, BCRYPT_HASH_HANDLE, BCRYPT_SHA256_ALGORITHM,
+            BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptCloseAlgorithmProvider, BCryptCreateHash,
+            BCryptDestroyHash, BCryptFinishHash, BCryptGenRandom, BCryptHashData,
+            BCryptOpenAlgorithmProvider,
+        },
+        GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
+    },
+    System::{
+        Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+            TH32CS_SNAPPROCESS,
+        },
+        Threading::{CREATE_NO_WINDOW, GetCurrentProcess, OpenProcessToken},
+    },
+    UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
 };
 
 const STATUS_SUCCESS: NTSTATUS = 0;
@@ -228,7 +228,7 @@ pub fn is_game_running() -> Result<bool> {
         let snapshot_handle = SnapshotHandle::new(raw_snapshot);
         let snapshot = snapshot_handle.as_raw();
 
-        let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+        let mut entry: PROCESSENTRY32W = zeroed();
         entry.dwSize = dword_len(size_of::<PROCESSENTRY32W>());
 
         if Process32FirstW(snapshot, &raw mut entry) == 0 {
@@ -274,15 +274,15 @@ pub fn is_game_running() -> Result<bool> {
 /// 用系统默认浏览器打开链接
 pub fn open_url(url: &str) -> Result<()> {
     let operation: Vec<u16> = "open\0".encode_utf16().collect();
-    let target: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
+    let target: Vec<u16> = url.encode_utf16().chain([0]).collect();
 
     let result = unsafe {
         ShellExecuteW(
-            std::ptr::null_mut(),
+            null_mut(),
             operation.as_ptr(),
             target.as_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
+            null(),
+            null(),
             SW_SHOWNORMAL,
         )
     };
@@ -308,7 +308,7 @@ pub fn random_bytes(buffer: &mut [u8]) -> Result<()> {
 
     let status = unsafe {
         BCryptGenRandom(
-            std::ptr::null_mut(),
+            null_mut(),
             buffer.as_mut_ptr(),
             len,
             BCRYPT_USE_SYSTEM_PREFERRED_RNG,
@@ -328,18 +328,14 @@ pub fn sha256(data: &[u8]) -> Result<[u8; SHA256_LENGTH]> {
     let len = u32::try_from(data.len())
         .map_err(|_| ManagerError::SsoLoginFailed("待哈希数据长度超出限制".to_string()))?;
 
-    let mut algorithm: BCRYPT_ALG_HANDLE = std::ptr::null_mut();
-    let mut hash: BCRYPT_HASH_HANDLE = std::ptr::null_mut();
+    let mut algorithm: BCRYPT_ALG_HANDLE = null_mut();
+    let mut hash: BCRYPT_HASH_HANDLE = null_mut();
 
     let mut digest = [0u8; SHA256_LENGTH];
 
     unsafe {
-        let status = BCryptOpenAlgorithmProvider(
-            &raw mut algorithm,
-            BCRYPT_SHA256_ALGORITHM,
-            std::ptr::null(),
-            0,
-        );
+        let status =
+            BCryptOpenAlgorithmProvider(&raw mut algorithm, BCRYPT_SHA256_ALGORITHM, null(), 0);
         if status != STATUS_SUCCESS {
             return Err(ManagerError::SsoLoginFailed(format!(
                 "打开 SHA-256 算法提供程序失败：NTSTATUS {status:#x}"
@@ -347,15 +343,7 @@ pub fn sha256(data: &[u8]) -> Result<[u8; SHA256_LENGTH]> {
         }
 
         // 默认不提供哈希对象缓冲区，由 CNG 自行分配
-        let status = BCryptCreateHash(
-            algorithm,
-            &raw mut hash,
-            std::ptr::null_mut(),
-            0,
-            std::ptr::null(),
-            0,
-            0,
-        );
+        let status = BCryptCreateHash(algorithm, &raw mut hash, null_mut(), 0, null(), 0, 0);
         if status != STATUS_SUCCESS {
             BCryptCloseAlgorithmProvider(algorithm, 0);
             return Err(ManagerError::SsoLoginFailed(format!(
