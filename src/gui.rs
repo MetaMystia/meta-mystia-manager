@@ -8,7 +8,7 @@
 )]
 
 use crate::config::{GAME_EXECUTABLE, OperationMode};
-use crate::env_check::check_game_running;
+use crate::env_check::{check_game_running, check_game_running_now};
 use crate::error::ManagerError;
 use crate::flow::{Input, run as run_flow};
 use crate::gui_ui::{
@@ -17,9 +17,10 @@ use crate::gui_ui::{
 };
 use crate::metrics::{get_user_id, report_event};
 use crate::model::VersionInfo;
-use crate::platform::init;
+use crate::platform::{acquire_single_instance, init};
 use crate::shutdown::run_shutdown;
-use crate::window::set_main_window;
+use crate::ui::{JobOutcome, Ui};
+use crate::window::{self, MAIN_WINDOW_CLASS, set_main_window};
 
 use std::{
     any::Any,
@@ -29,7 +30,7 @@ use std::{
     process, ptr,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicI32, Ordering},
+        atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering},
     },
     thread,
 };
@@ -52,27 +53,27 @@ use windows_sys::Win32::{
         },
         Input::KeyboardAndMouse::EnableWindow,
         Shell::{
-            BIF_RETURNONLYFSDIRS, BROWSEINFOW, ILFree, SHBrowseForFolderW, SHGetPathFromIDListW,
-            ShellExecuteW,
+            BFFM_INITIALIZED, BFFM_SETSELECTIONW, BIF_RETURNONLYFSDIRS, BROWSEINFOW, ILFree,
+            SHBrowseForFolderW, SHGetPathFromIDListW, ShellExecuteW,
         },
         WindowsAndMessaging::{
             AdjustWindowRectEx, BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX, BS_AUTORADIOBUTTON,
-            BS_DEFPUSHBUTTON, BS_GROUPBOX, BS_PUSHBUTTON, CREATESTRUCTW, CreateWindowExW,
-            DefWindowProcW, DestroyWindow, DispatchMessageW, ES_AUTOHSCROLL, ES_AUTOVSCROLL,
-            ES_MULTILINE, ES_READONLY, EnableMenuItem, GWLP_USERDATA, GetClientRect, GetMessageW,
-            GetSystemMenu, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect,
-            GetWindowTextLengthW, HICON, ICON_BIG, ICON_SMALL, IDC_ARROW, IsDialogMessageW,
-            IsWindow, LoadCursorW, LoadIconW, MB_ICONERROR, MB_ICONINFORMATION, MB_OK,
-            MF_BYCOMMAND, MF_ENABLED, MF_GRAYED, MSG, MessageBoxW, MoveWindow, NONCLIENTMETRICSW,
-            PostQuitMessage, RegisterClassW, SC_CLOSE, SM_CXICON, SM_CXSCREEN, SM_CXSMICON,
-            SM_CYICON, SM_CYSCREEN, SM_CYSMICON, SPI_GETNONCLIENTMETRICS, STM_SETICON, SW_HIDE,
-            SW_SHOW, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW,
-            SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow,
-            SystemParametersInfoW, TranslateMessage, WM_CLOSE, WM_COMMAND, WM_CREATE,
-            WM_CTLCOLORSTATIC, WM_DESTROY, WM_NOTIFY, WM_SETFONT, WM_SETICON, WNDCLASSW, WS_BORDER,
-            WS_CAPTION, WS_CHILD, WS_EX_CLIENTEDGE, WS_EX_CONTROLPARENT, WS_EX_DLGMODALFRAME,
-            WS_MINIMIZEBOX, WS_OVERLAPPED, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
-            WS_VSCROLL,
+            BS_DEFPUSHBUTTON, BS_GROUPBOX, BS_PUSHBUTTON, BS_RADIOBUTTON, CREATESTRUCTW,
+            CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, ES_AUTOHSCROLL,
+            ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY, EnableMenuItem, GWLP_USERDATA,
+            GetClientRect, GetMessageW, GetSystemMenu, GetSystemMetrics, GetWindowLongPtrW,
+            GetWindowRect, GetWindowTextLengthW, HICON, ICON_BIG, ICON_SMALL, IDC_ARROW, IDCANCEL,
+            IDOK, IsDialogMessageW, IsWindow, LoadCursorW, LoadIconW, MB_ICONERROR,
+            MB_ICONINFORMATION, MB_OK, MF_BYCOMMAND, MF_ENABLED, MF_GRAYED, MSG, MessageBoxW,
+            MoveWindow, NONCLIENTMETRICSW, PostMessageW, PostQuitMessage, RegisterClassW, SC_CLOSE,
+            SM_CXICON, SM_CXSCREEN, SM_CXSMICON, SM_CYICON, SM_CYSCREEN, SM_CYSMICON,
+            SPI_GETNONCLIENTMETRICS, STM_SETICON, SW_HIDE, SW_SHOW, SW_SHOWNORMAL, SWP_NOACTIVATE,
+            SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
+            SetWindowTextW, ShowWindow, SystemParametersInfoW, TranslateMessage, WM_CLOSE,
+            WM_COMMAND, WM_CREATE, WM_CTLCOLORSTATIC, WM_DESTROY, WM_NOTIFY, WM_SETFONT,
+            WM_SETICON, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_EX_CLIENTEDGE,
+            WS_EX_CONTROLPARENT, WS_EX_DLGMODALFRAME, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_POPUP,
+            WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
         },
     },
 };
@@ -94,6 +95,7 @@ const SS_ENDELLIPSIS: u32 = 0x0000_4000;
 const SS_RIGHT_CENTER: u32 = 0x0000_0002 | SS_CENTERIMAGE;
 const SS_ETCHEDHORZ: u32 = 0x0000_0010;
 const PBM_SETBARCOLOR: u32 = 0x0409;
+const PBM_DEFAULT_BAR_COLOR: usize = 0xFF00_0000;
 const ERROR_COLOR: u32 = 0x0030_30C0;
 
 const NET_LOADING: usize = 0;
@@ -110,9 +112,15 @@ const KIND_PROGRESS: usize = 4;
 const KIND_FINISH: usize = 5;
 const KIND_NOTES: usize = 6;
 
-const fn kind_name(kind: usize, op: usize) -> &'static str {
+const fn kind_name(kind: usize, op: usize, upgrade: bool) -> &'static str {
     match kind {
-        KIND_COMPONENTS => "选择安装内容",
+        KIND_COMPONENTS => {
+            if upgrade {
+                "选择更新内容"
+            } else {
+                "选择安装内容"
+            }
+        }
         KIND_DIRECTORY => "选择游戏目录",
         KIND_NOTES => "发行说明",
         KIND_OPERATION => "选择操作",
@@ -120,6 +128,7 @@ const fn kind_name(kind: usize, op: usize) -> &'static str {
             OP_DIAGNOSTICS => "导出诊断包",
             OP_SELF_UPDATE => "更新管理工具",
             OP_UNINSTALL => "卸载",
+            _ if upgrade => "下载并更新",
             _ => "下载并安装",
         },
         KIND_UNINSTALL => "选择卸载方式",
@@ -135,6 +144,10 @@ const OP_SELF_UPDATE: usize = 3;
 const ID_BACK: usize = 1000;
 const ID_NEXT: usize = 1001;
 const ID_CANCEL: usize = 1002;
+
+/// 确认框按钮 ID：避开 `IsDialogMessageW` 为 Enter/Esc 生成的 `IDOK`/`IDCANCEL`(1/2)
+const ID_DIALOG_CONFIRM: usize = 100;
+const ID_DIALOG_CANCEL: usize = 101;
 
 const ID_OP_INSTALL: usize = 1100;
 const ID_OP_UNINSTALL: usize = 1101;
@@ -197,6 +210,28 @@ static DPI: AtomicI32 = AtomicI32::new(96);
 
 static CONFIRM_CLASS_REGISTERED: AtomicBool = AtomicBool::new(false);
 static VERSION_CLASS_REGISTERED: AtomicBool = AtomicBool::new(false);
+static MODAL_DEPTH: AtomicUsize = AtomicUsize::new(0);
+
+struct ModalScope {
+    owner: HWND,
+}
+
+impl ModalScope {
+    unsafe fn enter(owner: HWND) -> Self {
+        MODAL_DEPTH.fetch_add(1, Ordering::Relaxed);
+
+        Self { owner }
+    }
+}
+
+impl Drop for ModalScope {
+    fn drop(&mut self) {
+        MODAL_DEPTH.fetch_sub(1, Ordering::Relaxed);
+        unsafe {
+            PostMessageW(self.owner, WM_UI_EVENT, 0, 0);
+        }
+    }
+}
 
 fn s(value: i32) -> i32 {
     value * DPI.load(Ordering::Relaxed) / 96
@@ -319,11 +354,8 @@ struct State {
     game_recheck: HWND,
     install_hint: HWND,
     installed_line: HWND,
-    job_active: [bool; JOB_SLOTS],
     job_bar_width: i32,
     job_bytes: [u64; JOB_SLOTS],
-    job_done: [bool; JOB_SLOTS],
-    job_name: [String; JOB_SLOTS],
     job_name_width: i32,
     job_percent_width: i32,
     job_speed: [f64; JOB_SLOTS],
@@ -336,16 +368,18 @@ struct State {
     net_attempt: usize,
     net_banner: HWND,
     net_error: Option<String>,
-    net_forced: bool,
     net_phase: usize,
     net_retry: HWND,
     next: HWND,
     next_width: i32,
+    no_update: bool,
     notes_edit: HWND,
     notes_title: HWND,
+    notes_version: Option<String>,
     op: usize,
-    option_labels: [HWND; 3],
+    op_before_self_update: usize,
     option_notes: [HWND; 3],
+    option_labels: [HWND; 3],
     option_radios: [HWND; 3],
     page0: Vec<HWND>,
     page1: Vec<HWND>,
@@ -355,11 +389,13 @@ struct State {
     page_op: Vec<HWND>,
     page_uninstall: Vec<HWND>,
     path_edit: HWND,
+    pending_manager_update: Option<String>,
     phase: usize,
     plan: Vec<usize>,
     prefetched: Option<Prefetched>,
     resourceex_versions: Vec<String>,
     secondary: Vec<HWND>,
+    stage: Option<Stage>,
     step: usize,
     step_text: HWND,
     title_font: HFONT,
@@ -376,6 +412,11 @@ struct State {
 )]
 pub fn run() {
     unsafe {
+        if !acquire_single_instance() {
+            window::focus_existing_manager_window();
+            return;
+        }
+
         init();
 
         panic::set_hook(Box::new(|info| {
@@ -407,7 +448,7 @@ pub fn run() {
             GetSystemMetrics(SM_CXSMICON),
             GetSystemMetrics(SM_CYSMICON),
         );
-        let class_name = wide("MetaMystiaManager");
+        let class_name = wide(MAIN_WINDOW_CLASS);
         let window_class = WNDCLASSW {
             cbClsExtra: 0,
             cbWndExtra: 0,
@@ -493,8 +534,10 @@ pub fn run() {
 
         let mut message: MSG = mem::zeroed();
         while GetMessageW(&raw mut message, ptr::null_mut(), 0, 0) > 0 {
-            TranslateMessage(&raw const message);
-            DispatchMessageW(&raw const message);
+            if IsDialogMessageW(hwnd, &raw const message) == 0 {
+                TranslateMessage(&raw const message);
+                DispatchMessageW(&raw const message);
+            }
         }
 
         run_shutdown();
@@ -527,7 +570,7 @@ unsafe fn pick_folder(owner: HWND, initial: &Path) -> Option<PathBuf> {
         hwndOwner: owner,
         iImage: 0,
         lParam: initial_text.as_ptr() as isize,
-        lpfn: None,
+        lpfn: Some(browse_callback),
         lpszTitle: title.as_ptr(),
         pidlRoot: ptr::null_mut(),
         pszDisplayName: display.as_mut_ptr(),
@@ -563,6 +606,19 @@ unsafe fn pick_folder(owner: HWND, initial: &Path) -> Option<PathBuf> {
         );
         None
     }
+}
+
+unsafe extern "system" fn browse_callback(
+    hwnd: HWND,
+    message: u32,
+    _lparam: LPARAM,
+    data: LPARAM,
+) -> i32 {
+    if message == BFFM_INITIALIZED {
+        SendMessageW(hwnd, BFFM_SETSELECTIONW, 1, data);
+    }
+
+    0
 }
 
 unsafe fn system_dpi() -> i32 {
@@ -704,11 +760,21 @@ unsafe extern "system" fn confirm_dialog_proc(
             }
 
             match wparam & 0xFFFF {
-                1 => {
+                ID_DIALOG_CANCEL => {
                     DestroyWindow(hwnd);
                 }
-                2 => {
+                ID_DIALOG_CONFIRM => {
                     if !shared.is_null() {
+                        (*shared).confirmed = true;
+                    }
+                    DestroyWindow(hwnd);
+                }
+                // Esc 一律按取消处理；Enter 走对话框的默认按钮（有取消按钮时默认取消）
+                id if id == IDCANCEL as usize => {
+                    DestroyWindow(hwnd);
+                }
+                id if id == IDOK as usize => {
+                    if !shared.is_null() && !(*shared).has_cancel {
                         (*shared).confirmed = true;
                     }
                     DestroyWindow(hwnd);
@@ -770,7 +836,7 @@ unsafe extern "system" fn confirm_dialog_proc(
                     button_y,
                     cancel_width,
                     s(28),
-                    1,
+                    ID_DIALOG_CANCEL,
                     font,
                 );
             }
@@ -791,7 +857,7 @@ unsafe extern "system" fn confirm_dialog_proc(
                 button_y,
                 confirm_width,
                 s(28),
-                2,
+                ID_DIALOG_CONFIRM,
                 font,
             );
             0
@@ -932,6 +998,8 @@ unsafe fn show_confirm_dialog(
         return false;
     }
 
+    let _modal = ModalScope::enter(owner);
+
     EnableWindow(owner, 0);
     ShowWindow(hwnd, SW_SHOW);
 
@@ -1018,6 +1086,7 @@ unsafe extern "system" fn version_dialog_proc(
             );
             (*shared).list = list;
 
+            // 确定/取消沿用 IDOK/IDCANCEL 的编号，Enter/Esc 由 IsDialogMessageW 直接命中
             let ok_width = button_width(font, &["确定"]);
             create_child(
                 hwnd,
@@ -1121,6 +1190,8 @@ unsafe fn pick_version(
         drop(Box::from_raw(shared));
         return None;
     }
+
+    let _modal = ModalScope::enter(owner);
 
     for version in versions {
         SendMessageW(
@@ -1263,7 +1334,6 @@ unsafe fn build_children(hwnd: HWND) -> Box<State> {
         font,
     );
 
-    // ---- 选择操作 ----
     let mut page_op = Vec::new();
     let mut option_radios = [ptr::null_mut(); 3];
     let mut option_label_hwnds = [ptr::null_mut(); 3];
@@ -1271,7 +1341,7 @@ unsafe fn build_children(hwnd: HWND) -> Box<State> {
     let option_labels = ["安装/更新 Mod", "卸载 Mod", "导出诊断包"];
     let option_ids = [ID_OP_INSTALL, ID_OP_UNINSTALL, ID_OP_DIAGNOSTICS];
     let option_notes = [
-        "已安装的组件会自动更新到最新版本。",
+        "未安装时安装，已安装时更新。",
         "删除 MetaMystia Mod，可选择是否连同 BepInEx 一起清理。",
         "收集日志与配置用于反馈问题，不会修改游戏文件。",
     ];
@@ -1282,7 +1352,7 @@ unsafe fn build_children(hwnd: HWND) -> Box<State> {
             hwnd,
             "BUTTON",
             "",
-            WS_CHILD | WS_TABSTOP | BS_AUTORADIOBUTTON as u32,
+            WS_CHILD | WS_TABSTOP | BS_RADIOBUTTON as u32,
             0,
             margin,
             row + s(3),
@@ -1315,13 +1385,13 @@ unsafe fn build_children(hwnd: HWND) -> Box<State> {
             hwnd,
             "STATIC",
             option_notes[i],
-            WS_CHILD | SS_CENTERIMAGE,
+            WS_CHILD | SS_CENTERIMAGE | SS_NOTIFY,
             0,
             margin + s(18),
             row + s(24),
             content - s(18),
             s(20),
-            0,
+            option_ids[i],
             font,
         );
         option_note_hwnds[i] = note;
@@ -1360,7 +1430,6 @@ unsafe fn build_children(hwnd: HWND) -> Box<State> {
     page_op.push(net_banner);
     page_op.push(net_retry);
 
-    // ---- 游戏目录 ----
     let mut page0 = Vec::new();
     page0.push(create_child(
         hwnd,
@@ -1510,7 +1579,6 @@ unsafe fn build_children(hwnd: HWND) -> Box<State> {
 
     let nav_y = nav_top();
 
-    // ---- 选择要安装的内容 ----
     let mut page1 = Vec::new();
     let mut component_checks = [ptr::null_mut(); 3];
     let mut component_version_controls = [ptr::null_mut(); 3];
@@ -1521,7 +1589,6 @@ unsafe fn build_children(hwnd: HWND) -> Box<State> {
     ];
     // BepInEx 固定使用最新版，不提供历史版本
     let supports_history = [false, true, true];
-    // 具体版本等预取完成后写入（见 apply_prefetch）
     let component_versions = ["正在检测…", "正在检测…", "正在检测…"];
 
     let history_width = button_width(font, &["历史版本…"]);
@@ -1650,7 +1717,6 @@ unsafe fn build_children(hwnd: HWND) -> Box<State> {
     secondary.push(console_note);
     page1.push(console_note);
 
-    // ---- 卸载方式（仅卸载流程） ----
     let mut page_uninstall = Vec::new();
     let mut uninstall_radios = [ptr::null_mut(); 2];
     let uninstall_labels = ["轻量卸载（推荐）", "完全卸载"];
@@ -1711,7 +1777,6 @@ unsafe fn build_children(hwnd: HWND) -> Box<State> {
         page_uninstall.push(note);
     }
 
-    // ---- 发行说明 ----
     let mut page_notes = Vec::new();
     let notes_title = create_child(
         hwnd,
@@ -1762,7 +1827,6 @@ unsafe fn build_children(hwnd: HWND) -> Box<State> {
     secondary.push(notes_hint);
     page_notes.push(notes_hint);
 
-    // ---- 执行（下载并安装 / 卸载 / 导出） ----
     let mut page2 = Vec::new();
     let install_hint = create_child(
         hwnd,
@@ -1888,7 +1952,6 @@ unsafe fn build_children(hwnd: HWND) -> Box<State> {
     );
     page2.push(log);
 
-    // ---- 完成 ----
     let mut page3 = Vec::new();
     let finish_title = create_child(
         hwnd,
@@ -2003,7 +2066,6 @@ unsafe fn build_children(hwnd: HWND) -> Box<State> {
     );
     page3.push(finish_open);
 
-    // ---- 底部导航 ----
     let cancel_width = button_width(font, &["取消"]);
     let next_width = button_width(font, &["下一步 >", "开始安装 >", "完成"]);
     let back_width = button_width(font, &["< 上一步"]);
@@ -2048,7 +2110,6 @@ unsafe fn build_children(hwnd: HWND) -> Box<State> {
         font,
     );
 
-    // ---- 底部状态栏 ----
     let status_top = window_height() - s(STATUS_BAR_HEIGHT);
     create_child(
         hwnd,
@@ -2136,11 +2197,8 @@ unsafe fn build_children(hwnd: HWND) -> Box<State> {
         game_recheck,
         install_hint,
         installed_line,
-        job_active: [false; JOB_SLOTS],
         job_bar_width: bar_width,
         job_bytes: [0; JOB_SLOTS],
-        job_done: [false; JOB_SLOTS],
-        job_name: Default::default(),
         job_name_width: name_width,
         job_percent_width: percent_width,
         job_speed: [0.0; JOB_SLOTS],
@@ -2153,16 +2211,18 @@ unsafe fn build_children(hwnd: HWND) -> Box<State> {
         net_attempt: 0,
         net_banner,
         net_error: None,
-        net_forced: false,
         net_phase: NET_LOADING,
         net_retry,
         next,
         next_width,
+        no_update: false,
         notes_edit,
         notes_title,
+        notes_version: None,
         op: OP_INSTALL,
-        option_labels: option_label_hwnds,
+        op_before_self_update: OP_INSTALL,
         option_notes: option_note_hwnds,
+        option_labels: option_label_hwnds,
         option_radios,
         page0,
         page1,
@@ -2172,11 +2232,13 @@ unsafe fn build_children(hwnd: HWND) -> Box<State> {
         page_op,
         page_uninstall,
         path_edit,
+        pending_manager_update: None,
         phase: 0,
         plan: plan_for(OP_INSTALL),
         prefetched: None,
         resourceex_versions: Vec::new(),
         secondary,
+        stage: None,
         step: 0,
         step_text,
         title_font,
@@ -2205,16 +2267,40 @@ unsafe fn set_close_enabled(hwnd: HWND, enabled: bool) {
     }
 }
 
+unsafe fn no_component_selected(state: &State) -> bool {
+    state
+        .component_checks
+        .iter()
+        .all(|check| SendMessageW(*check, BM_GETCHECK, 0, 0) != 1)
+}
+
+unsafe fn console_setting_changed(state: &State) -> bool {
+    (SendMessageW(state.console_check, BM_GETCHECK, 0, 0) == 1) != state.local.bepinex_console
+}
+
+unsafe fn only_console_change(state: &State) -> bool {
+    console_setting_changed(state) && expected_downloads(state).is_empty()
+}
+
+unsafe fn refresh_version_checkbox(state: &State, index: usize, selected: &str) {
+    let installed = if index == 1 {
+        state.local.dll_version.as_deref()
+    } else {
+        state.local.resourceex_version.as_deref()
+    };
+    let enabled = installed.map_or(index == 2, |current| {
+        state.local.dll_version.is_some() && !VersionInfo::versions_match(current, selected)
+    });
+
+    SendMessageW(state.component_checks[index], BM_SETCHECK, 1, 0);
+    EnableWindow(state.component_checks[index], i32::from(enabled));
+}
+
 unsafe fn update_selection_state(state: &State) {
-    let mut selected = 0;
-
-    for check in &state.component_checks {
-        if SendMessageW(*check, BM_GETCHECK, 0, 0) == 1 {
-            selected += 1;
-        }
-    }
-
-    EnableWindow(state.next, i32::from(selected > 0));
+    EnableWindow(
+        state.next,
+        i32::from(!no_component_selected(state) || console_setting_changed(state)),
+    );
 }
 
 fn plan_for(op: usize) -> Vec<usize> {
@@ -2254,7 +2340,7 @@ unsafe fn finish_values(state: &State) -> [String; 3] {
         };
 
         return [
-            result_text(local.bepinex_version.is_some(), true),
+            result_text(local.bepinex_installed, true),
             result_text(local.dll_version.is_some(), false),
             result_text(local.resourceex_version.is_some(), false),
         ];
@@ -2321,22 +2407,48 @@ unsafe fn apply_finish(state: &State) {
             );
         }
         _ => {
-            SetWindowTextW(state.finish_title, wide("安装完成").as_ptr());
+            let upgraded = matches!(state.choices.operation, Some(OperationMode::Upgrade));
+            let console_only = only_console_change(state);
+            let no_change = state.no_update && !console_only;
+
+            SetWindowTextW(
+                state.finish_title,
+                wide(if no_change {
+                    "已是最新版本"
+                } else if upgraded {
+                    "更新完成"
+                } else {
+                    "安装完成"
+                })
+                .as_ptr(),
+            );
             SetWindowTextW(
                 state.finish_note,
-                wide("现在可以启动游戏；首次启动加载较慢，请耐心等待。").as_ptr(),
+                wide(if console_only {
+                    "已应用 BepInEx 日志设置；未更新任何组件。"
+                } else if no_change {
+                    "所有已安装组件均为最新版本，未做任何改动。"
+                } else {
+                    "现在可以启动游戏；首次启动加载较慢，请耐心等待。"
+                })
+                .as_ptr(),
             );
         }
     }
 
     let install = state.op == OP_INSTALL;
+    let upgraded = matches!(state.choices.operation, Some(OperationMode::Upgrade));
     let uninstall = state.op == OP_UNINSTALL;
     let show_summary = install || uninstall;
 
     SetWindowTextW(
         state.finish_group,
         wide(if install {
-            "已安装内容"
+            if upgraded {
+                "更新结果"
+            } else {
+                "已安装内容"
+            }
         } else {
             "卸载结果"
         })
@@ -2385,13 +2497,24 @@ unsafe fn apply_finish(state: &State) {
 
 unsafe fn update_step_text(state: &State) {
     let kind = state.plan[state.step];
+    let name = if kind == KIND_PROGRESS && state.op == OP_INSTALL {
+        if only_console_change(state) {
+            "应用设置"
+        } else if expected_downloads(state).is_empty() {
+            "检查更新"
+        } else {
+            kind_name(kind, state.op, state.local.dll_version.is_some())
+        }
+    } else {
+        kind_name(kind, state.op, state.local.dll_version.is_some())
+    };
+
     SetWindowTextW(
         state.step_text,
         wide(&format!(
-            "步骤 {}/{} · {}",
+            "步骤 {}/{} · {name}",
             state.step + 1,
-            state.plan.len(),
-            kind_name(kind, state.op)
+            state.plan.len()
         ))
         .as_ptr(),
     );
@@ -2455,7 +2578,15 @@ unsafe fn show_page(state: &mut State, step: usize) {
             SetWindowTextW(state.next, wide("完成").as_ptr());
         }
         KIND_NOTES => {
-            SetWindowTextW(state.next, wide("开始安装 >").as_ptr());
+            SetWindowTextW(
+                state.next,
+                wide(if state.local.dll_version.is_some() {
+                    "开始更新 >"
+                } else {
+                    "开始安装 >"
+                })
+                .as_ptr(),
+            );
         }
         KIND_UNINSTALL => {
             SetWindowTextW(state.next, wide("开始卸载 >").as_ptr());
@@ -2611,7 +2742,6 @@ fn strip_inline_markdown(text: &str) -> String {
 unsafe fn update_net_ui(state: &mut State) {
     let failed = state.net_phase == NET_FAILED;
     let loading = state.net_phase == NET_LOADING;
-    let blocked = state.net_phase != NET_OK;
 
     let banner = match state.net_phase {
         NET_FAILED => state
@@ -2619,7 +2749,7 @@ unsafe fn update_net_ui(state: &mut State) {
             .clone()
             .unwrap_or_else(|| "无法连接服务器，请稍后重试。".to_string()),
         NET_LOADING if state.net_attempt == 0 => "正在获取版本信息…".to_string(),
-        NET_LOADING => format!("正在重新获取（{}/3）…", state.net_attempt),
+        NET_LOADING => format!("正在重新获取（第 {} 次尝试）…", state.net_attempt + 1),
         _ => String::new(),
     };
 
@@ -2631,72 +2761,40 @@ unsafe fn update_net_ui(state: &mut State) {
     ShowWindow(state.net_retry, if failed { SW_SHOW } else { SW_HIDE });
     EnableWindow(state.net_retry, i32::from(failed));
 
-    EnableWindow(state.option_radios[0], i32::from(!blocked));
-    EnableWindow(state.option_labels[0], i32::from(!blocked));
+    let install_enabled = state.net_phase == NET_OK;
+    EnableWindow(state.option_radios[0], i32::from(install_enabled));
+    EnableWindow(state.option_labels[0], i32::from(install_enabled));
+    EnableWindow(state.option_notes[0], i32::from(install_enabled));
+
     SetWindowTextW(
         state.option_notes[0],
         wide(match state.net_phase {
             NET_FAILED => "需要联网获取版本信息，请检查网络或代理后重试。",
-            NET_OK => "已安装的组件会自动更新到最新版本。",
+            NET_OK => "未安装时安装，已安装时更新。",
             _ => "正在获取版本信息，请稍候…",
         })
         .as_ptr(),
     );
 
-    // 只有停在“选择操作”这一步、且没有操作在跑时，才允许按预取结果显示/禁用选项；
-    // 否则会把已经开始的自升级、安装流程改回默认操作
-    let on_operation_step = state.step == 0 && state.plan.first() == Some(&KIND_OPERATION);
-    if !state.busy && on_operation_step {
-        if blocked && state.op == OP_INSTALL {
-            state.net_forced = true;
-            state.op = OP_UNINSTALL;
-            state.plan = plan_for(state.op);
-        } else if !blocked && state.net_forced {
-            // 拿回版本信息后，如果上次是程序替用户切的，就切回默认的“安装/更新”
-            state.net_forced = false;
-            state.op = OP_INSTALL;
-            state.plan = plan_for(state.op);
-        }
-    }
-
     for (index, radio) in state.option_radios.iter().enumerate() {
         SendMessageW(*radio, BM_SETCHECK, usize::from(index == state.op), 0);
     }
+
+    if state.step == 0 && state.plan.first() == Some(&KIND_OPERATION) {
+        let enabled = state.op != OP_INSTALL || state.net_phase == NET_OK;
+        EnableWindow(state.next, i32::from(enabled));
+    }
+
     update_step_text(state);
 }
 
-unsafe fn fail_progress(
-    hwnd: HWND,
-    state: &mut State,
-    message: &str,
-    hint: &str,
-    files: &[&str],
-    bar: i32,
-) {
+unsafe fn fail_progress(hwnd: HWND, state: &mut State, message: &str) {
     state.failed = true;
     // 操作已经停下，关窗不再拦截
     state.phase = 0;
 
     SetWindowTextW(state.install_hint, wide(message).as_ptr());
     append_log(state, &format!("错误：{message}"));
-    if !files.is_empty() {
-        append_log(state, "涉及文件：");
-        for file in files {
-            append_log(state, &format!("  · {file}"));
-        }
-    }
-    if !hint.is_empty() {
-        append_log(state, hint);
-    }
-
-    if bar >= 0 {
-        SendMessageW(
-            state.bars[bar as usize],
-            PBM_SETBARCOLOR,
-            ERROR_COLOR as usize,
-            0,
-        );
-    }
 
     SetWindowTextW(state.next, wide("重试 >").as_ptr());
     SetWindowTextW(state.cancel, wide("取消").as_ptr());
@@ -2779,6 +2877,8 @@ unsafe fn apply_event(hwnd: HWND, state: &mut State, event: Event) {
         Event::Done(error) => {
             state.busy = false;
             state.phase = 0;
+            state.stage = None;
+            state.ui.set_download_aborted(false);
             EnableWindow(state.cancel, 1);
             set_close_enabled(hwnd, true);
 
@@ -2790,38 +2890,39 @@ unsafe fn apply_event(hwnd: HWND, state: &mut State, event: Event) {
                         reset_job_rows(state);
                         show_page(state, state.step.saturating_sub(1));
                     } else {
-                        fail_progress(hwnd, state, &message, "", &[], -1);
+                        fail_progress(hwnd, state, &message);
                     }
                 }
             }
+
+            if let Some(latest) = state.pending_manager_update.take() {
+                prompt_manager_update(hwnd, state, &latest);
+            }
         }
         Event::Error(text) => append_log(state, &format!("错误：{text}")),
-        Event::JobFinish { message, slot } => {
+        Event::JobFinish {
+            message,
+            outcome,
+            slot,
+        } => {
             if slot < JOB_SLOTS {
-                state.job_done[slot] = true;
-
-                let failed = message.contains("失败");
-                if failed {
-                    update_job_row(state, slot);
-                } else {
-                    SendMessageW(state.bars[slot], PBM_SETPOS, 100, 0);
-                    SetWindowTextW(state.bar_percent[slot], wide("100%").as_ptr());
+                match outcome {
+                    JobOutcome::Failed => update_job_row(state, slot),
+                    JobOutcome::Completed => {
+                        SendMessageW(state.bars[slot], PBM_SETPOS, 100, 0);
+                        SetWindowTextW(state.bar_percent[slot], wide("100%").as_ptr());
+                    }
                 }
 
-                let short = if failed {
-                    "下载失败"
-                } else if message.contains("完成") {
-                    "已完成"
-                } else {
-                    message.as_str()
-                };
-                SetWindowTextW(state.bar_speed[slot], wide(short).as_ptr());
-
-                if message.contains('：') {
-                    append_log(state, &message);
-                } else {
-                    append_log(state, &format!("{message}：{}", state.job_name[slot]));
-                }
+                SetWindowTextW(
+                    state.bar_speed[slot],
+                    wide(match outcome {
+                        JobOutcome::Failed => "下载失败",
+                        JobOutcome::Completed => "已完成",
+                    })
+                    .as_ptr(),
+                );
+                append_log(state, &message);
             }
         }
         Event::JobPlan(items) => {
@@ -2839,47 +2940,51 @@ unsafe fn apply_event(hwnd: HWND, state: &mut State, event: Event) {
         }
         Event::JobStart { name, slot, total } => {
             if slot < JOB_SLOTS {
-                state.job_active[slot] = true;
-                state.job_done[slot] = false;
                 state.job_total[slot] = total;
                 state.job_bytes[slot] = 0;
                 state.job_speed[slot] = 0.0;
-                state.job_name[slot].clone_from(&name);
 
                 SetWindowTextW(state.bar_labels[slot], wide(&name).as_ptr());
                 SetWindowTextW(state.bar_percent[slot], wide("0%").as_ptr());
                 SetWindowTextW(state.bar_speed[slot], wide("").as_ptr());
                 SendMessageW(state.bars[slot], PBM_SETPOS, 0, 0);
-                SendMessageW(state.bars[slot], PBM_SETBARCOLOR, 0, 0);
+                SendMessageW(state.bars[slot], PBM_SETBARCOLOR, PBM_DEFAULT_BAR_COLOR, 0);
 
                 set_job_row_visible(state, slot, true);
             }
         }
         Event::Log(text) => append_log(state, &text),
+        Event::NoUpdate => state.no_update = true,
         Event::Notes { notes, version } => {
-            set_notes_title(state, &version);
-            let text = match notes {
-                None => format!("暂未获取到 {version} 的发行说明。"),
-                Some((_tag, _name, body)) => {
-                    let rendered = render_notes(&body);
-                    if rendered.is_empty() {
-                        "该版本没有填写发行说明。".to_string()
-                    } else {
-                        rendered
+            // 用户可能已经切换到别的版本，忽略过期请求的结果
+            if state.notes_version.as_deref() == Some(version.as_str()) {
+                set_notes_title(state, &version);
+                let text = match notes {
+                    None => format!("暂未获取到 {version} 的发行说明。"),
+                    Some((_tag, _name, body)) => {
+                        let rendered = render_notes(&body);
+                        if rendered.is_empty() {
+                            "该版本没有填写发行说明。".to_string()
+                        } else {
+                            rendered
+                        }
                     }
-                }
-            };
-            SetWindowTextW(state.notes_edit, wide(&text).as_ptr());
+                };
+                SetWindowTextW(state.notes_edit, wide(&text).as_ptr());
+            }
         }
         Event::Prefetch(outcome) => apply_prefetch(hwnd, state, *outcome),
         Event::SelfUpdate(error) => {
             state.busy = false;
             state.phase = 0;
+            state.stage = None;
             EnableWindow(state.cancel, 1);
             set_close_enabled(hwnd, true);
 
             if let Some(message) = error {
                 append_log(state, &format!("管理工具更新失败：{message}"));
+                let _modal = ModalScope::enter(hwnd);
+
                 MessageBoxW(
                     hwnd,
                     wide(&format!(
@@ -2891,50 +2996,52 @@ unsafe fn apply_event(hwnd: HWND, state: &mut State, event: Event) {
                 );
             }
 
-            state.op = OP_INSTALL;
-            state.plan = plan_for(OP_INSTALL);
+            state.op = state.op_before_self_update;
+            state.plan = plan_for(state.op);
             show_page(state, 0);
         }
-        Event::Stage(next_stage) => match next_stage {
-            Stage::Cleanup => {
-                state.phase = 1;
-                SetWindowTextW(state.install_hint, wide("正在清理旧文件…").as_ptr());
-                EnableWindow(state.cancel, 0);
-                set_close_enabled(hwnd, false);
+        Event::Stage(next_stage) => {
+            state.stage = Some(next_stage);
+
+            match next_stage {
+                Stage::Cleanup => {
+                    state.phase = 1;
+                    SetWindowTextW(state.install_hint, wide("正在清理旧文件…").as_ptr());
+                    EnableWindow(state.cancel, 0);
+                    set_close_enabled(hwnd, false);
+                }
+                Stage::Deploy => {
+                    state.phase = 1;
+                    SetWindowTextW(state.install_hint, wide("正在安装，请勿关闭窗口…").as_ptr());
+                    EnableWindow(state.cancel, 0);
+                    set_close_enabled(hwnd, false);
+                }
+                Stage::Download => {
+                    SetWindowTextW(state.install_hint, wide("正在下载，可随时取消。").as_ptr());
+                    EnableWindow(state.cancel, 1);
+                    set_close_enabled(hwnd, true);
+                }
+                Stage::Login => {
+                    SetWindowTextW(
+                        state.install_hint,
+                        wide("请在浏览器中完成登录并确认授权…").as_ptr(),
+                    );
+                    EnableWindow(state.cancel, 0);
+                    set_close_enabled(hwnd, true);
+                }
             }
-            Stage::Deploy => {
-                state.phase = 1;
-                SetWindowTextW(state.install_hint, wide("正在安装，请勿关闭窗口…").as_ptr());
-                EnableWindow(state.cancel, 0);
-                set_close_enabled(hwnd, false);
-            }
-            Stage::Download => {
-                SetWindowTextW(state.install_hint, wide("正在下载，可随时取消。").as_ptr());
-                EnableWindow(state.cancel, 1);
-                set_close_enabled(hwnd, true);
-            }
-            Stage::Login => {
-                SetWindowTextW(
-                    state.install_hint,
-                    wide("请在浏览器中完成登录并确认授权…").as_ptr(),
-                );
-                EnableWindow(state.cancel, 0);
-                set_close_enabled(hwnd, true);
-            }
-        },
+        }
     }
 }
 
 unsafe fn reset_job_rows(state: &mut State) {
     for slot in 0..JOB_SLOTS {
-        state.job_active[slot] = false;
-        state.job_done[slot] = false;
         state.job_total[slot] = None;
         state.job_bytes[slot] = 0;
         state.job_speed[slot] = 0.0;
         state.job_visible[slot] = false;
         SendMessageW(state.bars[slot], PBM_SETPOS, 0, 0);
-        SendMessageW(state.bars[slot], PBM_SETBARCOLOR, 0, 0);
+        SendMessageW(state.bars[slot], PBM_SETBARCOLOR, PBM_DEFAULT_BAR_COLOR, 0);
         SetWindowTextW(state.bar_percent[slot], wide("").as_ptr());
         SetWindowTextW(state.bar_speed[slot], wide("").as_ptr());
         ShowWindow(state.bar_labels[slot], SW_HIDE);
@@ -2946,7 +3053,6 @@ unsafe fn reset_job_rows(state: &mut State) {
     layout_job_rows(state);
 }
 
-/// 让可见的进度行从第一行开始连续排列
 unsafe fn layout_job_rows(state: &State) {
     let mut row: i32 = 0;
 
@@ -2990,7 +3096,6 @@ unsafe fn layout_job_rows(state: &State) {
     }
 }
 
-/// 显示/隐藏一行进度，并重排可见行
 unsafe fn set_job_row_visible(state: &mut State, slot: usize, visible: bool) {
     state.job_visible[slot] = visible;
 
@@ -3006,32 +3111,38 @@ unsafe fn set_job_row_visible(state: &mut State, slot: usize, visible: bool) {
     layout_job_rows(state);
 }
 
-/// 先建出一行“等待中”的进度占位
 unsafe fn plan_job_row(state: &mut State, slot: usize, label: &str) {
-    state.job_active[slot] = false;
-    state.job_done[slot] = false;
     state.job_total[slot] = None;
     state.job_bytes[slot] = 0;
     state.job_speed[slot] = 0.0;
-    state.job_name[slot] = label.to_string();
 
     SetWindowTextW(state.bar_labels[slot], wide(label).as_ptr());
     SetWindowTextW(state.bar_percent[slot], wide("").as_ptr());
     SetWindowTextW(state.bar_speed[slot], wide("等待中").as_ptr());
     SendMessageW(state.bars[slot], PBM_SETPOS, 0, 0);
-    SendMessageW(state.bars[slot], PBM_SETBARCOLOR, 0, 0);
+    SendMessageW(state.bars[slot], PBM_SETBARCOLOR, PBM_DEFAULT_BAR_COLOR, 0);
 
     set_job_row_visible(state, slot, true);
 }
 
-/// 组件版本行：未安装提示最新版本，已是最新只显示已安装版本，有更新才显示箭头
 fn version_label(installed: Option<&str>, latest: &str) -> String {
     match installed {
         None => format!("未安装 · 最新 {latest}"),
         Some(installed) if VersionInfo::versions_match(installed, latest) => {
-            format!("已安装 {installed}")
+            format!("已安装 {installed}（已是最新）")
         }
         Some(installed) => format!("已安装 {installed} → 最新 {latest}"),
+    }
+}
+
+fn bepinex_version_label(installed: bool, version: Option<&str>, latest: &str) -> String {
+    match (installed, version) {
+        (false, _) => format!("未安装 · 最新 {latest}"),
+        (true, Some(version)) if VersionInfo::versions_match(version, latest) => {
+            format!("已安装 {version}（已是最新）")
+        }
+        (true, Some(version)) => format!("已安装 {version} → 最新 {latest}"),
+        (true, None) => format!("已安装（版本未知） · 最新 {latest}"),
     }
 }
 
@@ -3063,19 +3174,27 @@ unsafe fn expected_downloads(state: &State) -> Vec<(usize, &'static str)> {
         _ => false,
     };
 
-    let mut items = Vec::new();
+    let mut items: Vec<(usize, &'static str)> = Vec::new();
 
-    if !upgrade || local.bepinex_version.as_deref() != latest_bepinex {
-        items.push((0, "BepInEx"));
+    if checked(0)
+        && let Some(latest) = latest_bepinex
+        && (!upgrade
+            || !local.bepinex_installed
+            || local.bepinex_version.as_deref() != Some(latest))
+    {
+        let slot = items.len();
+        items.push((slot, "BepInEx"));
     }
 
     if dll_will_change(state) {
-        items.push((1, "MetaMystia"));
+        let slot = items.len();
+        items.push((slot, "MetaMystia"));
     }
 
     if checked(2) && (!upgrade || outdated(local.resourceex_version.as_deref(), wanted_resourceex))
     {
-        items.push((2, "ResourceExample"));
+        let slot = items.len();
+        items.push((slot, "ResourceExample"));
     }
 
     items
@@ -3108,6 +3227,33 @@ unsafe fn dll_will_change(state: &State) -> bool {
     }
 }
 
+/// 提示并进入管理工具自更新；版本升级不可跳过，但允许关闭窗口退出
+unsafe fn prompt_manager_update(hwnd: HWND, state: &mut State, latest: &str) {
+    let current = env!("CARGO_PKG_VERSION");
+    let go = notice_dialog(
+        hwnd,
+        &window_caption(),
+        "需要更新管理工具",
+        &format!(
+            "当前 v{current}，最新 v{latest}。\n为保证兼容性，将先更新管理工具，更新完成后会自动重新打开。"
+        ),
+        "立即更新",
+        state.font,
+        state.dialog_font,
+    );
+
+    if go {
+        start_self_update(hwnd, state);
+    } else {
+        // 不能跳过升级，但允许直接退出
+        report_event("SelfUpdate.Declined", None);
+        append_log(state, "已退出管理工具；请更新后再使用。");
+        ShowWindow(hwnd, SW_HIDE);
+        run_shutdown();
+        process::exit(0);
+    }
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "预取结果一次性铺到各页面，集中在一起便于对照"
@@ -3115,6 +3261,13 @@ unsafe fn dll_will_change(state: &State) -> bool {
 unsafe fn apply_prefetch(hwnd: HWND, state: &mut State, outcome: PrefetchOutcome) {
     let PrefetchOutcome { local, remote } = outcome;
     apply_local(state, &local);
+    if state
+        .plan
+        .get(state.step)
+        .is_some_and(|kind| *kind == KIND_DIRECTORY)
+    {
+        show_page(state, state.step);
+    }
 
     match remote {
         Ok(prefetched) => {
@@ -3122,11 +3275,8 @@ unsafe fn apply_prefetch(hwnd: HWND, state: &mut State, outcome: PrefetchOutcome
             state.net_error = None;
             state.net_attempt = 0;
 
-            let bepinex_latest = prefetched
-                .version_info
-                .bepinex_version()
-                .unwrap_or("未知")
-                .to_string();
+            let bepinex_latest = prefetched.version_info.bepinex_version().ok();
+            let bepinex_latest_text = bepinex_latest.unwrap_or("未知");
             let dll_latest = prefetched
                 .version_info
                 .latest_dll()
@@ -3135,13 +3285,20 @@ unsafe fn apply_prefetch(hwnd: HWND, state: &mut State, outcome: PrefetchOutcome
             let resourceex_latest = prefetched
                 .version_info
                 .latest_resourceex()
-                .unwrap_or("未知")
-                .to_string();
+                .ok()
+                .map(ToString::to_string);
 
             let labels = [
-                version_label(local.bepinex_version.as_deref(), &bepinex_latest),
+                bepinex_version_label(
+                    local.bepinex_installed,
+                    local.bepinex_version.as_deref(),
+                    bepinex_latest_text,
+                ),
                 version_label(local.dll_version.as_deref(), &dll_latest),
-                version_label(local.resourceex_version.as_deref(), &resourceex_latest),
+                resourceex_latest.as_deref().map_or_else(
+                    || "暂无可用版本".to_string(),
+                    |latest| version_label(local.resourceex_version.as_deref(), latest),
+                ),
             ];
 
             for (index, label) in labels.iter().enumerate() {
@@ -3156,47 +3313,96 @@ unsafe fn apply_prefetch(hwnd: HWND, state: &mut State, outcome: PrefetchOutcome
                 .resourceex_versions
                 .clone_from(&prefetched.version_info.zips);
 
-            let installed_any = local.bepinex_version.is_some()
+            let installed_any = local.bepinex_installed
                 || local.dll_version.is_some()
                 || local.resourceex_version.is_some();
+            let upgrade = local.dll_version.is_some();
 
             let mut updates = Vec::new();
-            if local.bepinex_version.is_some()
-                && local.bepinex_version.as_deref() != Some(bepinex_latest.as_str())
+            let mut installs = Vec::new();
+            if local.bepinex_installed {
+                if let Some(latest) = bepinex_latest
+                    && local.bepinex_version.as_deref() != Some(latest)
+                {
+                    updates.push(format!("BepInEx {latest}"));
+                }
+            } else if let Some(latest) = bepinex_latest
+                && (local.dll_version.is_some() || local.resourceex_version.is_some())
             {
-                updates.push(format!("BepInEx {bepinex_latest}"));
+                installs.push(format!("BepInEx {latest}"));
             }
             if local.dll_version.is_some()
                 && local.dll_version.as_deref() != Some(dll_latest.as_str())
             {
                 updates.push(format!("MetaMystia {dll_latest}"));
             }
-            if local.resourceex_version.is_some()
-                && local.resourceex_version.as_deref() != Some(resourceex_latest.as_str())
+            if let Some(latest) = resourceex_latest.as_deref()
+                && local.resourceex_version.is_some()
+                && local.resourceex_version.as_deref() != Some(latest)
             {
-                updates.push(format!("ResourceExample {resourceex_latest}"));
+                updates.push(format!("ResourceExample {latest}"));
             }
 
-            let update_text = if !updates.is_empty() {
-                format!("可更新：{}", updates.join("、"))
-            } else if installed_any {
-                "所有组件都是最新版本".to_string()
-            } else {
-                String::new()
+            let update_text = match (updates.is_empty(), installs.is_empty()) {
+                (false, false) => format!(
+                    "可更新：{}；将安装：{}",
+                    updates.join("、"),
+                    installs.join("、")
+                ),
+                (false, true) => format!("可更新：{}", updates.join("、")),
+                (true, false) => format!("将安装：{}", installs.join("、")),
+                (true, true) if installed_any => "所有已安装组件均为最新版本".to_string(),
+                (true, true) => String::new(),
             };
             SetWindowTextW(state.update_line, wide(&update_text).as_ptr());
 
+            let bepinex_actionable = upgrade
+                && local.bepinex_installed
+                && bepinex_latest
+                    .is_some_and(|latest| local.bepinex_version.as_deref() != Some(latest));
+            SendMessageW(state.component_checks[0], BM_SETCHECK, 1, 0);
+            EnableWindow(state.component_checks[0], i32::from(bepinex_actionable));
+
+            let dll_target = state
+                .choices
+                .dll_version
+                .as_deref()
+                .or_else(|| prefetched.version_info.latest_dll().ok());
+            let dll_actionable = upgrade
+                && dll_target.is_some_and(|target| {
+                    local
+                        .dll_version
+                        .as_deref()
+                        .is_some_and(|installed| !VersionInfo::versions_match(installed, target))
+                });
             SendMessageW(state.component_checks[1], BM_SETCHECK, 1, 0);
-            EnableWindow(state.component_checks[1], 0);
+            EnableWindow(state.component_checks[1], i32::from(dll_actionable));
 
             let has_resourceex = local.resourceex_version.is_some();
+            let resourceex_target = state
+                .choices
+                .resourceex_version
+                .as_deref()
+                .or(resourceex_latest.as_deref());
+            let resourceex_actionable = has_resourceex
+                && resourceex_target.is_some_and(|target| {
+                    local
+                        .resourceex_version
+                        .as_deref()
+                        .is_some_and(|installed| !VersionInfo::versions_match(installed, target))
+                });
             SendMessageW(
                 state.component_checks[2],
                 BM_SETCHECK,
                 usize::from(has_resourceex),
                 0,
             );
-            EnableWindow(state.component_checks[2], i32::from(!has_resourceex));
+            let resourceex_enabled = if has_resourceex {
+                upgrade && resourceex_actionable
+            } else {
+                resourceex_target.is_some()
+            };
+            EnableWindow(state.component_checks[2], i32::from(resourceex_enabled));
             SendMessageW(
                 state.console_check,
                 BM_SETCHECK,
@@ -3206,6 +3412,7 @@ unsafe fn apply_prefetch(hwnd: HWND, state: &mut State, outcome: PrefetchOutcome
             update_selection_state(state);
 
             set_notes_title(state, &dll_latest);
+            state.notes_version = Some(dll_latest);
             if let Some((tag, name, body)) = &prefetched.release_notes {
                 let _ = (tag, name);
                 let rendered = render_notes(body);
@@ -3226,36 +3433,17 @@ unsafe fn apply_prefetch(hwnd: HWND, state: &mut State, outcome: PrefetchOutcome
             state.prefetched = Some(prefetched);
 
             if let Some(latest) = manager_update {
-                let current = env!("CARGO_PKG_VERSION");
-                // 版本升级是强制流程，只提示不可取消
-                let go = notice_dialog(
-                    hwnd,
-                    &window_caption(),
-                    "需要更新管理工具",
-                    &format!(
-                        "当前 v{current}，最新 v{latest}。\n为保证兼容性，将先更新管理工具，更新完成后会自动重新打开。"
-                    ),
-                    "立即更新",
-                    state.font,
-                    state.dialog_font,
-                );
-
-                if go {
-                    start_self_update(hwnd, state);
+                if state.busy {
+                    // 正在执行操作：等结束后再提示，避免并发运行两套流程
+                    state.pending_manager_update = Some(latest);
                 } else {
-                    // 不能跳过升级，但允许直接退出：先藏窗口，退出过程不留在屏幕上
-                    report_event("SelfUpdate.Declined", None);
-                    append_log(state, "已退出管理工具；请更新后再使用。");
-                    ShowWindow(hwnd, SW_HIDE);
-                    run_shutdown();
-                    process::exit(0);
+                    prompt_manager_update(hwnd, state, &latest);
                 }
             }
         }
         Err(e) => {
             state.net_phase = NET_FAILED;
             state.net_error = Some(format!("{e}"));
-            state.net_attempt += 1;
         }
     }
 
@@ -3269,8 +3457,11 @@ unsafe fn apply_local(state: &mut State, local: &LocalInfo) {
     }
 
     let mut items = Vec::new();
-    if let Some(version) = local.bepinex_version.as_deref() {
-        items.push(format!("BepInEx {version}"));
+    if local.bepinex_installed {
+        items.push(local.bepinex_version.as_deref().map_or_else(
+            || "BepInEx（版本未知）".to_string(),
+            |version| format!("BepInEx {version}"),
+        ));
     }
     if let Some(version) = local.dll_version.as_deref() {
         items.push(format!("MetaMystia {version}"));
@@ -3281,6 +3472,8 @@ unsafe fn apply_local(state: &mut State, local: &LocalInfo) {
 
     let installed = if local.game_root.is_none() {
         "未找到游戏目录，请手动选择。".to_string()
+    } else if local.detect_failed {
+        "扫描已安装组件失败，请查看详细信息。".to_string()
     } else if items.is_empty() {
         "未检测到已安装的 MetaMystia Mod".to_string()
     } else {
@@ -3293,10 +3486,14 @@ unsafe fn apply_local(state: &mut State, local: &LocalInfo) {
 
 /// 切到执行页并下载新版本；替换脚本会等本进程退出后覆盖并启动新版本
 unsafe fn start_self_update(hwnd: HWND, state: &mut State) {
+    state.op_before_self_update = state.op;
     state.op = OP_SELF_UPDATE;
     state.plan = plan_for(OP_SELF_UPDATE);
     state.failed = false;
     state.busy = true;
+    state.ui.set_cancelled(false);
+    state.ui.set_download_aborted(false);
+    state.ui.set_paused(false);
     SetWindowTextW(state.log, wide("").as_ptr());
     SetWindowTextW(
         state.install_hint,
@@ -3332,12 +3529,25 @@ unsafe fn start_self_update(hwnd: HWND, state: &mut State) {
     });
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "操作启动：收集界面选择、布置进度行并启动后台线程集中在一处"
+)]
 unsafe fn start_operation(hwnd: HWND, state: &mut State) {
     if state.op == OP_INSTALL && state.net_phase != NET_OK {
+        let _modal = ModalScope::enter(hwnd);
+
+        MessageBoxW(
+            hwnd,
+            wide("需要先联网获取版本信息，请点击“重试”后继续。").as_ptr(),
+            wide(&window_caption()).as_ptr(),
+            MB_OK | MB_ICONINFORMATION,
+        );
         return;
     }
 
     state.failed = false;
+    state.no_update = false;
     state.busy = true;
     state.phase = 0;
     SetWindowTextW(state.cancel, wide("取消").as_ptr());
@@ -3359,6 +3569,7 @@ unsafe fn start_operation(hwnd: HWND, state: &mut State) {
         _ => OperationMode::Install,
     });
     choices.install_resourceex = install && checked(2);
+    choices.upgrade_bepinex = !install || checked(0);
     choices.upgrade_dll = !install || checked(1);
     choices.show_bepinex_console = SendMessageW(state.console_check, BM_GETCHECK, 0, 0) == 1;
     choices.uninstall_full = state.uninstall_full;
@@ -3375,8 +3586,12 @@ unsafe fn start_operation(hwnd: HWND, state: &mut State) {
     }
 
     state.choices = choices.clone();
-    state.ui.set_choices(choices.clone());
     state.ui.set_cancelled(false);
+    state.ui.set_download_aborted(false);
+
+    let only_settings = only_console_change(state);
+    let planned_downloads = expected_downloads(state);
+    let needs_download = !planned_downloads.is_empty();
 
     SetWindowTextW(
         state.install_hint,
@@ -3389,17 +3604,20 @@ unsafe fn start_operation(hwnd: HWND, state: &mut State) {
                     "正在轻量卸载…"
                 }
             }
+            _ if only_settings => "正在应用 BepInEx 日志设置…",
+            _ if planned_downloads.is_empty() => "正在检查更新…",
             _ => "正在准备…",
         })
         .as_ptr(),
     );
-    EnableWindow(state.cancel, 1);
-    set_close_enabled(hwnd, true);
+    // 只有安装/升级的下载阶段可以取消，卸载与诊断导出中途不可中断
+    let cancellable = state.op == OP_INSTALL;
+    EnableWindow(state.cancel, i32::from(cancellable));
+    set_close_enabled(hwnd, cancellable);
 
     show_page(state, state.plan.len() - 2);
-
     reset_job_rows(state);
-    for (slot, label) in expected_downloads(state) {
+    for (slot, label) in planned_downloads {
         plan_job_row(state, slot, label);
     }
 
@@ -3407,8 +3625,12 @@ unsafe fn start_operation(hwnd: HWND, state: &mut State) {
         dll_version: choices.dll_version.take(),
         game_root: state.choices.game_root.clone(),
         install_resourceex: choices.install_resourceex,
+        needs_download,
         operation: choices.operation.unwrap_or(OperationMode::Install),
         resourceex_version: choices.resourceex_version.take(),
+        show_bepinex_console: choices.show_bepinex_console,
+        uninstall_full: choices.uninstall_full,
+        upgrade_bepinex: choices.upgrade_bepinex,
         upgrade_dll: choices.upgrade_dll,
     };
 
@@ -3446,6 +3668,8 @@ unsafe fn on_command(hwnd: HWND, state: &mut State, id: usize) {
             }
         }
         ID_BROWSE => {
+            let _modal = ModalScope::enter(hwnd);
+
             if let Some(path) = pick_folder(hwnd, &state.choices.game_root) {
                 let local = gui_ui::detect_local_at(&state.ui, path);
                 apply_local(state, &local);
@@ -3489,6 +3713,31 @@ unsafe fn on_command(hwnd: HWND, state: &mut State, id: usize) {
                 return;
             }
 
+            if state.op != OP_INSTALL {
+                return;
+            }
+
+            if state.stage == Some(Stage::Login) {
+                let cancel_login = confirm_dialog(
+                    hwnd,
+                    &window_caption(),
+                    "取消登录？",
+                    "登录尚未完成，取消后会回到上一步。",
+                    "取消登录",
+                    "继续登录",
+                    state.font,
+                    state.dialog_font,
+                );
+
+                if cancel_login {
+                    state.ui.set_cancelled(true);
+                    SetWindowTextW(state.install_hint, wide("正在取消登录…").as_ptr());
+                    EnableWindow(state.cancel, 0);
+                }
+
+                return;
+            }
+
             state.ui.set_paused(true);
             let stop = confirm_dialog(
                 hwnd,
@@ -3509,7 +3758,9 @@ unsafe fn on_command(hwnd: HWND, state: &mut State, id: usize) {
                 EnableWindow(state.cancel, 0);
             }
         }
-        ID_CHECK_BEPINEX | ID_CHECK_DLL | ID_CHECK_RES => update_selection_state(state),
+        ID_CHECK_BEPINEX | ID_CHECK_DLL | ID_CHECK_RES | ID_CHECK_CONSOLE => {
+            update_selection_state(state);
+        }
         ID_CHECK_DETAILS => {
             state.log_visible = !state.log_visible;
             ShowWindow(state.log, if state.log_visible { SW_SHOW } else { SW_HIDE });
@@ -3549,24 +3800,7 @@ unsafe fn on_command(hwnd: HWND, state: &mut State, id: usize) {
                 KIND_FINISH => {
                     DestroyWindow(hwnd);
                 }
-                KIND_UNINSTALL => {
-                    if state.uninstall_full
-                        && !confirm_dialog(
-                            hwnd,
-                            &window_caption(),
-                            "完全卸载？",
-                            "会删除 BepInEx、其他 Mod 与配置文件，且无法恢复。",
-                            "完全卸载",
-                            "取消",
-                            state.font,
-                            state.dialog_font,
-                        )
-                    {
-                        return;
-                    }
-                    start_operation(hwnd, state);
-                }
-                KIND_NOTES => start_operation(hwnd, state),
+                KIND_UNINSTALL | KIND_NOTES => start_operation(hwnd, state),
                 _ => {
                     let next_step = state.step + 1;
 
@@ -3599,20 +3833,16 @@ unsafe fn on_command(hwnd: HWND, state: &mut State, id: usize) {
                 return;
             }
 
-            state.net_forced = false;
             state.op = match id {
                 ID_OP_UNINSTALL => OP_UNINSTALL,
                 ID_OP_DIAGNOSTICS => OP_DIAGNOSTICS,
                 _ => OP_INSTALL,
             };
             state.plan = plan_for(state.op);
-            for (index, radio) in state.option_radios.iter().enumerate() {
-                SendMessageW(*radio, BM_SETCHECK, usize::from(index == state.op), 0);
-            }
-            update_step_text(state);
+            update_net_ui(state);
         }
         ID_RECHECK_GAME => {
-            if !check_game_running().unwrap_or(false) {
+            if !check_game_running_now().unwrap_or(false) {
                 ShowWindow(state.game_hint, SW_HIDE);
                 ShowWindow(state.game_recheck, SW_HIDE);
                 let has_path = !state.choices.game_root.as_os_str().is_empty();
@@ -3670,18 +3900,13 @@ unsafe fn on_command(hwnd: HWND, state: &mut State, id: usize) {
                 report_event(&choice_event, Some("yes"));
                 report_event("UI.SelectHistoricalVersion.Selected", Some(&selected));
 
-                let text = format!("已选择：{selected}");
-                SetWindowTextW(
-                    state.component_version_controls[index],
-                    wide(&text).as_ptr(),
-                );
-
                 if index == 1 {
                     state.choices.dll_version = Some(selected.clone());
+                    state.notes_version = Some(selected.clone());
                     set_notes_title(state, &selected);
                     SetWindowTextW(state.notes_edit, wide("正在获取该版本的发行说明…").as_ptr());
                     let ui = Arc::clone(&state.ui);
-                    let version = selected;
+                    let version = selected.clone();
                     thread::spawn(move || {
                         let task_ui = Arc::clone(&ui);
                         let task_version = version.clone();
@@ -3697,11 +3922,27 @@ unsafe fn on_command(hwnd: HWND, state: &mut State, id: usize) {
                         }
                     });
                 } else {
-                    state.choices.resourceex_version = Some(selected);
+                    state.choices.resourceex_version = Some(selected.clone());
                 }
 
-                // 手动挑过版本就默认要装它，省掉回头勾选这一步
-                SendMessageW(state.component_checks[index], BM_SETCHECK, 1, 0);
+                let installed = if index == 1 {
+                    state.local.dll_version.as_deref()
+                } else {
+                    state.local.resourceex_version.as_deref()
+                };
+                let text = match installed {
+                    Some(current) if VersionInfo::versions_match(current, &selected) => {
+                        format!("已安装 {current}（与所选版本一致）")
+                    }
+                    Some(current) => format!("已安装 {current} → 所选 {selected}"),
+                    None => format!("将安装 {selected}"),
+                };
+                SetWindowTextW(
+                    state.component_version_controls[index],
+                    wide(&text).as_ptr(),
+                );
+
+                refresh_version_checkbox(state, index, &selected);
                 update_selection_state(state);
             } else {
                 report_event(&choice_event, Some("no"));
@@ -3734,6 +3975,10 @@ unsafe extern "system" fn window_proc(
                     if state.phase == 1 && !state.failed {
                         return 0;
                     }
+                    // 卸载/诊断导出进行中不可关闭
+                    if !state.failed && state.op != OP_INSTALL {
+                        return 0;
+                    }
                     // 下载阶段关窗等同于“取消”，走同一套确认流程
                     if !state.failed {
                         SendMessageW(hwnd, WM_COMMAND, ID_CANCEL, 0);
@@ -3747,7 +3992,11 @@ unsafe extern "system" fn window_proc(
         WM_COMMAND => {
             let state = window_state(hwnd);
             if !state.is_null() {
-                on_command(hwnd, &mut *state, wparam & 0xFFFF);
+                let id = wparam & 0xFFFF;
+                let code = (wparam >> 16) & 0xFFFF;
+                if code == 0 {
+                    on_command(hwnd, &mut *state, id);
+                }
             }
             0
         }
@@ -3777,6 +4026,7 @@ unsafe extern "system" fn window_proc(
         WM_DESTROY => {
             let state = window_state(hwnd);
             if !state.is_null() {
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
                 let state = Box::from_raw(state);
                 if !state.font.is_null() {
                     DeleteObject(state.font);
@@ -3802,7 +4052,9 @@ unsafe extern "system" fn window_proc(
             DefWindowProcW(hwnd, message, wparam, lparam)
         }
         WM_UI_EVENT => {
-            drain_events(hwnd);
+            if MODAL_DEPTH.load(Ordering::Relaxed) == 0 {
+                drain_events(hwnd);
+            }
             0
         }
         _ => DefWindowProcW(hwnd, message, wparam, lparam),

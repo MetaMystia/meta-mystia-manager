@@ -1,13 +1,13 @@
-use crate::config::RetryConfig;
+use crate::config::{RetryConfig, TEMP_DIR_NAME, UninstallMode};
 use crate::error::{ManagerError, Result};
 use crate::file_ops::{
-    DeletionResult, DeletionStatus, count_results, execute_deletion, extract_failed_files,
-    scan_existing_files,
+    DeletionResult, DeletionStatus, collect_tmp_residue, count_results, execute_deletion,
+    extract_failed_files, scan_existing_files,
 };
 use crate::metrics::report_event;
 use crate::platform::{elevate_and_restart, is_elevated};
 use crate::shutdown::run_shutdown;
-use crate::ui::Ui;
+use crate::ui::{Ui, UiEvent};
 
 use std::{
     collections::HashSet,
@@ -16,7 +16,6 @@ use std::{
     thread::sleep,
 };
 
-/// 该路径是否仍因文件被占用而删除失败
 fn failed_in_use(results: &[DeletionResult], path: &Path) -> bool {
     results
         .iter()
@@ -29,48 +28,78 @@ fn failed_in_use(results: &[DeletionResult], path: &Path) -> bool {
 
 pub struct Uninstaller<'a> {
     game_root: PathBuf,
+    mode: UninstallMode,
     ui: &'a dyn Ui,
 }
 
 impl<'a> Uninstaller<'a> {
     pub const fn new(game_root: PathBuf, ui: &'a dyn Ui) -> Self {
-        Self { game_root, ui }
+        Self {
+            game_root,
+            mode: UninstallMode::Light,
+            ui,
+        }
     }
 
+    #[must_use]
+    pub const fn with_mode(mut self, mode: UninstallMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "卸载流程按步骤线性推进，拆分会让上下文参数来回传递"
+    )]
     pub fn uninstall(&self) -> Result<()> {
         report_event("Uninstall.Start", None);
 
-        // 1. 选择卸载模式
-        let mode = self.ui.uninstall_select_mode()?;
+        let mode = self.mode;
         let mode_desc = mode.description();
         report_event("Uninstall.ModeSelected", Some(mode_desc));
 
-        // 2. 扫描实际存在的文件（相对于游戏目录）
-        let existing_files = scan_existing_files(&self.game_root, mode);
+        let mut existing_files = scan_existing_files(&self.game_root, mode);
+
+        let temp_dir = self.game_root.join(TEMP_DIR_NAME);
+        if temp_dir.exists() && !existing_files.contains(&temp_dir) {
+            existing_files.push(temp_dir);
+        }
+
+        // 完全卸载会整目录删除，只有根目录残留需要单独列出
+        for path in collect_tmp_residue(&self.game_root) {
+            if matches!(mode, UninstallMode::Full)
+                && path.parent() != Some(self.game_root.as_path())
+            {
+                continue;
+            }
+            if !existing_files.contains(&path) {
+                existing_files.push(path);
+            }
+        }
 
         if existing_files.is_empty() {
-            self.ui.uninstall_no_files_found()?;
+            self.ui.emit(UiEvent::UninstallNoFilesFound)?;
             report_event("Uninstall.NoFiles", None);
             return Ok(());
         }
 
-        // 3. 显示将要删除的文件列表
-        self.ui.uninstall_display_target_files(&existing_files)?;
+        self.ui
+            .emit(UiEvent::UninstallTargetFiles(&existing_files))?;
 
-        // 4. 确认删除
-        if !self.ui.uninstall_confirm_deletion()? {
+        if !self
+            .ui
+            .emit(UiEvent::UninstallConfirmDeletion(mode))?
+            .bool()?
+        {
             report_event("Uninstall.Cancelled", Some(mode_desc));
             return Err(ManagerError::UserCancelled);
         }
         report_event("Uninstall.Confirmed", Some(mode_desc));
 
-        // 5. 检查当前权限状态
         let is_elevated = is_elevated();
 
-        // 6. 执行删除操作
         let mut all_results = execute_deletion(&existing_files, self.ui);
 
-        // 7. 处理失败项
         loop {
             let failed_files = extract_failed_files(&all_results);
             if failed_files.is_empty() {
@@ -107,18 +136,21 @@ impl<'a> Uninstaller<'a> {
                 _ => false,
             });
 
-            if has_permission_issue && !is_elevated && self.ui.uninstall_ask_elevate_permission()? {
+            if has_permission_issue
+                && !is_elevated
+                && self.ui.emit(UiEvent::UninstallAskElevate)?.bool()?
+            {
                 elevate_and_restart()?;
-                self.ui.uninstall_restarting_elevated()?;
+                self.ui.emit(UiEvent::UninstallRestartingElevated)?;
                 run_shutdown();
                 process::exit(0);
             }
 
-            if !self.ui.uninstall_ask_retry_failures()? {
+            if !self.ui.emit(UiEvent::UninstallAskRetryFailures)?.bool()? {
                 break;
             }
 
-            self.ui.uninstall_retrying_failed_items()?;
+            self.ui.emit(UiEvent::UninstallRetryingFailedItems)?;
 
             let mut seen = HashSet::new();
             let mut retry_list = Vec::new();
@@ -144,9 +176,9 @@ impl<'a> Uninstaller<'a> {
             }
         }
 
-        // 8. 显示操作摘要
         let (success, failed, skipped) = count_results(&all_results);
-        self.ui.deletion_display_summary(success, failed, skipped)?;
+        self.ui
+            .emit(UiEvent::DeletionSummary(success, failed, skipped))?;
         report_event(
             "Uninstall.Finished",
             Some(&format!(
@@ -173,7 +205,7 @@ impl<'a> Uninstaller<'a> {
         files: &[PathBuf],
         all_results: &mut Vec<DeletionResult>,
     ) -> Result<bool> {
-        self.ui.uninstall_files_in_use_warning()?;
+        self.ui.emit(UiEvent::UninstallFilesInUse)?;
 
         let cfg = RetryConfig::uninstall();
         let mut still_in_use = files.to_vec();
@@ -184,8 +216,11 @@ impl<'a> Uninstaller<'a> {
             }
 
             let delay = cfg.delay(attempt);
-            self.ui
-                .uninstall_wait_before_retry(delay.as_secs(), attempt + 1, cfg.attempts)?;
+            self.ui.emit(UiEvent::UninstallWaitBeforeRetry(
+                delay.as_secs(),
+                attempt + 1,
+                cfg.attempts,
+            ))?;
             sleep(delay);
 
             let retry_results = execute_deletion(&still_in_use, self.ui);

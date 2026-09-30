@@ -4,11 +4,22 @@ use super::{
     Downloader, JsonRequestError, ManagerError, Result, RetryConfig, VersionInfo,
     get_json_with_retry_stopping_on_status, report_event,
 };
+use crate::ui::UiEvent;
 
-#[cfg(not(windows))]
-use crate::platform;
+use std::{
+    collections::HashMap,
+    result::Result as StdResult,
+    sync::{Mutex, OnceLock},
+};
 
-use std::result::Result as StdResult;
+type ReleaseCacheKey = (String, String);
+
+static RELEASE_CACHE: OnceLock<Mutex<HashMap<ReleaseCacheKey, serde_json::Value>>> =
+    OnceLock::new();
+
+fn release_cache() -> &'static Mutex<HashMap<ReleaseCacheKey, serde_json::Value>> {
+    RELEASE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 impl Downloader<'_> {
     fn github_release_fallback_tag(version: &str) -> Option<String> {
@@ -63,8 +74,10 @@ impl Downloader<'_> {
         &self,
         api_url: &str,
     ) -> StdResult<serde_json::Value, JsonRequestError> {
+        let agent = self.metadata_agent(api_url);
+
         get_json_with_retry_stopping_on_status(
-            &self.agent,
+            &agent,
             self.ui,
             api_url,
             Some("application/vnd.github+json"),
@@ -75,16 +88,31 @@ impl Downloader<'_> {
     }
 
     fn fetch_github_release_json(&self, version: Option<&str>) -> Result<serde_json::Value> {
-        let cache_key = version.unwrap_or("latest").to_string();
+        let config = self.remote_config()?;
+        let Some(sources) = config.sources.as_ref() else {
+            report_event("Download.GitHub.Disabled", None);
+            return Err(ManagerError::NetworkError(
+                "服务端未配置 GitHub 发布信息地址".to_string(),
+            ));
+        };
+        let api_base = sources.github_release_api.trim();
+        if api_base.is_empty() {
+            report_event("Download.GitHub.Disabled", None);
+            return Err(ManagerError::NetworkError(
+                "服务端未配置 GitHub 发布信息地址".to_string(),
+            ));
+        }
 
-        if let Ok(guard) = self.cached_github_releases.lock()
+        let cache_key = (
+            api_base.to_ascii_lowercase(),
+            version.unwrap_or("latest").to_string(),
+        );
+        if let Ok(guard) = release_cache().lock()
             && let Some(json) = guard.get(&cache_key)
         {
             return Ok(json.clone());
         }
 
-        let config = self.remote_config()?;
-        let api_base = &config.sources.github_release_api;
         let api_url = Self::github_release_api_url(api_base, version);
 
         let json = match self.fetch_github_release_json_from_url(&api_url) {
@@ -96,7 +124,7 @@ impl Downloader<'_> {
                     let fallback_url = Self::github_release_api_url(api_base, Some(&fallback_tag));
                     match self.fetch_github_release_json_from_url(&fallback_url) {
                         Ok(fallback_json) => {
-                            if let Ok(mut guard) = self.cached_github_releases.lock() {
+                            if let Ok(mut guard) = release_cache().lock() {
                                 guard.insert(cache_key, fallback_json.clone());
                             }
                             return Ok(fallback_json);
@@ -126,7 +154,7 @@ impl Downloader<'_> {
             }
         };
 
-        if let Ok(mut guard) = self.cached_github_releases.lock() {
+        if let Ok(mut guard) = release_cache().lock() {
             guard.insert(cache_key, json.clone());
         }
 
@@ -156,7 +184,7 @@ impl Downloader<'_> {
     }
 
     pub(super) fn get_dll_download_url_from_github(&self, version: &str) -> Result<String> {
-        self.ui.download_attempt_github_dll()?;
+        self.ui.emit(UiEvent::DownloadAttemptGithubDll)?;
 
         let json = self.fetch_github_release_json(Some(version))?;
         let tag = json["tag_name"].as_str().unwrap_or("");
@@ -195,7 +223,7 @@ impl Downloader<'_> {
                     .iter()
                     .any(|candidate| candidate.eq_ignore_ascii_case(name))
                 {
-                    self.ui.download_found_github_asset(name)?;
+                    self.ui.emit(UiEvent::DownloadFoundGithubAsset(name))?;
                     report_event(
                         "Download.GitHub.Dll.Found",
                         Some(&format!("requested={version};tag={tag};file={name}")),
@@ -205,7 +233,7 @@ impl Downloader<'_> {
             }
         }
 
-        self.ui.download_github_dll_not_found()?;
+        self.ui.emit(UiEvent::DownloadGithubDllNotFound)?;
         report_event("Download.GitHub.Dll.NotFound", None);
 
         Err(ManagerError::NetworkError(
@@ -233,24 +261,14 @@ impl Downloader<'_> {
         }
     }
 
-    /// 获取并显示 GitHub Release Notes
-    ///
-    /// # 参数
-    /// - `version`: 版本号（不含 'v' 前缀），例如 "1.0.0"。如果为 None，则获取最新版本的 notes
     pub fn fetch_and_display_github_release_notes(
         &self,
         version: Option<&str>,
     ) -> Result<Option<(String, String, String)>> {
-        // 开发模拟模式的离线运行：跳过发行说明拉取
-        #[cfg(not(windows))]
-        if platform::dev::sim_download() {
-            return Ok(None);
-        }
-
         match self.get_github_release_notes(version) {
             Ok(Some((tag, name, body))) => {
                 self.ui
-                    .download_display_github_release_notes(&tag, &name, &body)?;
+                    .emit(UiEvent::DownloadReleaseNotes(&tag, &name, &body))?;
                 Ok(Some((tag, name, body)))
             }
             Ok(None) => Ok(None),

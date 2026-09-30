@@ -1,5 +1,7 @@
 // release 构建不带控制台窗口；debug 保留控制台便于看 panic
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+// 非 Windows 入口只保留编译检查，界面与流程代码不会被执行
+#![cfg_attr(not(windows), allow(dead_code))]
 
 mod config;
 mod diagnostics;
@@ -41,7 +43,6 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// 界面只在 Windows 上提供，其它平台保留最小实现以便编译与测试
 #[cfg(not(windows))]
 fn main() -> ExitCode {
     eprintln!("MetaMystia Mod 管理工具目前只支持 Windows。");

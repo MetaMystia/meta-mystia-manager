@@ -28,13 +28,15 @@ pub enum CallbackOutcome {
 
 #[derive(Debug, PartialEq, Eq)]
 enum CallbackRequest {
-    /// 授权成功
-    Authorized { state: String, ticket: String },
-    /// 用户取消授权
-    Cancelled,
+    Authorized {
+        state: String,
+        ticket: String,
+    },
+    Cancelled {
+        state: Option<String>,
+    },
     /// 不是回调路径（例如浏览器自动请求 favicon），忽略
     Ignored,
-    /// 是回调路径但缺少必要参数
     Malformed,
 }
 
@@ -44,7 +46,6 @@ pub struct CallbackServer {
 }
 
 impl CallbackServer {
-    /// 绑定本地回环的临时端口
     pub fn bind() -> Result<Self> {
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .map_err(|e| ManagerError::SsoLoginFailed(format!("无法监听本地回调端口：{e}")))?;
@@ -59,20 +60,24 @@ impl CallbackServer {
         Ok(Self { listener, port })
     }
 
-    /// 本次登录使用的回环回调地址
     pub fn redirect_uri(&self) -> String {
         format!("http://127.0.0.1:{}{CALLBACK_PATH}", self.port)
     }
 
-    /// 等待回调，直到拿到有效回调或超时
+    /// 等待回调，直到拿到有效回调、调用方取消或超时
     pub fn wait_for_callback(
         &self,
         expected_state: &str,
         timeout: Duration,
+        cancelled: &dyn Fn() -> bool,
     ) -> Result<CallbackOutcome> {
         let deadline = Instant::now() + timeout;
 
         loop {
+            if cancelled() {
+                return Ok(CallbackOutcome::Cancelled);
+            }
+
             if Instant::now() >= deadline {
                 return Ok(CallbackOutcome::TimedOut);
             }
@@ -128,7 +133,12 @@ fn handle_connection(mut stream: TcpStream, expected_state: &str) -> Option<Call
             );
             Some(CallbackOutcome::Authorized { ticket })
         }
-        CallbackRequest::Cancelled => {
+        CallbackRequest::Cancelled { state } => {
+            if state.as_deref() != Some(expected_state) {
+                write_response(&mut stream, "400 Bad Request", "回调校验失败", "", false);
+                return None;
+            }
+
             write_response(
                 &mut stream,
                 "200 OK",
@@ -149,7 +159,6 @@ fn handle_connection(mut stream: TcpStream, expected_state: &str) -> Option<Call
     }
 }
 
-/// 读取并解析请求行中的请求目标
 fn read_request_target(stream: &mut TcpStream) -> Option<String> {
     let mut buffer = Vec::with_capacity(1024);
     let mut chunk = [0u8; 512];
@@ -205,7 +214,7 @@ fn parse_request_target(target: &str) -> CallbackRequest {
     }
 
     if error.is_some() {
-        return CallbackRequest::Cancelled;
+        return CallbackRequest::Cancelled { state };
     }
 
     match (ticket, state) {

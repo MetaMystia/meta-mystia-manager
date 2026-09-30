@@ -1,10 +1,11 @@
 use crate::config::GAME_EXECUTABLE;
 use crate::error::{ManagerError, Result};
 use crate::metrics::report_event;
-#[cfg(not(windows))]
-use crate::platform::dev::{dev_mode, ensure_sandbox_root};
 use crate::platform::is_game_running;
 use crate::ui::Ui;
+
+#[cfg(windows)]
+use crate::ui::UiEvent;
 
 use std::{
     env,
@@ -18,16 +19,10 @@ use crate::config::GAME_STEAM_APP_ID;
 #[cfg(windows)]
 use steamlocate::SteamDir;
 
-/// 定位游戏根目录：开发模拟模式用沙箱目录，Windows 上先查 Steam 安装位置，再回落到当前目录
+/// 定位游戏根目录：Windows 上先查 Steam 安装位置，再回落到当前目录
 pub fn check_game_directory(ui: &dyn Ui) -> Result<PathBuf> {
-    // 开发模拟模式使用沙箱目录，不探测本机 Steam
     #[cfg(not(windows))]
-    if dev_mode() {
-        let root = ensure_sandbox_root()?;
-        ui.message(&format!("[dev] 使用沙箱游戏目录：{}", root.display()))?;
-        report_event("Env.DevSandbox", Some(&root.display().to_string()));
-        return Ok(root);
-    }
+    let _ = ui;
 
     #[cfg(windows)]
     if let Ok(steam_dir) = SteamDir::locate()
@@ -40,7 +35,11 @@ pub fn check_game_directory(ui: &dyn Ui) -> Result<PathBuf> {
             .join("common")
             .join(&install_dir);
         if candidate.join(GAME_EXECUTABLE).is_file() {
-            ui.path_display_steam_found(app.app_id, app.name.as_deref(), &candidate)?;
+            ui.emit(UiEvent::SteamFound {
+                app_id: app.app_id,
+                name: app.name.as_deref(),
+                path: &candidate,
+            })?;
             report_event("Env.SteamFound", Some(&candidate.display().to_string()));
 
             return Ok(candidate);
@@ -77,6 +76,14 @@ pub fn check_game_running() -> Result<bool> {
     }
 
     let result = is_game_running()?;
+    *cache.lock().unwrap_or_else(PoisonError::into_inner) = Some((result, Instant::now()));
+
+    Ok(result)
+}
+
+pub fn check_game_running_now() -> Result<bool> {
+    let result = is_game_running()?;
+    let cache = GAME_RUNNING_CACHE.get_or_init(|| Mutex::new(None));
     *cache.lock().unwrap_or_else(PoisonError::into_inner) = Some((result, Instant::now()));
 
     Ok(result)

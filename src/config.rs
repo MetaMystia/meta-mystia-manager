@@ -6,18 +6,20 @@ pub const GAME_PROCESS_NAME: &str = "Touhou Mystia Izakaya.exe";
 #[cfg(windows)]
 pub const GAME_STEAM_APP_ID: u32 = 1_584_090;
 pub const TEMP_DIR_NAME: &str = concat!(".", env!("CARGO_PKG_NAME"), "-temp");
+/// 进度槽位与下载并发上限
+pub const MAX_PARALLEL_DOWNLOADS: usize = 3;
 pub const BEPINEX_CORE_DLL: &str = "BepInEx/core/BepInEx.Core.dll";
 pub const METAMYSTIA_PLUGIN_GLOB: &str = "BepInEx/plugins/MetaMystia-v*.dll";
 pub const RESOURCEEX_ZIP_GLOB: &str = "ResourceEx/ResourceExample-v*.zip";
 pub const METAMYSTIA_PLUGIN_OLD_GLOB: &str = "BepInEx/plugins/MetaMystia-v*.dll.old*";
 pub const RESOURCEEX_ZIP_OLD_GLOB: &str = "ResourceEx/ResourceExample-v*.zip.old*";
+pub const METAMYSTIA_PLUGIN_PART_GLOB: &str = "BepInEx/plugins/MetaMystia-v*.dll.part";
+pub const RESOURCEEX_ZIP_PART_GLOB: &str = "ResourceEx/ResourceExample-v*.zip.part";
 pub const USER_AGENT: &str = concat!(
     env!("CARGO_PKG_NAME"),
     "/",
     env!("CARGO_PKG_VERSION"),
-    " (+https://github.com/AnYiEE/",
-    env!("CARGO_PKG_NAME"),
-    ")"
+    " (+https://github.com/MetaMystia/meta-mystia-manager)"
 );
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -37,7 +39,11 @@ pub enum UninstallMode {
 impl UninstallMode {
     const LIGHT_TARGETS: &'static [(&'static str, bool)] = &[
         (METAMYSTIA_PLUGIN_GLOB, false),
+        (METAMYSTIA_PLUGIN_OLD_GLOB, false),
+        (METAMYSTIA_PLUGIN_PART_GLOB, false),
         (RESOURCEEX_ZIP_GLOB, false),
+        (RESOURCEEX_ZIP_OLD_GLOB, false),
+        (RESOURCEEX_ZIP_PART_GLOB, false),
     ];
 
     const FULL_TARGETS: &'static [(&'static str, bool)] = &[
@@ -45,12 +51,12 @@ impl UninstallMode {
         (".doorstop_version", false),
         ("changelog.txt", false),
         ("doorstop_config.ini", false),
+        ("dotnet", true),
         ("MinHook.x64.dll", false),
         ("winhttp.dll", false),
         ("ResourceEx", true),
     ];
 
-    /// 获取卸载模式描述
     pub const fn description(&self) -> &str {
         match self {
             Self::Full => "移除所有和 Mod 有关的文件（还原为原版游戏）",
@@ -79,7 +85,6 @@ pub struct RetryConfig {
 }
 
 impl RetryConfig {
-    /// 网络操作的默认重试配置
     pub const fn network() -> Self {
         Self {
             attempts: 3,
@@ -89,7 +94,6 @@ impl RetryConfig {
         }
     }
 
-    /// GitHub Release Notes 的重试配置
     pub const fn github_release_note() -> Self {
         Self {
             attempts: 2,
@@ -99,7 +103,6 @@ impl RetryConfig {
         }
     }
 
-    /// 卸载操作的默认重试配置
     pub const fn uninstall() -> Self {
         Self {
             attempts: 3,

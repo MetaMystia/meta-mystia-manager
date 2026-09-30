@@ -1,4 +1,4 @@
-use crate::net::build_agent;
+use crate::net::{build_agent_with_timeouts, host_key};
 use crate::shutdown::SHUTDOWN_TIMEOUT;
 
 use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
@@ -15,10 +15,10 @@ use std::{
 
 #[cfg(all(unix, not(target_os = "macos")))]
 use std::fs;
+#[cfg(target_os = "macos")]
+use std::process::Command;
 #[cfg(windows)]
 use std::ptr::null_mut;
-#[cfg(not(windows))]
-use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(windows)]
 use windows_sys::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW};
 
@@ -29,26 +29,6 @@ const RECENT_EVENT_LIMIT: usize = 200;
 
 static STARTED_AT: OnceLock<Instant> = OnceLock::new();
 static RECENT_EVENTS: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
-
-/// 埋点上报开关（仅开发模拟模式需要）
-#[cfg(not(windows))]
-static ENABLED: AtomicBool = AtomicBool::new(true);
-
-/// 关闭埋点上报
-#[cfg(not(windows))]
-pub fn disable() {
-    ENABLED.store(false, Ordering::Relaxed);
-}
-
-#[cfg(windows)]
-const fn enabled() -> bool {
-    true
-}
-
-#[cfg(not(windows))]
-fn enabled() -> bool {
-    ENABLED.load(Ordering::Relaxed)
-}
 
 fn build_tracking_url(
     visitor_id: &str,
@@ -181,14 +161,24 @@ fn get_account_user_id() -> Option<String> {
     slot.clone()
 }
 
-static CACHED_AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+static CACHED_AGENTS: OnceLock<Mutex<HashMap<String, ureq::Agent>>> = OnceLock::new();
 
 fn send_with_client(url: &str) {
     // 埋点尽力而为，失败不影响主流程
-    let _ = CACHED_AGENT
-        .get_or_init(|| build_agent(None, Some(DEFAULT_TIMEOUT)))
-        .get(url)
-        .call();
+    let agents = CACHED_AGENTS.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = host_key(url);
+    let agent = {
+        let mut guard = agents.lock().unwrap_or_else(PoisonError::into_inner);
+
+        guard
+            .entry(key)
+            .or_insert_with(|| {
+                build_agent_with_timeouts(url, None, Some(DEFAULT_TIMEOUT), Some(DEFAULT_TIMEOUT))
+            })
+            .clone()
+    };
+
+    let _ = agent.get(url).call();
 }
 
 struct TrackingWorker {
@@ -262,14 +252,16 @@ pub fn shutdown(timeout: Option<Duration>) {
 
     if let Some(worker) = guard.take() {
         drop(guard);
-        let _ = join_handle_with_timeout(worker.handle, to);
+        let TrackingWorker { handle, sender } = worker;
+        drop(sender);
+        let _ = join_handle_with_timeout(handle, to);
     }
 }
 
 pub fn report_event(action: &str, name: Option<&str>) {
     record_recent_event(action, name);
 
-    if cfg!(debug_assertions) || !enabled() {
+    if cfg!(debug_assertions) {
         return;
     }
 

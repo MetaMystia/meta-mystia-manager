@@ -10,10 +10,10 @@ mod pkce;
 
 use crate::error::Result;
 use crate::metrics;
-use crate::net::build_agent;
+use crate::net::build_agent_with_timeouts;
 use crate::platform;
 use crate::remote_config;
-use crate::ui::Ui;
+use crate::ui::{Ui, UiEvent};
 use crate::window;
 
 use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
@@ -46,7 +46,6 @@ impl AccountSession {
 }
 
 static SESSION: OnceLock<Mutex<Option<AccountSession>>> = OnceLock::new();
-static CACHED_AGENT: OnceLock<ureq::Agent> = OnceLock::new();
 
 /// 确保当前进程已登录
 ///
@@ -58,25 +57,7 @@ pub fn ensure_logged_in(ui: &dyn Ui, config_url: &str) -> Result<bool> {
         return Ok(true);
     }
 
-    // 开发模拟模式直接注入假账号，跳过浏览器登录
-    #[cfg(not(windows))]
-    if platform::dev::sim_login() {
-        ui.message("[dev] 已跳过账号登录（MMM_DEV_SIM_LOGIN=1）")?;
-        store_session(dev_session());
-        return Ok(true);
-    }
-
     login(ui, config_url)
-}
-
-#[cfg(not(windows))]
-fn dev_session() -> AccountSession {
-    AccountSession {
-        download_token: "dev-download-token".to_string(),
-        nickname: Some("开发模拟".to_string()),
-        user_id: "dev-user".to_string(),
-        username: "dev".to_string(),
-    }
 }
 
 pub fn current_account() -> Option<AccountSession> {
@@ -101,12 +82,14 @@ pub fn current_download_token() -> Option<String> {
 }
 
 fn login(ui: &dyn Ui, config_url: &str) -> Result<bool> {
-    ui.message("需要登录东方夜雀食堂小助手账号才能继续（登录在浏览器中完成）。")?;
+    ui.emit(UiEvent::Message(
+        "需要登录东方夜雀食堂小助手账号才能继续（登录在浏览器中完成）。",
+    ))?;
 
     let config = remote_config::get(ui, config_url)?;
 
-    if !ui.sso_ask_open_browser()? {
-        ui.message("已取消登录，未执行任何操作")?;
+    if !ui.emit(UiEvent::SsoAskOpenBrowser)?.bool()? {
+        ui.emit(UiEvent::Message("已取消登录，未执行任何操作"))?;
         return Ok(false);
     }
 
@@ -122,30 +105,37 @@ fn login(ui: &dyn Ui, config_url: &str) -> Result<bool> {
     );
 
     if platform::open_url(&authorize_url).is_err() {
-        ui.message(&format!(
+        ui.emit(UiEvent::Message(&format!(
             "如果浏览器没有自动打开，请手动访问：{authorize_url}"
-        ))?;
+        )))?;
     }
-    ui.message("请在浏览器中完成登录并确认授权……")?;
+    ui.emit(UiEvent::Message("请在浏览器中完成登录并确认授权……"))?;
 
-    let ticket = match server.wait_for_callback(&state, LOGIN_TIMEOUT)? {
+    let cancelled = || ui.download_cancelled();
+    let ticket = match server.wait_for_callback(&state, LOGIN_TIMEOUT, &cancelled)? {
         loopback::CallbackOutcome::Authorized { ticket } => {
             window::focus_manager_window();
 
             ticket
         }
         loopback::CallbackOutcome::Cancelled => {
-            ui.message("已取消登录，未执行任何操作")?;
+            ui.emit(UiEvent::Message("已取消登录，未执行任何操作"))?;
             return Ok(false);
         }
         loopback::CallbackOutcome::TimedOut => {
-            ui.message("等待登录超时，未执行任何操作")?;
+            ui.emit(UiEvent::Message("等待登录超时，未执行任何操作"))?;
             return Ok(false);
         }
     };
 
+    let agent = build_agent_with_timeouts(
+        &config.sso.session_url,
+        Some(AGENT_CONNECT_TIMEOUT),
+        Some(AGENT_GLOBAL_TIMEOUT),
+        Some(AGENT_GLOBAL_TIMEOUT),
+    );
     let session = exchange::create_session(
-        get_agent(),
+        &agent,
         &config.sso.session_url,
         SSO_CLIENT_ID,
         &ticket,
@@ -160,7 +150,10 @@ fn login(ui: &dyn Ui, config_url: &str) -> Result<bool> {
 
     store_session(session.clone());
     metrics::set_account_user_id(&session.user_id);
-    ui.message(&format!("已登录：{}", session.display_name()))?;
+    ui.emit(UiEvent::Message(&format!(
+        "已登录：{}",
+        session.display_name()
+    )))?;
 
     Ok(true)
 }
@@ -176,16 +169,12 @@ fn create_authorize_url(
 
     format!(
         "{origin}/api/v1/sso/authorize?client_id={SSO_CLIENT_ID}\
-         &redirect_uri={encoded_redirect_uri}&state={state}&code_challenge={code_challenge}"
+         &redirect_uri={encoded_redirect_uri}&state={state}&code_challenge={code_challenge}\
+         &code_challenge_method=S256"
     )
 }
 
 fn store_session(session: AccountSession) {
     let slot = SESSION.get_or_init(|| Mutex::new(None));
     *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(session);
-}
-
-fn get_agent() -> &'static ureq::Agent {
-    CACHED_AGENT
-        .get_or_init(|| build_agent(Some(AGENT_CONNECT_TIMEOUT), Some(AGENT_GLOBAL_TIMEOUT)))
 }

@@ -17,6 +17,10 @@ pub enum ManagerError {
     #[error("游戏正在运行，请关闭游戏后重试")]
     GameRunning,
 
+    /// HTTP 4xx（429 除外）：请求本身有问题，重试无意义
+    #[error("{0}")]
+    HttpError(String),
+
     #[error("版本信息无效或解析失败")]
     InvalidVersionInfo,
 
@@ -36,8 +40,8 @@ pub enum ManagerError {
     #[cfg(windows)]
     ProcessListError(String),
 
-    #[error("被限流：{0}")]
-    RateLimited(String),
+    #[error("{0}")]
+    RateLimited(String, Option<u64>),
 
     /// 服务端返回的错误，文案可直接展示给用户
     #[error("{0}")]
@@ -56,9 +60,40 @@ pub enum ManagerError {
     UserCancelled,
 }
 
-/// 把服务端返回的错误码转换成面向用户的提示；`scope` 是操作名，例如 `登录`、`下载`
+impl ManagerError {
+    /// 网络/IO 类问题可通过重试恢复；服务端语义错误、用户取消等重试无意义
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::NetworkError(_) | Self::RateLimited(..) => true,
+            Self::Io(err) => matches!(
+                err.kind(),
+                io::ErrorKind::BrokenPipe
+                    | io::ErrorKind::ConnectionAborted
+                    | io::ErrorKind::ConnectionReset
+                    | io::ErrorKind::Interrupted
+                    | io::ErrorKind::TimedOut
+                    | io::ErrorKind::UnexpectedEof
+                    | io::ErrorKind::WouldBlock
+            ),
+            _ => false,
+        }
+    }
+}
+
 pub fn service_error(scope: &str, code: &str, status: u16) -> ManagerError {
-    let reason = match code {
+    ManagerError::ServiceError(format!(
+        "{scope}失败：{}",
+        service_error_reason(code, status)
+    ))
+}
+
+pub fn service_error_reason(code: &str, status: u16) -> String {
+    let code = code.trim();
+    let http_status = code
+        .strip_prefix("http-")
+        .and_then(|value| value.parse::<u16>().ok());
+
+    match code {
         "" if status >= 500 => format!("服务端暂时不可用（HTTP {status}），请稍后再试"),
         "" => format!("服务端返回异常（HTTP {status}）"),
         "client-disabled" => "该管理工具已被停用，请联系管理员".to_string(),
@@ -77,10 +112,18 @@ pub fn service_error(scope: &str, code: &str, status: u16) -> ManagerError {
         "user-deleted" => "当前账号已被删除".to_string(),
         "user-disabled" | "disabled" => "当前账号已被禁用".to_string(),
         "user-not-found" => "当前账号不可用，请联系管理员".to_string(),
+        _ if http_status.is_some_and(|status| (500..=599).contains(&status)) => {
+            "服务端暂时不可用，请稍后再试".to_string()
+        }
+        _ if http_status.is_some_and(|status| status == 401 || status == 403) => {
+            "登录状态无效或没有访问权限，请重新登录后重试".to_string()
+        }
+        _ if http_status.is_some() => {
+            format!("服务端返回异常（HTTP {}）", http_status.unwrap_or_default())
+        }
+        _ if code.contains(char::is_whitespace) || !code.is_ascii() => code.to_string(),
         other => format!("服务端返回异常（{other}）"),
-    };
-
-    ManagerError::ServiceError(format!("{scope}失败：{reason}"))
+    }
 }
 
 impl From<ureq::Error> for ManagerError {

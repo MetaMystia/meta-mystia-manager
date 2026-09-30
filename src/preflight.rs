@@ -1,14 +1,10 @@
 //! 安装/升级前的预检：磁盘剩余空间与关键站点可达性。
-//!
-//! 磁盘空间不足会让用户在下载/解压中途失败，这里提前拦下；
-//! 站点不可达只提示不阻断（BepInEx 有上游主源与备用源两条路）。
 
 use crate::error::{ManagerError, Result};
 use crate::metrics::report_event;
-use crate::net::build_agent;
-#[cfg(not(windows))]
-use crate::platform::dev::sim_download;
-use crate::ui::Ui;
+use crate::net::build_agent_with_timeouts;
+use crate::remote_config;
+use crate::ui::{Ui, UiEvent};
 
 use std::{path::Path, thread, time::Duration};
 
@@ -21,29 +17,18 @@ use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 const MIN_FREE_BYTES: u64 = 512 * 1024 * 1024;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
-const PROBE_ENDPOINTS: &[(&str, &str)] = &[
-    ("文件服务", "https://file.izakaya.cc/"),
-    (
-        "BepInEx 主源",
-        "https://builds.bepinex.dev/projects/bepinex_be",
-    ),
-    (
-        "GitHub",
-        "https://api.github.com/repos/MetaMikuAI/MetaMystia/releases/latest",
-    ),
-];
-
-/// 组合预检；任何一项失败都不阻断，只提示
-pub fn check(ui: &dyn Ui, game_root: &Path, temp_dir: &Path) -> Result<()> {
-    // 开发模拟模式的离线运行：跳过磁盘与站点探测
-    #[cfg(not(windows))]
-    if sim_download() {
-        return Ok(());
+pub fn check(ui: &dyn Ui, game_root: &Path, temp_dir: &Path, config_url: &str) -> Result<()> {
+    check_free_space("游戏目录", game_root)?;
+    if !temp_dir.starts_with(game_root) {
+        check_free_space("临时目录", temp_dir)?;
     }
 
-    check_free_space("游戏目录", game_root)?;
-    check_free_space("临时目录", temp_dir)?;
-    check_endpoints(ui)
+    let config_url = config_url.trim();
+    if !config_url.is_empty() {
+        check_endpoints(ui, config_url)?;
+    }
+
+    Ok(())
 }
 
 fn check_free_space(label: &str, path: &Path) -> Result<()> {
@@ -68,26 +53,46 @@ fn check_free_space(label: &str, path: &Path) -> Result<()> {
     )))
 }
 
-fn check_endpoints(ui: &dyn Ui) -> Result<()> {
-    let agent = build_agent(Some(PROBE_TIMEOUT), Some(PROBE_TIMEOUT));
-
+fn check_endpoints(ui: &dyn Ui, config_url: &str) -> Result<()> {
+    let config = remote_config::get(ui, config_url)?;
+    let mut endpoints: Vec<(&str, &str)> = Vec::new();
+    if let Some(self_update) = &config.self_update {
+        endpoints.push(("文件服务", self_update.entry_url.as_str()));
+    }
+    if let Some(sources) = &config.sources {
+        endpoints.push(("BepInEx 主源", sources.bep_in_ex_primary.as_str()));
+        endpoints.push(("GitHub", sources.github_release_api.as_str()));
+    }
     let unreachable = thread::scope(|scope| {
-        PROBE_ENDPOINTS
+        endpoints
             .iter()
+            .filter(|(_, url)| !url.trim().is_empty())
             .map(|(name, url)| {
-                let agent = agent.clone();
+                let name = *name;
+                let url = (*url).to_string();
 
-                (*name, scope.spawn(move || agent.get(*url).call().is_err()))
+                (
+                    name,
+                    scope.spawn(move || {
+                        let agent = build_agent_with_timeouts(
+                            &url,
+                            Some(PROBE_TIMEOUT),
+                            Some(PROBE_TIMEOUT),
+                            Some(PROBE_TIMEOUT),
+                        );
+                        agent.get(&url).call().is_err()
+                    }),
+                )
             })
             .filter_map(|(name, handle)| handle.join().ok().filter(|failed| *failed).map(|_| name))
             .collect::<Vec<_>>()
     });
 
     if !unreachable.is_empty() {
-        ui.warn(&format!(
+        ui.emit(UiEvent::Warn(&format!(
             "以下站点当前不可达：{}。下载可能变慢或回退到备用源。",
             unreachable.join("、")
-        ))?;
+        )))?;
     }
 
     Ok(())

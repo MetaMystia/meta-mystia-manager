@@ -1,5 +1,3 @@
-//! PKCE 参数与 `state` 生成
-
 use crate::error::Result;
 use crate::sso::crypto::{base64url_encode, random_bytes, sha256};
 
@@ -10,7 +8,6 @@ pub struct PkcePair {
     pub code_verifier: String,
 }
 
-/// 生成 PKCE 参数对
 pub fn create_pkce_pair() -> Result<PkcePair> {
     let code_verifier = create_random_token(TOKEN_BYTE_LENGTH)?;
     let code_challenge = base64url_encode(&sha256(code_verifier.as_bytes())?);
@@ -21,7 +18,6 @@ pub fn create_pkce_pair() -> Result<PkcePair> {
     })
 }
 
-/// 生成一次性 `state`
 pub fn create_state() -> Result<String> {
     create_random_token(TOKEN_BYTE_LENGTH)
 }

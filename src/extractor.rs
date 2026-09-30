@@ -59,7 +59,6 @@ fn write_entry_to_file(entry: &mut impl io::Read, outpath: &Path) -> Result<()> 
 pub struct Extractor;
 
 impl Extractor {
-    /// 检查 ZIP 路径是否安全
     fn is_safe_path(path: &Path) -> bool {
         if path.is_absolute() {
             return false;
@@ -73,10 +72,9 @@ impl Extractor {
     }
 
     fn is_excluded(file_path: &Path, exclude_patterns: &[&str]) -> bool {
-        exclude_patterns.iter().any(|pattern| {
-            let pat = Path::new(pattern);
-            file_path == pat || file_path.starts_with(pat.join(""))
-        })
+        exclude_patterns
+            .iter()
+            .any(|pattern| path_starts_with_ignore_case(file_path, Path::new(pattern)))
     }
 
     /// 列出 ZIP 内会被解压到游戏目录的文件（与解压使用同一套安全校验与排除规则）
@@ -112,7 +110,6 @@ impl Extractor {
         Ok(entries)
     }
 
-    /// 解压文件到指定目录（支持排除路径）
     pub fn extract_zip_safe_with_exclusions(
         zip_path: &Path,
         dest_dir: &Path,
@@ -175,7 +172,6 @@ impl Extractor {
                 )));
             }
 
-            // 禁止符号链接
             if file.is_symlink() {
                 report_event(
                     "Extract.Entry.Failed.SymlinkNotAllowed",
@@ -215,7 +211,6 @@ impl Extractor {
         Ok(extracted_files)
     }
 
-    /// 安装 BepInEx 到游戏根目录
     pub fn deploy_bepinex(
         zip_path: &Path,
         game_root: &Path,
@@ -252,7 +247,6 @@ impl Extractor {
     }
 
     fn copy_to_destination_atomically(src: &Path, dest: &Path, temp_extension: &str) -> Result<()> {
-        // 开发模拟模式的干跑：只打印将要执行的动作
         if fs_dry_run() {
             eprintln!("[dev] 跳过文件部署（模拟）：{}", dest.display());
             return Ok(());
@@ -266,16 +260,19 @@ impl Extractor {
             ))
         })?;
 
-        atomic_rename_or_copy(&tmp_dest, dest).map_err(|e| {
-            ManagerError::from(io::Error::other(format!(
+        if let Err(e) = atomic_rename_or_copy(&tmp_dest, dest) {
+            let _ = fs::remove_file(&tmp_dest);
+
+            return Err(ManagerError::from(io::Error::other(format!(
                 "安装 {} 失败：{}",
                 dest.display(),
                 e
-            )))
-        })
+            ))));
+        }
+
+        Ok(())
     }
 
-    /// 安装 MetaMystia DLL 到 BepInEx/plugins/ 目录
     pub fn deploy_metamystia(dll_path: &Path, game_root: &Path) -> Result<()> {
         let plugins_dir = game_root.join("BepInEx/plugins");
 
@@ -314,9 +311,7 @@ impl Extractor {
         }
     }
 
-    /// 安装 ResourceExample ZIP 到 ResourceEx/ 目录
     pub fn deploy_resourceex(zip_path: &Path, game_root: &Path) -> Result<()> {
-        // 开发模拟模式的干跑：只打印将要执行的动作
         if fs_dry_run() {
             eprintln!("[dev] 跳过文件部署（模拟）：{}", zip_path.display());
             return Ok(());
@@ -354,4 +349,24 @@ impl Extractor {
             Err(e) => Err(e),
         }
     }
+}
+
+fn path_starts_with_ignore_case(path: &Path, prefix: &Path) -> bool {
+    let mut path_components = path.components();
+
+    for prefix_component in prefix.components() {
+        let Some(path_component) = path_components.next() else {
+            return false;
+        };
+
+        if !path_component
+            .as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&prefix_component.as_os_str().to_string_lossy())
+        {
+            return false;
+        }
+    }
+
+    true
 }

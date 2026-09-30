@@ -7,16 +7,19 @@ use crate::shutdown::run_shutdown;
 use crate::win32::dword_len;
 
 use std::{
-    env, fs, io,
+    env, io,
     mem::{size_of, zeroed},
     os::windows::{ffi::OsStrExt, process::CommandExt},
-    path::{Path, PathBuf},
+    path::Path,
     process::{self, Command},
     ptr::{null, null_mut},
-    slice,
+    slice, thread,
+    time::Duration,
 };
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, NTSTATUS},
+    Foundation::{
+        CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, INVALID_HANDLE_VALUE, NTSTATUS,
+    },
     Security::{
         Cryptography::{
             BCRYPT_ALG_HANDLE, BCRYPT_HASH_HANDLE, BCRYPT_SHA256_ALGORITHM,
@@ -32,7 +35,7 @@ use windows_sys::Win32::{
             CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
             TH32CS_SNAPPROCESS,
         },
-        Threading::{CREATE_NO_WINDOW, GetCurrentProcess, OpenProcessToken},
+        Threading::{CREATE_NO_WINDOW, CreateMutexW, GetCurrentProcess, OpenProcessToken},
     },
     UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
 };
@@ -42,6 +45,14 @@ const SHA256_LENGTH: usize = 32;
 
 /// `ShellExecuteW` 返回值不大于该值即视为失败（`0`、`SE_ERR_*`）
 const SHELL_EXECUTE_ERROR_MAX: isize = 32;
+
+/// 单实例互斥体名称（每个登录会话一个）
+const INSTANCE_MUTEX_NAME: &str = "Local\\meta-mystia-manager";
+/// 提权重启时传给新进程的参数
+const ELEVATED_RESTART_ARG: &str = "--elevated-restart";
+/// 提权续任进程等待旧进程释放互斥体的次数与间隔（合计约 10 秒）
+const INSTANCE_WAIT_ATTEMPTS: usize = 40;
+const INSTANCE_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 
 const CTRL_C_EVENT: u32 = 0;
 const CTRL_BREAK_EVENT: u32 = 1;
@@ -54,24 +65,50 @@ pub fn init() {
     install_shutdown_handler();
 }
 
-/// 真实平台上启用自更新
+/// 申请单实例互斥体；已有实例在运行时返回 false（调用方把已有窗口带到前台）。
+/// 提权重启的续任进程会等旧进程退出、释放互斥体后再继续。
+pub fn acquire_single_instance() -> bool {
+    let name: Vec<u16> = INSTANCE_MUTEX_NAME.encode_utf16().chain([0]).collect();
+    let attempts = if env::args().any(|arg| arg == ELEVATED_RESTART_ARG) {
+        INSTANCE_WAIT_ATTEMPTS
+    } else {
+        1
+    };
+
+    for attempt in 0..attempts {
+        let handle = unsafe { CreateMutexW(null(), 0, name.as_ptr()) };
+
+        if handle.is_null() {
+            // 创建失败时按“没有其它实例”处理，不阻断启动
+            return true;
+        }
+
+        if unsafe { GetLastError() } != ERROR_ALREADY_EXISTS {
+            // 句柄故意不关闭：作为本进程持有互斥体的凭据，随进程退出释放
+            return true;
+        }
+
+        unsafe { CloseHandle(handle) };
+
+        if attempt + 1 < attempts {
+            thread::sleep(INSTANCE_RETRY_INTERVAL);
+        }
+    }
+
+    false
+}
+
 pub const fn self_update_enabled() -> bool {
     true
 }
 
-/// 真实平台上文件操作照常执行
 pub const fn fs_dry_run() -> bool {
     false
 }
 
-/// 让子进程不弹出控制台窗口
 pub fn suppress_console_window(command: &mut Command) {
     command.creation_flags(CREATE_NO_WINDOW);
 }
-
-// ---------------------------------------------------------------------------
-// 提权
-// ---------------------------------------------------------------------------
 
 struct TokenHandle(HANDLE);
 
@@ -93,21 +130,6 @@ impl Drop for TokenHandle {
     }
 }
 
-struct TempScript(PathBuf);
-
-impl TempScript {
-    const fn new(path: PathBuf) -> Self {
-        Self(path)
-    }
-}
-
-impl Drop for TempScript {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
-    }
-}
-
-/// 检查当前进程是否具有管理员权限
 pub fn is_elevated() -> bool {
     unsafe {
         let mut token: HANDLE = null_mut();
@@ -137,61 +159,40 @@ pub fn is_elevated() -> bool {
     }
 }
 
-/// 以管理员权限重新启动程序
 pub fn elevate_and_restart() -> Result<()> {
-    let current_dir = env::current_dir()?;
     let exe_path = env::current_exe()?;
+    let directory = exe_path.parent().map(Path::to_path_buf).unwrap_or_default();
 
-    // 创建一个临时 PowerShell 脚本来执行 Start-Process -Verb RunAs
-    let escape = |s: &str| s.replace('"', "\"\"");
-    let dir_escaped = escape(&current_dir.display().to_string());
-    let exe_escaped = escape(&exe_path.display().to_string());
+    let operation: Vec<u16> = "runas\0".encode_utf16().collect();
+    let file: Vec<u16> = exe_path.as_os_str().encode_wide().chain([0]).collect();
+    let parameters: Vec<u16> = ELEVATED_RESTART_ARG.encode_utf16().chain([0]).collect();
+    let directory: Vec<u16> = directory.as_os_str().encode_wide().chain([0]).collect();
 
-    let script = format!(
-        "Start-Process -FilePath \"{exe_escaped}\" -WorkingDirectory \"{dir_escaped}\" -Verb RunAs"
-    );
+    // ShellExecuteW 会弹出 UAC；用户取消时返回 SE_ERR_ACCESSDENIED（5）
+    let result = unsafe {
+        ShellExecuteW(
+            null_mut(),
+            operation.as_ptr(),
+            file.as_ptr(),
+            parameters.as_ptr(),
+            directory.as_ptr(),
+            SW_SHOWNORMAL,
+        )
+    };
+    let code = result as isize;
 
-    let mut script_path = env::temp_dir();
-    script_path.push(format!("meta_mystia_elevate_{}.ps1", process::id()));
+    if code <= SHELL_EXECUTE_ERROR_MAX {
+        report_event("Permission.Elevate.Failed", Some(&code.to_string()));
 
-    fs::write(&script_path, script.as_bytes()).map_err(|e| {
-        ManagerError::from(io::Error::new(
-            e.kind(),
-            format!("写入提升脚本 {} 失败：{}", script_path.display(), e),
-        ))
-    })?;
-
-    let _temp_script = TempScript::new(script_path.clone());
-
-    // 尝试优先使用 pwsh（PowerShell Core），若不可用再回退到 powershell.exe
-    let shells = ["pwsh.exe", "powershell.exe"];
-
-    for shell in &shells {
-        let res = Command::new(shell)
-            .arg("-NoProfile")
-            .arg("-ExecutionPolicy")
-            .arg("Bypass")
-            .arg("-File")
-            .arg(&script_path)
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn();
-
-        if res.is_ok() {
-            report_event("Permission.Elevate.Scheduled", None);
-            return Ok(());
-        }
+        return Err(ManagerError::PermissionDenied(format!(
+            "无法以管理员身份重新启动（ShellExecuteW 返回 {code}）"
+        )));
     }
 
-    report_event("Permission.Elevate.Failed", None);
+    report_event("Permission.Elevate.Scheduled", None);
 
-    Err(ManagerError::Other(
-        "无法以管理员身份重新启动（未找到可用的 PowerShell 或启动失败）".to_string(),
-    ))
+    Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// 进程枚举
-// ---------------------------------------------------------------------------
 
 struct SnapshotHandle(HANDLE);
 
@@ -213,7 +214,6 @@ impl Drop for SnapshotHandle {
     }
 }
 
-/// 检查游戏进程是否正在运行
 pub fn is_game_running() -> Result<bool> {
     unsafe {
         let raw_snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -269,11 +269,6 @@ pub fn is_game_running() -> Result<bool> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// 系统浏览器
-// ---------------------------------------------------------------------------
-
-/// 用系统默认浏览器打开链接
 pub fn open_url(url: &str) -> Result<()> {
     let operation: Vec<u16> = "open\0".encode_utf16().collect();
     let target: Vec<u16> = url.encode_utf16().chain([0]).collect();
@@ -299,11 +294,6 @@ pub fn open_url(url: &str) -> Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// 文件版本资源
-// ---------------------------------------------------------------------------
-
-/// 读取 PE 文件版本资源中的 `ProductVersion` 字符串
 pub fn file_product_version(path: &Path) -> Option<String> {
     let path_wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
     let mut handle = 0u32;
@@ -375,10 +365,6 @@ pub fn file_product_version(path: &Path) -> Option<String> {
     None
 }
 
-// ---------------------------------------------------------------------------
-// 密码学原语
-// ---------------------------------------------------------------------------
-
 /// 用 CNG 的系统首选随机数发生器填充缓冲区
 pub fn random_bytes(buffer: &mut [u8]) -> Result<()> {
     let len = u32::try_from(buffer.len())
@@ -401,7 +387,6 @@ pub fn random_bytes(buffer: &mut [u8]) -> Result<()> {
     Ok(())
 }
 
-/// SHA-256 摘要
 pub fn sha256(data: &[u8]) -> Result<[u8; SHA256_LENGTH]> {
     let len = u32::try_from(data.len())
         .map_err(|_| ManagerError::SsoLoginFailed("待哈希数据长度超出限制".to_string()))?;
@@ -452,10 +437,6 @@ pub fn sha256(data: &[u8]) -> Result<[u8; SHA256_LENGTH]> {
     Ok(digest)
 }
 
-// ---------------------------------------------------------------------------
-// 控制台事件钩子
-// ---------------------------------------------------------------------------
-
 unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> i32 {
     if matches!(
         ctrl_type,
@@ -479,7 +460,6 @@ unsafe extern "system" {
     ) -> i32;
 }
 
-/// 注册控制台事件钩子
 pub fn install_shutdown_handler() {
     // 注册失败不阻断运行，只是中断时少了统一清理
     unsafe {

@@ -6,9 +6,91 @@ use super::{
     Result, SPEED_CHECK_INTERVAL, TAIL_SKIP_MIN_REMAINING_CAP, TAIL_SKIP_RATIO, WARMUP_DURATION,
     Write, atomic_rename_or_copy, check_response_status, cmp, fs, io, report_event, sleep,
 };
-use crate::ui::Ui;
+use crate::ui::{JobOutcome, Ui, UiEvent};
+
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{Receiver, RecvTimeoutError, sync_channel},
+    },
+    thread,
+};
 
 const PAUSE_POLL_INTERVAL: Duration = Duration::from_millis(50);
+pub(super) const STALL_TIMEOUT: Duration = Duration::from_secs(60);
+const CHUNK_QUEUE_LEN: usize = 4;
+
+/// 在独立线程里阻塞读取响应体，主线程按停顿超时消费数据块
+pub(super) struct ChunkReader {
+    rx: Receiver<io::Result<Vec<u8>>>,
+    stop: Arc<AtomicBool>,
+}
+
+impl ChunkReader {
+    pub(super) fn spawn<R: Read + Send + 'static>(mut source: R) -> Self {
+        let (tx, rx) = sync_channel(CHUNK_QUEUE_LEN);
+        let stop = Arc::new(AtomicBool::new(false));
+        let reader_stop = Arc::clone(&stop);
+
+        thread::spawn(move || {
+            let mut buffer = vec![0u8; DOWNLOAD_BUFFER_SIZE];
+
+            loop {
+                if reader_stop.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                match source.read(&mut buffer) {
+                    Ok(0) => {
+                        // 空块表示正常结束，用于区分读取线程异常退出
+                        let _ = tx.send(Ok(Vec::new()));
+                        break;
+                    }
+                    Ok(n) => {
+                        if tx.send(Ok(buffer[..n].to_vec())).is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(e));
+                        break;
+                    }
+                }
+            }
+        });
+
+        Self { rx, stop }
+    }
+
+    /// 读取下一块数据；`Ok(None)` 表示正常结束
+    pub(super) fn next(&self, timeout: Duration) -> Result<Option<Vec<u8>>> {
+        match self.rx.recv_timeout(timeout) {
+            Ok(Ok(chunk)) if chunk.is_empty() => Ok(None),
+            Ok(Ok(chunk)) => Ok(Some(chunk)),
+            Ok(Err(e)) => Err(ManagerError::NetworkError(format!("读取响应失败：{e}"))),
+            Err(RecvTimeoutError::Timeout) => {
+                report_event(
+                    "Download.Stalled",
+                    Some(&format!("timeout={}", timeout.as_secs())),
+                );
+                Err(ManagerError::NetworkError(format!(
+                    "下载停顿超过 {} 秒，连接可能已中断",
+                    timeout.as_secs()
+                )))
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                Err(ManagerError::NetworkError("读取线程异常结束".to_string()))
+            }
+        }
+    }
+}
+
+impl Drop for ChunkReader {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
 
 /// 等待暂停结束；期间被确认停止时返回取消错误
 pub(super) fn wait_while_paused(ui: &dyn Ui) -> Result<()> {
@@ -70,16 +152,11 @@ pub(super) fn sleep_for_rate_limit(downloaded: u64, elapsed: Duration, rate_limi
         return;
     }
 
-    let sleep_dur = if cfg!(test) {
-        Duration::from_millis(1)
-    } else {
-        Duration::from_secs_f64((expected_secs - elapsed_secs).max(0.001))
-    };
-
-    sleep(sleep_dur);
+    sleep(Duration::from_secs_f64(
+        (expected_secs - elapsed_secs).max(0.001),
+    ));
 }
 
-/// 创建下载用的临时文件，返回临时路径与文件句柄
 fn create_download_temp_file(dest: &Path) -> Result<(PathBuf, File)> {
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).map_err(|e| {
@@ -107,6 +184,13 @@ fn create_download_temp_file(dest: &Path) -> Result<(PathBuf, File)> {
     Ok((tmp_path, tmp_file))
 }
 
+fn display_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
+}
+
 impl Downloader<'_> {
     pub(super) fn download_file_with_progress(
         &self,
@@ -114,8 +198,16 @@ impl Downloader<'_> {
         dest: &Path,
         file_size: Option<u64>,
         rate_limit_bps: Option<usize>,
+        slot: usize,
     ) -> Result<()> {
-        self.download_file_with_progress_and_speed_check(url, dest, file_size, rate_limit_bps, None)
+        self.download_file_with_progress_and_speed_check(
+            url,
+            dest,
+            file_size,
+            rate_limit_bps,
+            None,
+            slot,
+        )
     }
 
     pub(super) fn download_file_with_progress_and_speed_check(
@@ -125,9 +217,10 @@ impl Downloader<'_> {
         file_size: Option<u64>,
         rate_limit_bps: Option<usize>,
         min_speed_bps: Option<usize>,
+        slot: usize,
     ) -> Result<()> {
         self.retry("下载文件", || {
-            self.try_download(url, dest, file_size, rate_limit_bps, min_speed_bps)
+            self.try_download(url, dest, file_size, rate_limit_bps, min_speed_bps, slot)
         })
     }
 
@@ -138,9 +231,10 @@ impl Downloader<'_> {
         file_size: Option<u64>,
         rate_limit_bps: Option<usize>,
         min_speed_bps: Option<usize>,
+        slot: usize,
     ) -> Result<()> {
-        let response = self
-            .agent
+        let agent = self.agent_for(url);
+        let response = agent
             .get(url)
             .call()
             .map_err(|e| ManagerError::NetworkError(Self::convert_ureq_error(&e)))?;
@@ -155,30 +249,27 @@ impl Downloader<'_> {
             |n| n.to_string_lossy().into_owned(),
         );
 
-        let id = self.ui.download_start(&filename, total_size)?;
+        let id = self
+            .ui
+            .emit(UiEvent::DownloadStart(slot, &filename, total_size))?
+            .download_id()?;
 
-        let mut reader = response.into_body().into_reader();
-        self.write_response_to_file(
-            &mut reader,
-            dest,
-            id,
-            total_size,
-            rate_limit_bps,
-            min_speed_bps,
-        )
+        let reader = response.into_body().into_reader();
+        self.write_response_to_file(reader, dest, id, total_size, rate_limit_bps, min_speed_bps)
     }
 
-    pub(super) fn write_response_to_file<R: Read>(
+    pub(super) fn write_response_to_file<R: Read + Send + 'static>(
         &self,
-        resp: &mut R,
+        resp: R,
         dest: &Path,
         id: usize,
         total_size: Option<u64>,
         rate_limit_bps: Option<usize>,
         min_speed_bps: Option<usize>,
     ) -> Result<()> {
+        let chunks = ChunkReader::spawn(resp);
         let result = self.write_response_to_file_inner(
-            resp,
+            &chunks,
             dest,
             id,
             total_size,
@@ -188,7 +279,10 @@ impl Downloader<'_> {
 
         // 中途失败（含换源重试）时收尾进度条，避免留下卡住的下载行
         if result.is_err() {
-            let _ = self.ui.download_finish(id, "下载失败");
+            let message = format!("下载失败：{}", display_name(dest));
+            let _ = self
+                .ui
+                .emit(UiEvent::DownloadFinish(id, &message, JobOutcome::Failed));
         }
 
         result
@@ -198,9 +292,9 @@ impl Downloader<'_> {
         clippy::too_many_lines,
         reason = "下载循环里进度、取消、暂停、低速检测与限速依次处理，拆开反而看不清顺序"
     )]
-    fn write_response_to_file_inner<R: Read>(
+    fn write_response_to_file_inner(
         &self,
-        resp: &mut R,
+        resp: &ChunkReader,
         dest: &Path,
         id: usize,
         total_size: Option<u64>,
@@ -209,9 +303,12 @@ impl Downloader<'_> {
     ) -> Result<()> {
         // 0 表示不限速
         let rate_limit_bps = rate_limit_bps.filter(|limit| *limit > 0);
-        let (tmp_path, mut tmp_file) = create_download_temp_file(dest)?;
 
-        let mut buffer = vec![0; DOWNLOAD_BUFFER_SIZE];
+        if self.cancelled() {
+            return Err(ManagerError::UserCancelled);
+        }
+
+        let (tmp_path, mut tmp_file) = create_download_temp_file(dest)?;
 
         let mut downloaded = 0u64;
         let start = Instant::now();
@@ -224,25 +321,30 @@ impl Downloader<'_> {
         let mut slow_overall_count: u32 = 0;
 
         loop {
-            let n = resp
-                .read(&mut buffer)
-                .map_err(|e| ManagerError::NetworkError(e.to_string()))?;
-            if n == 0 {
-                break;
-            }
+            let chunk = match resp.next(STALL_TIMEOUT) {
+                Ok(Some(chunk)) => chunk,
+                Ok(None) => break,
+                Err(e) => {
+                    let _ = fs::remove_file(&tmp_path);
+                    return Err(e);
+                }
+            };
 
-            tmp_file.write_all(&buffer[..n]).map_err(|e| {
-                ManagerError::from(io::Error::new(
+            if let Err(e) = tmp_file.write_all(&chunk) {
+                drop(tmp_file);
+                let _ = fs::remove_file(&tmp_path);
+
+                return Err(ManagerError::from(io::Error::new(
                     e.kind(),
                     format!("写入临时文件 {} 失败：{}", tmp_path.display(), e),
-                ))
-            })?;
-            downloaded += n as u64;
-            window_bytes += n as u64;
+                )));
+            }
+            downloaded += chunk.len() as u64;
+            window_bytes += chunk.len() as u64;
 
-            self.ui.download_update(id, downloaded)?;
+            self.ui.emit(UiEvent::DownloadUpdate(id, downloaded))?;
 
-            if self.ui.download_cancelled() {
+            if self.cancelled() {
                 let _ = fs::remove_file(&tmp_path);
                 return Err(ManagerError::UserCancelled);
             }
@@ -266,55 +368,49 @@ impl Downloader<'_> {
             if let Some(min_speed) = min_speed_bps {
                 let elapsed = start.elapsed().saturating_sub(paused);
 
-                // 启动期豁免
-                if elapsed >= WARMUP_DURATION {
-                    // 收尾豁免（同时作用于两条检测路径）
-                    if !in_tail_skip(total_size, downloaded) {
-                        // 路径 A：滑动窗口
-                        let window_elapsed = window_start.elapsed();
-                        if window_elapsed >= SPEED_CHECK_INTERVAL {
-                            if let Some((speed_kbs, threshold_kbs)) =
-                                slow_speed(min_speed, window_bytes, window_elapsed)
-                            {
-                                slow_window_count += 1;
-                                if slow_window_count >= MAX_CONSECUTIVE_SLOW_WINDOWS {
-                                    let _ = fs::remove_file(&tmp_path);
-                                    report_event(
-                                        "Download.SlowSpeed.Triggered.Window",
-                                        Some(&format!("{speed_kbs:.1}KB/s<{threshold_kbs}KB/s")),
-                                    );
-                                    return Err(ManagerError::SlowDownload(format!(
-                                        "{speed_kbs:.1} KB/s < {threshold_kbs} KB/s"
-                                    )));
-                                }
-                            } else {
-                                slow_window_count = 0;
+                if elapsed >= WARMUP_DURATION && !in_tail_skip(total_size, downloaded) {
+                    let window_elapsed = window_start.elapsed();
+                    if window_elapsed >= SPEED_CHECK_INTERVAL {
+                        if let Some((speed_kbs, threshold_kbs)) =
+                            slow_speed(min_speed, window_bytes, window_elapsed)
+                        {
+                            slow_window_count += 1;
+                            if slow_window_count >= MAX_CONSECUTIVE_SLOW_WINDOWS {
+                                let _ = fs::remove_file(&tmp_path);
+                                report_event(
+                                    "Download.SlowSpeed.Triggered.Window",
+                                    Some(&format!("{speed_kbs:.1}KB/s<{threshold_kbs}KB/s")),
+                                );
+                                return Err(ManagerError::SlowDownload(format!(
+                                    "{speed_kbs:.1} KB/s < {threshold_kbs} KB/s"
+                                )));
                             }
-                            window_start = Instant::now();
-                            window_bytes = 0;
+                        } else {
+                            slow_window_count = 0;
                         }
+                        window_start = Instant::now();
+                        window_bytes = 0;
+                    }
 
-                        // 路径 B：整体均速
-                        if last_overall_check.elapsed() >= OVERALL_CHECK_INTERVAL {
-                            if let Some((speed_kbs, threshold_kbs)) =
-                                slow_speed(min_speed, downloaded, elapsed)
-                            {
-                                slow_overall_count += 1;
-                                if slow_overall_count >= MAX_CONSECUTIVE_SLOW_OVERALL {
-                                    let _ = fs::remove_file(&tmp_path);
-                                    report_event(
-                                        "Download.SlowSpeed.Triggered.Overall",
-                                        Some(&format!("{speed_kbs:.1}KB/s<{threshold_kbs}KB/s")),
-                                    );
-                                    return Err(ManagerError::SlowDownload(format!(
-                                        "整体均速 {speed_kbs:.1} KB/s < {threshold_kbs} KB/s"
-                                    )));
-                                }
-                            } else {
-                                slow_overall_count = 0;
+                    if last_overall_check.elapsed() >= OVERALL_CHECK_INTERVAL {
+                        if let Some((speed_kbs, threshold_kbs)) =
+                            slow_speed(min_speed, downloaded, elapsed)
+                        {
+                            slow_overall_count += 1;
+                            if slow_overall_count >= MAX_CONSECUTIVE_SLOW_OVERALL {
+                                let _ = fs::remove_file(&tmp_path);
+                                report_event(
+                                    "Download.SlowSpeed.Triggered.Overall",
+                                    Some(&format!("{speed_kbs:.1}KB/s<{threshold_kbs}KB/s")),
+                                );
+                                return Err(ManagerError::SlowDownload(format!(
+                                    "整体均速 {speed_kbs:.1} KB/s < {threshold_kbs} KB/s"
+                                )));
                             }
-                            last_overall_check = Instant::now();
+                        } else {
+                            slow_overall_count = 0;
                         }
+                        last_overall_check = Instant::now();
                     }
                 }
             }
@@ -324,17 +420,19 @@ impl Downloader<'_> {
             }
         }
 
-        tmp_file.flush().map_err(|e| {
-            ManagerError::from(io::Error::new(
+        if let Err(e) = tmp_file.flush() {
+            drop(tmp_file);
+            let _ = fs::remove_file(&tmp_path);
+
+            return Err(ManagerError::from(io::Error::new(
                 e.kind(),
                 format!("同步临时文件 {} 失败：{}", tmp_path.display(), e),
-            ))
-        })?;
+            )));
+        }
 
         self.finish_download(&tmp_path, dest, id)
     }
 
-    /// 将临时文件落到目标路径，并报告下载完成
     pub(super) fn finish_download(&self, tmp_path: &Path, dest: &Path, id: usize) -> Result<()> {
         if let Err(e) = atomic_rename_or_copy(tmp_path, dest) {
             let _ = fs::remove_file(tmp_path);
@@ -346,12 +444,10 @@ impl Downloader<'_> {
         }
 
         let _ = fs::remove_file(tmp_path);
-        let filename = dest.file_name().map_or_else(
-            || dest.display().to_string(),
-            |n| n.to_string_lossy().into_owned(),
-        );
-
+        let message = format!("下载完成：{}", display_name(dest));
         self.ui
-            .download_finish(id, &format!("下载完成：{filename}"))
+            .emit(UiEvent::DownloadFinish(id, &message, JobOutcome::Completed))?;
+
+        Ok(())
     }
 }

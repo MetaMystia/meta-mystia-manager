@@ -10,21 +10,24 @@ use std::{
 
 #[derive(Clone, Deserialize)]
 pub struct VersionInfo {
-    #[serde(rename = "bepInEx")]
-    pub bep_in_ex: String,
+    #[serde(rename = "bepInEx", default)]
+    pub bep_in_ex: Option<String>,
     /// 上游 BepInEx 文件名（如 `BepInEx-Unity.IL2CPP-win-x64-6.0.0-be.785+6abdba4.zip`）
     #[serde(rename = "bepInExFileName", default)]
     pub bep_in_ex_file_name: Option<String>,
-    /// 运行期配置地址
     #[serde(rename = "configUrl")]
     pub config_url: String,
+    #[serde(default)]
     pub dlls: Vec<String>,
-    pub manager: String,
+    #[serde(default)]
+    pub manager: Option<String>,
+    #[serde(default)]
     pub paths: DownloadPaths,
+    #[serde(default)]
     pub zips: Vec<String>,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 pub struct DownloadPaths {
     #[serde(rename = "bepInEx")]
     pub bep_in_ex: Option<String>,
@@ -44,6 +47,18 @@ impl VersionInfo {
             .unwrap_or(trimmed)
             .trim()
             .to_string()
+    }
+
+    /// 文件名必须是安全的单段名称
+    fn is_safe_file_name(name: &str) -> bool {
+        let name = name.trim();
+
+        !name.is_empty()
+            && !name.ends_with(['.', ' '])
+            && !name.contains(['/', '\\'])
+            && !name.chars().any(|ch| {
+                ch.is_control() || matches!(ch, '<' | '>' | ':' | '"' | '|' | '?' | '*' | '#' | '%')
+            })
     }
 
     fn normalize_version_list(versions: &mut Vec<String>) {
@@ -120,10 +135,6 @@ impl VersionInfo {
             .any(|version| Self::normalize_canonical_version(version).is_none())
         {
             report_event("Model.VersionInfo.Invalid", Some("dlls_invalid"));
-            return Err(ManagerError::InvalidVersionInfo);
-        }
-        if self.zips.is_empty() {
-            report_event("Model.VersionInfo.Invalid", Some("zips_empty"));
             return Err(ManagerError::InvalidVersionInfo);
         }
         if self
@@ -214,32 +225,96 @@ impl VersionInfo {
         Self::matches_backup_filename(filename, ".zip", Self::is_resourceex_filename)
     }
 
+    fn matches_part_filename(filename: &str, suffix: &str, matcher: fn(&str) -> bool) -> bool {
+        let lower = filename.trim().to_ascii_lowercase();
+        let Some(base) = lower.strip_suffix(&format!("{suffix}.part")) else {
+            return false;
+        };
+
+        matcher(&format!("{base}{suffix}"))
+    }
+
+    pub fn is_metamystia_part_filename(filename: &str) -> bool {
+        Self::matches_part_filename(filename, ".dll", Self::is_metamystia_filename)
+    }
+
+    pub fn is_resourceex_part_filename(filename: &str) -> bool {
+        Self::matches_part_filename(filename, ".zip", Self::is_resourceex_filename)
+    }
+
     pub fn versions_match(left: &str, right: &str) -> bool {
         Self::normalize_version(left) == Self::normalize_version(right)
     }
 
-    /// 上游 BepInEx 文件名（服务端通过 `bepInExFileName` 下发）
+    /// 在候选列表里解析界面选择的版本；`None` 表示使用最新版，选择已失效时返回错误
+    pub fn resolve_selected_version(
+        available: &[String],
+        selected: Option<&str>,
+        component: &str,
+    ) -> Result<Option<String>> {
+        let Some(selected) = selected else {
+            return Ok(None);
+        };
+
+        available
+            .iter()
+            .find(|version| Self::versions_match(version, selected))
+            .cloned()
+            .map(Some)
+            .ok_or_else(|| {
+                report_event("Model.VersionInfo.Unavailable", Some(component));
+                ManagerError::Other(format!(
+                    "所选 {component} 版本已不在可用列表中，请返回上一步重新选择"
+                ))
+            })
+    }
+
     pub fn bepinex_filename(&self) -> Result<&str> {
-        self.bep_in_ex_file_name
+        let name = self
+            .bep_in_ex_file_name
             .as_deref()
             .map(str::trim)
             .filter(|name| !name.is_empty())
             .ok_or_else(|| {
                 report_event("Model.VersionInfo.Invalid", Some("bepinex_filename"));
                 ManagerError::InvalidVersionInfo
-            })
+            })?;
+
+        if !Self::is_safe_file_name(name) {
+            report_event("Model.VersionInfo.Invalid", Some("bepinex_filename_unsafe"));
+            return Err(ManagerError::InvalidVersionInfo);
+        }
+
+        Ok(name)
     }
 
     /// BepInEx 构建号（服务端只下发构建号，例如 `785`）
     pub fn bepinex_version(&self) -> Result<&str> {
-        let version = self.bep_in_ex.trim();
+        let version = self
+            .bep_in_ex
+            .as_deref()
+            .map(str::trim)
+            .filter(|version| !version.is_empty())
+            .ok_or_else(|| {
+                report_event("Model.VersionInfo.Invalid", Some("bepinex_version"));
+                ManagerError::InvalidVersionInfo
+            })?;
 
-        if version.is_empty() {
+        if !version.chars().all(|ch| ch.is_ascii_digit()) {
             report_event("Model.VersionInfo.Invalid", Some("bepinex_version"));
             return Err(ManagerError::InvalidVersionInfo);
         }
 
         Ok(version)
+    }
+
+    /// 最新管理工具版本；服务端未下发时返回 `None`
+    pub fn manager_version(&self) -> Option<&str> {
+        self.manager
+            .as_deref()
+            .map(str::trim)
+            .filter(|version| !version.is_empty())
+            .map(|version| version.strip_prefix(['v', 'V']).unwrap_or(version))
     }
 
     pub fn metamystia_filename(version: &str) -> String {
@@ -254,8 +329,18 @@ impl VersionInfo {
         format!("ResourceExample-v{version}.zip")
     }
 
-    pub fn manager_filename(&self) -> String {
-        format!("meta-mystia-manager-v{}.exe", self.manager.trim())
+    pub fn manager_filename(&self) -> Result<String> {
+        let version = self.manager_version().ok_or_else(|| {
+            report_event("Model.VersionInfo.Invalid", Some("manager_version"));
+            ManagerError::InvalidVersionInfo
+        })?;
+
+        if !Self::is_safe_file_name(version) {
+            report_event("Model.VersionInfo.Invalid", Some("manager_version_unsafe"));
+            return Err(ManagerError::InvalidVersionInfo);
+        }
+
+        Ok(format!("meta-mystia-manager-v{version}.exe"))
     }
 }
 
@@ -264,7 +349,7 @@ impl Display for VersionInfo {
         write!(
             f,
             "BepInEx: {}, dll: {}, zip: {}",
-            self.bep_in_ex.trim(),
+            self.bep_in_ex.as_deref().map_or("", str::trim),
             self.dlls.first().map_or("", |s| s.trim()),
             self.zips.first().map_or("", |s| s.trim())
         )

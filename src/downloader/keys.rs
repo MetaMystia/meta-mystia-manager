@@ -3,14 +3,18 @@
 use super::{
     DOWNLOAD_BUFFER_SIZE, Deserialize, Downloader, Instant, KEY_ATTEMPTS, ManagerError, Path,
     PathBuf, Read, RemoteConfig, Result, Write, check_response_status, fs, io, remote_config,
-    report_event, service_error, sso,
+    report_event, sso,
 };
-use crate::downloader::transfer::{sleep_for_rate_limit, wait_while_paused};
+use crate::downloader::transfer::{
+    ChunkReader, STALL_TIMEOUT, sleep_for_rate_limit, wait_while_paused,
+};
+use crate::error::service_error_reason;
+use crate::net::rate_limit_error;
 use crate::preflight::format_bytes;
+use crate::ui::{JobOutcome, UiEvent};
 
 use std::result::Result as StdResult;
 
-/// 一次性下载密钥
 struct DownloadKey {
     md5: String,
     /// `None` 表示不限速
@@ -37,8 +41,10 @@ struct DownloadKeyEnvelope {
 /// 一次性密钥下载的失败原因
 enum KeyedDownloadError {
     Failed(ManagerError),
-    /// 密钥已消费或过期，可重新申请
+    /// 密钥已消费、过期或边缘签名失效，可重新申请
     KeyExpired,
+    /// 断点范围无效，需要删除部分文件后重新下载
+    Restart,
 }
 
 /// 部分下载文件：与目标同目录、同名追加 `.part`
@@ -49,12 +55,13 @@ fn part_path(dest: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// 可续传的字节数；文件不存在、为空或已不小于目标大小时返回 0（重新下载）
+/// 可续传的字节数；文件不存在、为空或超过目标大小时返回 0（重新下载）。
+/// 等于目标大小时原样返回，由调用方直接校验而不再请求网络。
 fn resume_offset(part: &Path, total: u64) -> u64 {
     fs::metadata(part).map_or(0, |meta| {
         let len = meta.len();
 
-        if len > 0 && len < total { len } else { 0 }
+        if len > 0 && len <= total { len } else { 0 }
     })
 }
 
@@ -77,9 +84,12 @@ fn verify_digest(path: &Path, expected: &str, context: Option<md5::Context>) -> 
         let mut buffer = vec![0; DOWNLOAD_BUFFER_SIZE];
 
         loop {
-            let read = file
-                .read(&mut buffer)
-                .map_err(|e| ManagerError::NetworkError(e.to_string()))?;
+            let read = file.read(&mut buffer).map_err(|e| {
+                ManagerError::from(io::Error::new(
+                    e.kind(),
+                    format!("读取文件 {} 失败：{}", path.display(), e),
+                ))
+            })?;
             if read == 0 {
                 break;
             }
@@ -125,7 +135,7 @@ impl Downloader<'_> {
             .map_err(|e| ManagerError::Other(format!("构造下载请求失败：{e}")))?;
 
         let response = self
-            .agent
+            .metadata_agent(&config.download.keys_url)
             .post(&config.download.keys_url)
             .header("Authorization", &format!("Bearer {token}"))
             .header("Content-Type", "application/json")
@@ -134,6 +144,10 @@ impl Downloader<'_> {
             .map_err(|e| ManagerError::NetworkError(Self::convert_ureq_error(&e)))?;
 
         let status = response.status().as_u16();
+        if status == 429 {
+            return Err(rate_limit_error(&response, self.ui, "申请下载密钥"));
+        }
+
         let text = response
             .into_body()
             .read_to_string()
@@ -159,7 +173,21 @@ impl Downloader<'_> {
                 )),
             );
 
-            return Err(service_error("下载", &code, status));
+            let reason = service_error_reason(&code, status);
+            let retryable = status >= 500
+                || code == "sso-unreachable"
+                || code
+                    .strip_prefix("http-")
+                    .and_then(|value| value.parse::<u16>().ok())
+                    .is_some_and(|status| (500..=599).contains(&status));
+
+            return if retryable {
+                Err(ManagerError::NetworkError(format!(
+                    "申请下载密钥失败：{reason}"
+                )))
+            } else {
+                Err(ManagerError::ServiceError(format!("下载失败：{reason}")))
+            };
         }
 
         let (Some(url), Some(rate_limit_kb_per_second), Some(size)) = (
@@ -207,10 +235,43 @@ impl Downloader<'_> {
         &self,
         ticket: &DownloadKey,
         dest: &Path,
+        slot: usize,
     ) -> StdResult<(), KeyedDownloadError> {
-        let resume_from = resume_offset(&part_path(dest), ticket.size);
+        if self.cancelled() {
+            return Err(KeyedDownloadError::Failed(ManagerError::UserCancelled));
+        }
 
-        let mut request = self.agent.get(&ticket.url);
+        let part = part_path(dest);
+        let resume_from = resume_offset(&part, ticket.size);
+        let filename = dest.file_name().map_or_else(
+            || dest.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+
+        if ticket.size > 0 && resume_from == ticket.size {
+            let id = self
+                .ui
+                .emit(UiEvent::DownloadStart(slot, &filename, Some(ticket.size)))
+                .map_err(KeyedDownloadError::Failed)?
+                .download_id()
+                .map_err(KeyedDownloadError::Failed)?;
+
+            return match verify_digest(&part, &ticket.md5, None) {
+                Ok(()) => self
+                    .finish_download(&part, dest, id)
+                    .map_err(KeyedDownloadError::Failed),
+                Err(e) => {
+                    let message = format!("下载失败：{filename}");
+                    let _ = self
+                        .ui
+                        .emit(UiEvent::DownloadFinish(id, &message, JobOutcome::Failed));
+
+                    Err(KeyedDownloadError::Failed(e))
+                }
+            };
+        }
+
+        let mut request = self.agent_for(&ticket.url).get(&ticket.url);
         if resume_from > 0 {
             request = request.header("Range", &format!("bytes={resume_from}-"));
         }
@@ -220,8 +281,13 @@ impl Downloader<'_> {
         })?;
         let status = response.status().as_u16();
 
-        if status == 410 {
+        if matches!(status, 401 | 403 | 410) {
             return Err(KeyedDownloadError::KeyExpired);
+        }
+        if status == 416 {
+            let _ = fs::remove_file(&part);
+            report_event("Download.Range.Restart", Some(&dest.display().to_string()));
+            return Err(KeyedDownloadError::Restart);
         }
         if let Some(err) = check_response_status(&response, self.ui, "下载文件") {
             return Err(KeyedDownloadError::Failed(err));
@@ -229,29 +295,30 @@ impl Downloader<'_> {
 
         // 服务端忽略 Range 时会返回 200，此时从头写入（截断已有的部分文件）
         let append_from = if status == 206 { resume_from } else { 0 };
-        let filename = dest.file_name().map_or_else(
-            || dest.display().to_string(),
-            |n| n.to_string_lossy().into_owned(),
-        );
         // 续传时进度条只统计本次传输量，否则速度会瞬间跳到"已完成大小/0s"
         let label = if append_from > 0 {
             format!("{filename}（续传，已完成 {}）", format_bytes(append_from))
         } else {
-            filename
+            filename.clone()
         };
         let remaining = ticket.size.saturating_sub(append_from);
         let id = self
             .ui
-            .download_start(&label, Some(remaining))
+            .emit(UiEvent::DownloadStart(slot, &label, Some(remaining)))
+            .map_err(KeyedDownloadError::Failed)?
+            .download_id()
             .map_err(KeyedDownloadError::Failed)?;
 
-        let mut reader = response.into_body().into_reader();
+        let reader = response.into_body().into_reader();
 
-        match self.write_keyed_response(&mut reader, dest, id, ticket, append_from) {
+        match self.write_keyed_response(reader, dest, id, ticket, append_from) {
             Ok(()) => Ok(()),
             Err(e) => {
                 // 失败时收尾进度条，避免留下卡住的下载行
-                let _ = self.ui.download_finish(id, "下载失败");
+                let message = format!("下载失败：{filename}");
+                let _ = self
+                    .ui
+                    .emit(UiEvent::DownloadFinish(id, &message, JobOutcome::Failed));
 
                 Err(KeyedDownloadError::Failed(e))
             }
@@ -263,9 +330,9 @@ impl Downloader<'_> {
         clippy::cast_possible_truncation,
         reason = "这里的长度只用于进度显示，量级远小于 u64 上限"
     )]
-    fn write_keyed_response<R: Read>(
+    fn write_keyed_response<R: Read + Send + 'static>(
         &self,
-        resp: &mut R,
+        resp: R,
         dest: &Path,
         id: usize,
         ticket: &DownloadKey,
@@ -303,19 +370,12 @@ impl Downloader<'_> {
 
         // 续传时前半段没有经过哈希器，完成后按整文件重算
         let mut hasher = (append_from == 0).then(md5::Context::new);
-        let mut buffer = vec![0; DOWNLOAD_BUFFER_SIZE];
+        let chunks = ChunkReader::spawn(resp);
         let mut transferred = 0u64;
         let start = Instant::now();
 
-        loop {
-            let read = resp
-                .read(&mut buffer)
-                .map_err(|e| ManagerError::NetworkError(e.to_string()))?;
-            if read == 0 {
-                break;
-            }
-
-            file.write_all(&buffer[..read]).map_err(|e| {
+        while let Some(chunk) = chunks.next(STALL_TIMEOUT)? {
+            file.write_all(&chunk).map_err(|e| {
                 ManagerError::from(io::Error::new(
                     e.kind(),
                     format!("写入部分下载文件 {} 失败：{}", part.display(), e),
@@ -323,13 +383,13 @@ impl Downloader<'_> {
             })?;
 
             if let Some(hasher) = hasher.as_mut() {
-                hasher.consume(&buffer[..read]);
+                hasher.consume(&chunk);
             }
 
-            transferred += read as u64;
-            self.ui.download_update(id, transferred)?;
+            transferred += chunk.len() as u64;
+            self.ui.emit(UiEvent::DownloadUpdate(id, transferred))?;
 
-            if self.ui.download_cancelled() {
+            if self.cancelled() {
                 let _ = fs::remove_file(&part);
                 return Err(ManagerError::UserCancelled);
             }
@@ -364,16 +424,25 @@ impl Downloader<'_> {
         filename: &str,
         dest: &Path,
         op_desc: &str,
+        slot: usize,
     ) -> Result<()> {
         let config = self.remote_config()?;
+
+        if self.cancelled() {
+            return Err(ManagerError::UserCancelled);
+        }
 
         self.retry(op_desc, || {
             let mut last_err = ManagerError::NetworkError("下载密钥已失效，请重试".to_string());
 
             for _ in 0..KEY_ATTEMPTS {
+                if self.cancelled() {
+                    return Err(ManagerError::UserCancelled);
+                }
+
                 let ticket = self.request_download_key(&config, category, filename)?;
 
-                match self.try_download_keyed(&ticket, dest) {
+                match self.try_download_keyed(&ticket, dest, slot) {
                     Ok(()) => return Ok(()),
                     Err(KeyedDownloadError::KeyExpired) => {
                         report_event(
@@ -381,6 +450,10 @@ impl Downloader<'_> {
                             Some(&format!("category={category:?};file={filename}")),
                         );
                         last_err = ManagerError::NetworkError("下载密钥已失效，请重试".to_string());
+                    }
+                    Err(KeyedDownloadError::Restart) => {
+                        last_err =
+                            ManagerError::NetworkError("下载断点无效，重新下载失败".to_string());
                     }
                     Err(KeyedDownloadError::Failed(err)) => return Err(err),
                 }

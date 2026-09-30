@@ -1,9 +1,13 @@
-use crate::config::{METAMYSTIA_PLUGIN_GLOB, RESOURCEEX_ZIP_GLOB, UninstallMode};
+use crate::config::{
+    BEPINEX_CORE_DLL, METAMYSTIA_PLUGIN_GLOB, METAMYSTIA_PLUGIN_OLD_GLOB, RESOURCEEX_ZIP_GLOB,
+    RESOURCEEX_ZIP_OLD_GLOB, UninstallMode,
+};
 use crate::downloader::{DownloadJob, Downloader};
 use crate::error::{ManagerError, Result};
 use crate::extractor::Extractor;
 use crate::file_ops::{
-    atomic_rename_or_copy, count_results, execute_deletion, glob_matches, glob_matches_by_filename,
+    atomic_rename_or_copy, cleanup_tmp_residue, count_results, execute_deletion,
+    glob_matches_by_filename,
 };
 use crate::metrics::report_event;
 use crate::model::VersionInfo;
@@ -11,7 +15,7 @@ use crate::platform::fs_dry_run;
 use crate::preflight::check;
 use crate::rollback::Rollback;
 use crate::temp_dir::create_temp_dir_with_guard;
-use crate::ui::Ui;
+use crate::ui::{Ui, UiEvent};
 
 use std::{
     collections::HashSet,
@@ -21,19 +25,53 @@ use std::{
 };
 
 pub struct Installer<'a> {
+    dll_version: Option<String>,
     downloader: Downloader<'a>,
     game_root: PathBuf,
+    install_resourceex: bool,
+    resourceex_version: Option<String>,
+    show_bepinex_console: bool,
     ui: &'a dyn Ui,
 }
 
 impl<'a> Installer<'a> {
+    /// 安装清理时保留的用户/运行期目录
+    const PRESERVED_BEPINEX_DIRS: [&'static str; 5] =
+        ["plugins", "config", "patchers", "cache", "interop"];
+
     pub fn new(game_root: PathBuf, ui: &'a dyn Ui) -> Self {
         let downloader = Downloader::new(ui);
         Self {
+            dll_version: None,
             downloader,
             game_root,
+            install_resourceex: false,
+            resourceex_version: None,
+            show_bepinex_console: false,
             ui,
         }
+    }
+
+    /// 指定要安装的 MetaMystia DLL 版本（`None` 表示最新）
+    #[must_use]
+    pub fn with_dll_version(mut self, version: Option<String>) -> Self {
+        self.dll_version = version;
+        self
+    }
+
+    /// 指定 ResourceExample ZIP 版本与是否安装
+    #[must_use]
+    pub fn with_resourceex(mut self, version: Option<String>, install: bool) -> Self {
+        self.install_resourceex = install;
+        self.resourceex_version = version;
+        self
+    }
+
+    /// 是否在游戏启动时显示 BepInEx 控制台
+    #[must_use]
+    pub const fn with_console(mut self, show_console: bool) -> Self {
+        self.show_bepinex_console = show_console;
+        self
     }
 
     pub fn check_metamystia_installed(&self) -> bool {
@@ -56,18 +94,14 @@ impl<'a> Installer<'a> {
     }
 
     pub fn check_bepinex_installed(&self) -> bool {
-        let bepinex_dir = self.game_root.join("BepInEx");
-        bepinex_dir.exists() && bepinex_dir.is_dir() && {
-            let core_pattern = bepinex_dir.join("core").join("BepInEx.Core.dll");
-            let matches = glob_matches(&core_pattern);
-            !matches.is_empty()
-        }
+        self.game_root.join(BEPINEX_CORE_DLL).is_file()
     }
 
-    /// 执行安装前的清理：全量卸载但保留 BepInEx/plugins（除了 MetaMystia DLL）
-    fn execute_install_cleanup(game_root: &Path, ui: &dyn Ui) -> Result<(usize, usize)> {
+    /// 安装前清理 BepInEx 框架文件，保留用户目录
+    fn execute_install_cleanup(&self, rollback: &mut Rollback) -> Result<(usize, usize)> {
         let mut targets = Vec::new();
         let mut seen = HashSet::new();
+        let game_root = &self.game_root;
 
         let mut push = |p: PathBuf| {
             if seen.insert(p.clone()) {
@@ -75,7 +109,6 @@ impl<'a> Installer<'a> {
             }
         };
 
-        // 1. 删除 BepInEx 目录下的所有项目（跳过 plugins）
         let bepinex_dir = game_root.join("BepInEx");
         if bepinex_dir.exists() {
             for entry in fs::read_dir(&bepinex_dir).map_err(ManagerError::from)? {
@@ -83,7 +116,11 @@ impl<'a> Installer<'a> {
                 let path = entry.path();
                 let name = entry.file_name();
 
-                if name.to_string_lossy().eq_ignore_ascii_case("plugins") {
+                let name = name.to_string_lossy();
+                if Self::PRESERVED_BEPINEX_DIRS
+                    .iter()
+                    .any(|dir| name.eq_ignore_ascii_case(dir))
+                {
                     continue;
                 }
 
@@ -91,7 +128,6 @@ impl<'a> Installer<'a> {
             }
         }
 
-        // 2. 删除 plugins 目录中的 MetaMystia DLL
         let plugins_dir = bepinex_dir.join("plugins");
         if plugins_dir.exists() {
             for entry in glob_matches_by_filename(
@@ -100,9 +136,15 @@ impl<'a> Installer<'a> {
             ) {
                 push(entry);
             }
+
+            for entry in glob_matches_by_filename(
+                &game_root.join(METAMYSTIA_PLUGIN_OLD_GLOB),
+                VersionInfo::is_canonical_metamystia_backup_filename,
+            ) {
+                push(entry);
+            }
         }
 
-        // 3. 删除 ResourceEx 目录中的 ResourceExample ZIP
         let resourceex_dir = game_root.join("ResourceEx");
         if resourceex_dir.exists() {
             for entry in glob_matches_by_filename(
@@ -111,31 +153,36 @@ impl<'a> Installer<'a> {
             ) {
                 push(entry);
             }
+
+            for entry in glob_matches_by_filename(
+                &game_root.join(RESOURCEEX_ZIP_OLD_GLOB),
+                VersionInfo::is_canonical_resourceex_backup_filename,
+            ) {
+                push(entry);
+            }
         }
 
-        // 4. 删除完全卸载模式中的其他文件
         let full_targets = UninstallMode::Full.targets();
-        for &(pattern, is_dir) in full_targets {
+        for &(pattern, _) in full_targets {
             if pattern == "BepInEx" || pattern == "ResourceEx" {
                 continue;
             }
 
             let target_path = game_root.join(pattern);
-
-            if is_dir {
-                if target_path.exists() {
-                    push(target_path);
-                }
-            } else if pattern.contains('*') {
-                for entry in glob_matches(&target_path) {
-                    push(entry);
-                }
-            } else if target_path.exists() {
+            if target_path.exists() {
                 push(target_path);
             }
         }
 
-        let results = execute_deletion(&targets, ui);
+        if !fs_dry_run() {
+            for target in &targets {
+                rollback.plan_removal(target)?;
+            }
+
+            rollback.arm()?;
+        }
+
+        let results = execute_deletion(&targets, self.ui);
         let (success, failed, _skipped) = count_results(&results);
 
         Ok((success, failed))
@@ -148,62 +195,32 @@ impl<'a> Installer<'a> {
     pub fn install(&self, cleanup_before_deploy: bool) -> Result<()> {
         report_event("Install.Start", None);
 
-        // 1. 获取版本信息
-        self.ui.install_display_step(1, "获取版本信息")?;
+        self.ui.emit(UiEvent::InstallStep(1, "获取版本信息"))?;
         let version_info = self.downloader.get_version_info()?;
-        self.ui.install_display_version_info(&version_info)?;
+        self.ui.emit(UiEvent::InstallVersionInfo(&version_info))?;
         report_event("Install.VersionInfo", Some(&version_info.to_string()));
 
-        // 2. 选择安装组件与版本
-        // 2.1. 询问是否安装 ResourceEx
-        let install_resourceex = if cleanup_before_deploy {
-            let resourceex_exists = !glob_matches_by_filename(
-                &self.game_root.join(RESOURCEEX_ZIP_GLOB),
-                VersionInfo::is_resourceex_filename,
-            )
-            .is_empty();
-            if resourceex_exists {
-                true
-            } else {
-                self.ui.install_ask_install_resourceex()?
-            }
-        } else {
-            self.ui.install_ask_install_resourceex()?
+        let install_resourceex = self.install_resourceex && !version_info.zips.is_empty();
+        let show_bepinex_console = self.show_bepinex_console;
+        let dll_version = match VersionInfo::resolve_selected_version(
+            &version_info.dlls,
+            self.dll_version.as_deref(),
+            "MetaMystia",
+        )? {
+            Some(version) => version,
+            None => version_info.latest_dll()?.to_string(),
         };
-
-        // 2.2. 询问是否在游戏启动时弹出 BepInEx 控制台窗口
-        let show_bepinex_console = self.ui.install_ask_show_bepinex_console()?;
-
-        // 2.3. 选择 DLL 版本
-        let dll_version = if self.ui.select_version_ask_select("MetaMystia DLL")? {
-            let idx = self
-                .ui
-                .select_version_from_list("MetaMystia DLL", &version_info.dlls)?;
-            version_info
-                .dlls
-                .get(idx)
-                .cloned()
-                .ok_or(ManagerError::InvalidVersionInfo)?
-        } else {
-            version_info.latest_dll()?.to_string()
-        };
-
-        // 2.4. 选择 ResourceEx 版本（仅在安装时）
         let resourceex_version = if install_resourceex {
-            if self.ui.select_version_ask_select("ResourceEx ZIP")? {
-                let idx = self
-                    .ui
-                    .select_version_from_list("ResourceEx ZIP", &version_info.zips)?;
-                Some(
-                    version_info
-                        .zips
-                        .get(idx)
-                        .cloned()
-                        .ok_or(ManagerError::InvalidVersionInfo)?,
-                )
-            } else {
-                Some(version_info.latest_resourceex()?.to_string())
-            }
+            Some(
+                match VersionInfo::resolve_selected_version(
+                    &version_info.zips,
+                    self.resourceex_version.as_deref(),
+                    "ResourceExample",
+                )? {
+                    Some(version) => version,
+                    None => version_info.latest_resourceex()?.to_string(),
+                },
+            )
         } else {
             None
         };
@@ -217,23 +234,22 @@ impl<'a> Installer<'a> {
             )),
         );
 
-        if let Ok(Some(_)) = self
+        let _ = self
             .downloader
-            .fetch_and_display_github_release_notes(Some(&dll_version))
-            && !self.ui.download_ask_continue_after_release_notes()?
-        {
-            return Err(ManagerError::UserCancelled);
-        }
+            .fetch_and_display_github_release_notes(Some(&dll_version));
 
-        // 3. 创建临时下载目录
         let (temp_dir, _temp_guard) = create_temp_dir_with_guard(&self.game_root).map_err(|e| {
             ManagerError::from(io::Error::new(e.kind(), format!("创建临时目录失败：{e}")))
         })?;
 
-        // 4. 下载文件
-        self.ui.install_display_step(2, "下载必要文件")?;
+        self.ui.emit(UiEvent::InstallStep(2, "下载必要文件"))?;
 
-        check(self.ui, &self.game_root, &temp_dir)?;
+        check(
+            self.ui,
+            &self.game_root,
+            &temp_dir,
+            &version_info.config_url,
+        )?;
 
         let bepinex_path = temp_dir.join(version_info.bepinex_filename()?);
         let dll_path = temp_dir.join(VersionInfo::metamystia_filename(&dll_version));
@@ -246,10 +262,10 @@ impl<'a> Installer<'a> {
         let mut jobs: Vec<DownloadJob<'_>> = vec![
             (
                 "下载 BepInEx",
-                Box::new(|| {
-                    let from_primary = self
-                        .downloader
-                        .download_bepinex(&version_info, &bepinex_path)?;
+                Box::new(|slot| {
+                    let from_primary =
+                        self.downloader
+                            .download_bepinex(&version_info, &bepinex_path, slot)?;
                     bepinex_from_primary.store(from_primary, Ordering::Relaxed);
 
                     Ok(())
@@ -257,12 +273,13 @@ impl<'a> Installer<'a> {
             ),
             (
                 "下载 MetaMystia DLL",
-                Box::new(|| {
+                Box::new(|slot| {
                     self.downloader.download_metamystia(
                         &dll_version,
                         &dll_path,
                         version_info.paths.dll.as_deref(),
                         try_github,
+                        slot,
                     )
                 }),
             ),
@@ -271,11 +288,12 @@ impl<'a> Installer<'a> {
         if let (Some(version), Some(path)) = (&resourceex_version, &resourceex_path) {
             jobs.push((
                 "下载 ResourceExample",
-                Box::new(|| {
+                Box::new(|slot| {
                     self.downloader.download_resourceex(
                         version,
                         path,
                         version_info.paths.zip.as_deref(),
+                        slot,
                     )
                 }),
             ));
@@ -285,32 +303,47 @@ impl<'a> Installer<'a> {
         drop(jobs);
         let bepinex_from_primary = bepinex_from_primary.load(Ordering::Relaxed);
 
-        self.ui.install_downloads_completed()?;
+        self.ui.emit(UiEvent::InstallDownloadsCompleted)?;
 
-        // 5. 在安装前清理旧版本
+        if !fs_dry_run() {
+            let removed = cleanup_tmp_residue(&self.game_root);
+            if removed > 0 {
+                report_event("Install.ResidueCleaned", Some(&removed.to_string()));
+                self.ui.emit(UiEvent::Message(&format!(
+                    "已清理 {removed} 个上次运行残留的临时文件"
+                )))?;
+            }
+        }
+
+        let mut rollback = Rollback::new(&self.game_root, &temp_dir);
+
         if cleanup_before_deploy {
-            self.ui.install_start_cleanup()?;
-            let (success, failed) = Self::execute_install_cleanup(&self.game_root, self.ui)?;
+            self.ui.emit(UiEvent::InstallStartCleanup)?;
+            let (success, failed) = self.execute_install_cleanup(&mut rollback)?;
             // 清理失败只提示：后续部署会真实写入，写不进去时再走回滚
-            self.ui.install_cleanup_result(success, failed)?;
+            self.ui
+                .emit(UiEvent::InstallCleanupResult(success, failed))?;
             report_event(
                 "Install.Cleanup",
                 Some(&format!("success:{success};failed:{failed}")),
             );
         }
 
-        // 6. 安装文件
-        self.ui.install_display_step(3, "安装文件")?;
+        self.ui.emit(UiEvent::InstallStep(3, "安装文件"))?;
 
-        // 检查 BepInEx 是否存在（用于决定是否跳过 plugins）
         let bepinex_dir = self.game_root.join("BepInEx");
         let bepinex_exists = bepinex_dir.exists();
-        let exclusions: &[&str] = if bepinex_exists {
-            &["BepInEx/plugins"]
-        } else {
-            &[]
-        };
         let bepinex_cfg_path = bepinex_dir.join("config").join("BepInEx.cfg");
+        let config_exists = bepinex_cfg_path.is_file();
+        let mut exclusions: Vec<&str> = Vec::new();
+        if bepinex_exists {
+            exclusions.push("BepInEx/plugins");
+        }
+        if config_exists {
+            // 保留已有配置（含其它插件的 .cfg），不覆盖为压缩包默认值
+            exclusions.push("BepInEx/config");
+        }
+        let exclusions = exclusions.as_slice();
         let dll_destination = dll_path.file_name().map_or_else(
             || Err(ManagerError::Other("无效的 DLL 文件名".to_string())),
             |name| Ok(bepinex_dir.join("plugins").join(name)),
@@ -325,8 +358,6 @@ impl<'a> Installer<'a> {
             })
             .transpose()?;
 
-        // 部署前记录将被覆盖/新建的文件，失败时回滚
-        let mut rollback = Rollback::new(&self.game_root, &temp_dir);
         // 干跑模式下不会真正写文件，无需备份
         if !fs_dry_run() {
             rollback.plan_zip(&bepinex_path, exclusions)?;
@@ -335,13 +366,13 @@ impl<'a> Installer<'a> {
             if let Some(destination) = &resourceex_destination {
                 rollback.plan(destination)?;
             }
+
+            rollback.arm()?;
         }
 
         let deploy = || -> Result<()> {
-            // 安装 BepInEx（如果之前存在则保留 plugins 目录）
             Extractor::deploy_bepinex(&bepinex_path, &self.game_root, exclusions)?;
 
-            // 确保配置目录存在
             let bepinex_config_dir = self.game_root.join("BepInEx").join("config");
             if !bepinex_config_dir.exists() && !fs_dry_run() {
                 fs::create_dir_all(&bepinex_config_dir).map_err(|e| {
@@ -368,15 +399,31 @@ impl<'a> Installer<'a> {
         };
 
         if let Err(e) = deploy() {
-            let _ = rollback.restore();
-            self.ui.message("安装失败，已回滚到操作前状态")?;
-            report_event("Install.Failed.RolledBack", Some(&format!("{e}")));
-
-            return Err(e);
+            return match rollback.restore() {
+                Ok(()) => {
+                    self.ui
+                        .emit(UiEvent::Message("安装失败，已回滚到操作前状态"))?;
+                    report_event("Install.Failed.RolledBack", Some(&format!("{e}")));
+                    Err(e)
+                }
+                Err(restore_err) => {
+                    self.ui.emit(UiEvent::Warn(&format!(
+                        "安装失败，且回滚未完全成功：{restore_err}"
+                    )))?;
+                    report_event(
+                        "Install.Failed.RollbackIncomplete",
+                        Some(&format!("{e};{restore_err}")),
+                    );
+                    Err(ManagerError::Other(format!(
+                        "{e}；另外回滚未完全成功：{restore_err}"
+                    )))
+                }
+            };
         }
         rollback.discard();
 
-        self.ui.install_finished(show_bepinex_console)?;
+        self.ui
+            .emit(UiEvent::InstallFinished(show_bepinex_console))?;
         report_event("Install.Finished", None);
 
         Ok(())
@@ -396,7 +443,20 @@ pub fn update_bepinex_config(
     }
 
     let config_path = game_root.join("BepInEx").join("config").join("BepInEx.cfg");
-    let mut text = fs::read_to_string(&config_path).unwrap_or_default();
+    let mut text = match fs::read_to_string(&config_path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            return Err(ManagerError::from(io::Error::new(
+                e.kind(),
+                format!(
+                    "读取 BepInEx 配置文件 {} 失败：{}",
+                    config_path.display(),
+                    e
+                ),
+            )));
+        }
+    };
     let mut changed = false;
 
     // BepInEx 默认开启控制台，配置里没写这个键时按开启比较
@@ -484,11 +544,25 @@ fn read_ini_value(text: &str, section: &str, key: &str) -> Option<String> {
             && let Some((name, value)) = trimmed.split_once('=')
             && name.trim().eq_ignore_ascii_case(key)
         {
-            return Some(value.trim().to_string());
+            return Some(strip_ini_inline_comment(value).to_string());
         }
     }
 
     None
+}
+
+/// 去掉值后面的 ` # 注释` / ` ; 注释`（仅当注释符前面是空白时才算注释）
+fn strip_ini_inline_comment(value: &str) -> &str {
+    let trimmed = value.trim();
+    let bytes = trimmed.as_bytes();
+
+    for (index, &byte) in bytes.iter().enumerate() {
+        if (byte == b'#' || byte == b';') && index > 0 && bytes[index - 1].is_ascii_whitespace() {
+            return trimmed[..index].trim_end();
+        }
+    }
+
+    trimmed
 }
 
 /// BepInEx 是否配置为显示日志控制台；配置缺失或没有该键时按不勾选处理
@@ -504,6 +578,8 @@ pub fn bepinex_console_enabled(game_root: &Path) -> bool {
 
 /// 设置 INI 文本里 `[section]` 下的 `key = value`：存在则替换，不存在则追加，保留其它内容
 fn set_ini_value(text: &str, section: &str, key: &str, value: &str) -> String {
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let trailing_newline = text.is_empty() || text.ends_with('\n');
     let mut lines: Vec<String> = text.lines().map(ToString::to_string).collect();
     let header = format!("[{section}]");
     let mut section_start = None;
@@ -542,7 +618,7 @@ fn set_ini_value(text: &str, section: &str, key: &str, value: &str) -> String {
             lines.insert(start + 1, entry);
         }
 
-        return with_trailing_newline(&lines);
+        return join_ini_lines(&lines, newline, trailing_newline);
     }
 
     if lines.last().is_some_and(|line| !line.trim().is_empty()) {
@@ -551,11 +627,15 @@ fn set_ini_value(text: &str, section: &str, key: &str, value: &str) -> String {
     lines.push(header);
     lines.push(entry);
 
-    with_trailing_newline(&lines)
+    join_ini_lines(&lines, newline, trailing_newline)
 }
 
-fn with_trailing_newline(lines: &[String]) -> String {
-    let mut text = lines.join("\n");
-    text.push('\n');
+fn join_ini_lines(lines: &[String], newline: &str, trailing_newline: bool) -> String {
+    let mut text = lines.join(newline);
+
+    if trailing_newline {
+        text.push_str(newline);
+    }
+
     text
 }

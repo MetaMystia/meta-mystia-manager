@@ -6,7 +6,7 @@ use crate::file_ops::glob_matches_by_filename;
 use crate::metrics::{get_user_id, recent_events};
 use crate::model::VersionInfo;
 use crate::preflight::format_bytes;
-use crate::ui::Ui;
+use crate::ui::{Ui, UiEvent};
 use crate::upgrader::read_bepinex_version;
 
 use std::{
@@ -21,8 +21,6 @@ use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
 /// Unity 日志目录（相对 `%USERPROFILE%\AppData\LocalLow`）
 const UNITY_LOG_DIR: &str = "Epicomic/Touhou Mystia Izakaya";
-/// Unity 日志最多收集几个文件 / 单文件上限
-const MAX_UNITY_LOGS: usize = 5;
 const MAX_UNITY_LOG_BYTES: u64 = 20 * 1024 * 1024;
 const UNITY_LOG_NAMES: &[&str] = &["Player.log", "Player-prev.log", "crash.dmp"];
 /// `BepInEx/config` 下最多收集多少个 `.cfg` / 单个文件上限
@@ -35,7 +33,14 @@ struct Entry {
     source: PathBuf,
 }
 
-/// 导出诊断包；返回生成的文件路径
+struct ConfigScan {
+    entries: Vec<Entry>,
+    /// 未超过单文件上限的 `.cfg` 总数
+    packable: usize,
+    /// 因超过单文件上限或无法读取而未打包的数量
+    skipped_large: usize,
+}
+
 pub fn export(ui: &dyn Ui, game_root: &Path) -> Result<PathBuf> {
     let mut entries = Vec::new();
     let mut descriptions = vec![
@@ -70,17 +75,25 @@ pub fn export(ui: &dyn Ui, game_root: &Path) -> Result<PathBuf> {
         entries.push(entry);
     }
 
-    for entry in collect_config_files(game_root) {
+    let config_scan = collect_config_files(game_root);
+    for entry in &config_scan.entries {
         descriptions.push(entry.description.clone());
-        entries.push(entry);
     }
+    let config_note = config_collection_note(&config_scan);
+    if let Some(note) = &config_note {
+        descriptions.push(note.clone());
+    }
+    entries.extend(config_scan.entries);
 
-    if !ui.diagnostics_confirm_export(&descriptions)? {
-        ui.message("已取消导出诊断包")?;
+    if !ui
+        .emit(UiEvent::DiagnosticsConfirmExport(&descriptions))?
+        .bool()?
+    {
+        ui.emit(UiEvent::Message("已取消导出诊断包"))?;
         return Ok(PathBuf::new());
     }
 
-    let info = build_manager_info(game_root);
+    let info = build_manager_info(game_root, config_note.as_deref());
     let archive_path = archive_path()?;
 
     if let Err(e) = write_archive(&archive_path, &info, &entries) {
@@ -93,18 +106,21 @@ pub fn export(ui: &dyn Ui, game_root: &Path) -> Result<PathBuf> {
     Ok(archive_path)
 }
 
-/// 收集 `BepInEx/config` 下的所有 `.cfg`（含插件自己生成的配置）
-fn collect_config_files(game_root: &Path) -> Vec<Entry> {
+fn collect_config_files(game_root: &Path) -> ConfigScan {
     let config_dir = game_root.join("BepInEx/config");
-    let mut found = Vec::new();
+    let mut scan = ConfigScan {
+        entries: Vec::new(),
+        packable: 0,
+        skipped_large: 0,
+    };
 
-    walk_configs(&config_dir, &config_dir, 0, &mut found);
+    walk_configs(&config_dir, &config_dir, 0, &mut scan);
 
-    found
+    scan
 }
 
-fn walk_configs(root: &Path, dir: &Path, depth: usize, found: &mut Vec<Entry>) {
-    if depth > 2 || found.len() >= MAX_CONFIG_FILES {
+fn walk_configs(root: &Path, dir: &Path, depth: usize, scan: &mut ConfigScan) {
+    if depth > 2 {
         return;
     }
 
@@ -113,25 +129,29 @@ fn walk_configs(root: &Path, dir: &Path, depth: usize, found: &mut Vec<Entry>) {
     };
 
     for entry in read_dir.flatten() {
-        if found.len() >= MAX_CONFIG_FILES {
-            return;
-        }
-
         let path = entry.path();
 
         if path.is_dir() {
-            walk_configs(root, &path, depth + 1, found);
+            walk_configs(root, &path, depth + 1, scan);
             continue;
         }
 
         let is_config = path
             .extension()
             .is_some_and(|extension| extension.eq_ignore_ascii_case("cfg"));
-        if !is_config
-            || entry
-                .metadata()
-                .map_or(true, |meta| meta.len() > MAX_CONFIG_BYTES)
+        if !is_config {
+            continue;
+        }
+        if entry
+            .metadata()
+            .map_or(true, |meta| meta.len() > MAX_CONFIG_BYTES)
         {
+            scan.skipped_large += 1;
+            continue;
+        }
+
+        scan.packable += 1;
+        if scan.entries.len() >= MAX_CONFIG_FILES {
             continue;
         }
 
@@ -141,7 +161,7 @@ fn walk_configs(root: &Path, dir: &Path, depth: usize, found: &mut Vec<Entry>) {
             .to_string_lossy()
             .replace('\\', "/");
 
-        found.push(Entry {
+        scan.entries.push(Entry {
             archive_name: format!("game/BepInEx-config/{relative}"),
             description: format!("BepInEx 配置：{relative}"),
             source: path,
@@ -149,7 +169,30 @@ fn walk_configs(root: &Path, dir: &Path, depth: usize, found: &mut Vec<Entry>) {
     }
 }
 
-/// 收集本作的 Unity 日志
+/// 收集被数量上限或单文件上限挡下的说明；没有截断时返回 `None`
+fn config_collection_note(scan: &ConfigScan) -> Option<String> {
+    let truncated = scan.packable.saturating_sub(scan.entries.len());
+
+    if truncated == 0 && scan.skipped_large == 0 {
+        return None;
+    }
+
+    let mut reasons = Vec::new();
+    if truncated > 0 {
+        reasons.push(format!("{truncated} 个超出 {MAX_CONFIG_FILES} 个数量上限"));
+    }
+    if scan.skipped_large > 0 {
+        reasons.push(format!("{} 个超过 1 MB 或无法读取", scan.skipped_large));
+    }
+
+    Some(format!(
+        "BepInEx 配置收集：共 {} 个 .cfg，已打包 {} 个；未打包：{}",
+        scan.packable + scan.skipped_large,
+        scan.entries.len(),
+        reasons.join("，")
+    ))
+}
+
 fn collect_unity_logs() -> Vec<Entry> {
     let Some(profile) = env::var_os("USERPROFILE") else {
         return Vec::new();
@@ -162,10 +205,6 @@ fn collect_unity_logs() -> Vec<Entry> {
     let mut found = Vec::new();
 
     for name in UNITY_LOG_NAMES {
-        if found.len() >= MAX_UNITY_LOGS {
-            break;
-        }
-
         let path = dir.join(name);
         if fs::metadata(&path).map_or(true, |meta| {
             !meta.is_file() || meta.len() > MAX_UNITY_LOG_BYTES
@@ -183,7 +222,7 @@ fn collect_unity_logs() -> Vec<Entry> {
     found
 }
 
-fn build_manager_info(game_root: &Path) -> String {
+fn build_manager_info(game_root: &Path, config_note: Option<&str>) -> String {
     let mut info = String::new();
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -220,6 +259,9 @@ fn build_manager_info(game_root: &Path) -> String {
         join_or_none(&plugins),
         join_or_none(&resourceex),
     );
+    if let Some(note) = config_note {
+        let _ = writeln!(info, "{note}");
+    }
 
     info.push_str("\n已安装插件（BepInEx/plugins）：\n");
     let installed = list_plugins(game_root);
@@ -257,7 +299,6 @@ fn join_or_none(names: &[String]) -> String {
     }
 }
 
-/// 列出 `BepInEx/plugins` 下的所有文件（含第三方插件），保留相对路径
 fn list_plugins(game_root: &Path) -> Vec<String> {
     let root = game_root.join("BepInEx/plugins");
     let mut found = Vec::new();

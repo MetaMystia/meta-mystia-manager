@@ -3,17 +3,18 @@
 //! 后台线程通过 [`GuiUi`] 调用 `Ui` trait，这里把调用转换成窗口事件（`PostMessage`）；
 //! 需要用户拍板的问题则把请求排进队列，由界面线程弹模态框后回传结果。
 
-use crate::config::{OperationMode, UninstallMode};
+use crate::config::{BEPINEX_CORE_DLL, MAX_PARALLEL_DOWNLOADS, OperationMode, UninstallMode};
 use crate::downloader::Downloader;
-use crate::env_check::check_game_directory;
+use crate::env_check::{check_game_directory, check_game_running};
 use crate::error::Result;
 use crate::flow::self_update;
 use crate::installer::bepinex_console_enabled;
 use crate::metrics::report_event;
 use crate::model::VersionInfo;
 use crate::remote_config;
+use crate::rollback;
 use crate::shutdown::run_shutdown;
-use crate::ui::Ui;
+use crate::ui::{JobOutcome, Ui, UiEvent, UiReply};
 use crate::upgrader::Upgrader;
 
 use std::{
@@ -31,10 +32,9 @@ use std::{
 
 use windows_sys::Win32::{Foundation::HWND, UI::WindowsAndMessaging::PostMessageW};
 
-/// 工作线程有事件时发给主窗口的消息
 pub const WM_UI_EVENT: u32 = 0x8000 + 1;
-/// 进度页上的组件槽位数（与三行进度条一一对应）
-pub const JOB_SLOTS: usize = 3;
+/// 进度页上的组件槽位数；下载并发也受这个上限约束
+pub const JOB_SLOTS: usize = MAX_PARALLEL_DOWNLOADS;
 /// 速度采样间隔：到点才更新一次平滑速度，避免每块都抖动
 const SPEED_SAMPLE_INTERVAL: Duration = Duration::from_millis(200);
 /// 单个下载任务的最新进度：槽位、已下载字节、平滑速度（字节/秒）
@@ -55,6 +55,7 @@ pub enum Event {
     Error(String),
     JobFinish {
         message: String,
+        outcome: JobOutcome,
         slot: usize,
     },
     JobPlan(Vec<(usize, String)>),
@@ -64,6 +65,7 @@ pub enum Event {
         total: Option<u64>,
     },
     Log(String),
+    NoUpdate,
     Notes {
         notes: Option<(String, String, String)>,
         version: String,
@@ -86,7 +88,9 @@ pub struct ConfirmRequest {
 #[derive(Clone, Default)]
 pub struct LocalInfo {
     pub bepinex_console: bool,
+    pub bepinex_installed: bool,
     pub bepinex_version: Option<String>,
+    pub detect_failed: bool,
     pub dll_version: Option<String>,
     pub game_root: Option<PathBuf>,
     pub resourceex_version: Option<String>,
@@ -116,12 +120,13 @@ pub struct Choices {
     pub resourceex_version: Option<String>,
     pub show_bepinex_console: bool,
     pub uninstall_full: bool,
+    pub upgrade_bepinex: bool,
     pub upgrade_dll: bool,
 }
 
 pub struct GuiUi {
+    aborted: AtomicBool,
     cancelled: AtomicBool,
-    choices: Mutex<Choices>,
     diagnostics_path: Mutex<Option<String>>,
     download_slots: Mutex<HashMap<usize, usize>>,
     download_speeds: Mutex<HashMap<usize, SpeedTracker>>,
@@ -129,7 +134,7 @@ pub struct GuiUi {
     hwnd: AtomicIsize,
     next_download_id: AtomicUsize,
     paused: AtomicBool,
-    progress: Mutex<Vec<JobProgress>>,
+    progress: Mutex<[Option<JobProgress>; JOB_SLOTS]>,
     progress_posted: AtomicBool,
 }
 
@@ -142,8 +147,8 @@ struct SpeedTracker {
 impl GuiUi {
     pub fn new() -> Self {
         Self {
+            aborted: AtomicBool::new(false),
             cancelled: AtomicBool::new(false),
-            choices: Mutex::new(Choices::default()),
             diagnostics_path: Mutex::new(None),
             download_slots: Mutex::new(HashMap::new()),
             download_speeds: Mutex::new(HashMap::new()),
@@ -151,25 +156,13 @@ impl GuiUi {
             hwnd: AtomicIsize::new(0),
             next_download_id: AtomicUsize::new(1),
             paused: AtomicBool::new(false),
-            progress: Mutex::new(Vec::new()),
+            progress: Mutex::new([None; JOB_SLOTS]),
             progress_posted: AtomicBool::new(false),
         }
     }
 
-    /// 主窗口创建后登记句柄
     pub fn attach(&self, hwnd: HWND) {
         self.hwnd.store(hwnd as isize, Ordering::Relaxed);
-    }
-
-    pub fn set_choices(&self, choices: Choices) {
-        *self.choices.lock().unwrap_or_else(PoisonError::into_inner) = choices;
-    }
-
-    pub fn choices(&self) -> Choices {
-        self.choices
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
     }
 
     pub fn set_cancelled(&self, cancelled: bool) {
@@ -180,12 +173,10 @@ impl GuiUi {
         self.paused.store(paused, Ordering::Relaxed);
     }
 
-    /// 用户是否在下载过程中点了停止
     pub fn was_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Relaxed)
     }
 
-    /// 最近一次导出的诊断包路径
     pub fn diagnostics_path(&self) -> Option<String> {
         self.diagnostics_path
             .lock()
@@ -200,7 +191,17 @@ impl GuiUi {
     /// 取出累计的下载进度；同时复位“有新进度”标记
     pub fn take_progress(&self) -> Vec<JobProgress> {
         self.progress_posted.store(false, Ordering::Relaxed);
-        mem::take(&mut *self.progress.lock().unwrap_or_else(PoisonError::into_inner))
+
+        let mut progress = self.progress.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut pending = Vec::with_capacity(JOB_SLOTS);
+
+        for slot in 0..JOB_SLOTS {
+            if let Some(entry) = progress[slot].take() {
+                pending.push(entry);
+            }
+        }
+
+        pending
     }
 
     fn post(&self) {
@@ -255,24 +256,30 @@ impl GuiUi {
 
         rx.recv().unwrap_or(false)
     }
-
-    fn slot_for(filename: &str) -> usize {
-        let lower = filename.to_ascii_lowercase();
-
-        if lower.contains("bepinex") {
-            0
-        } else if lower.contains("metamystia") {
-            1
-        } else if lower.contains("resourceexample") {
-            2
-        } else {
-            0
-        }
-    }
 }
 
 pub fn prefetch(ui: &GuiUi) -> PrefetchOutcome {
-    let local = detect_local(ui);
+    ui.set_download_aborted(false);
+
+    let mut local = detect_local(ui);
+
+    if let Some(root) = local.game_root.clone() {
+        match check_game_running() {
+            Ok(false) => match rollback::recover_interrupted(&root) {
+                Ok(true) => {
+                    ui.log("检测到上次安装/升级未完成，已自动恢复到操作前的状态");
+                    local = detect_local_at(ui, root);
+                }
+                Ok(false) => {}
+                Err(e) => ui.log(format!("自动恢复上次操作失败：{e}")),
+            },
+            Ok(true) => ui.log("游戏正在运行，暂不自动恢复上次未完成的操作"),
+            Err(e) => ui.log(format!(
+                "检查游戏进程失败，暂不自动恢复上次未完成的操作：{e}"
+            )),
+        }
+    }
+
     let remote = fetch_remote(ui);
 
     PrefetchOutcome { local, remote }
@@ -290,12 +297,22 @@ pub fn detect_local(ui: &GuiUi) -> LocalInfo {
 
 pub fn detect_local_at(ui: &GuiUi, root: PathBuf) -> LocalInfo {
     let upgrader = Upgrader::new(root.clone(), ui);
-    let (dll_version, resourceex_version) =
-        upgrader.get_installed_versions().unwrap_or((None, None));
+    let (dll_version, resourceex_version, detect_failed) = match upgrader.get_installed_versions() {
+        Ok((dll_version, resourceex_version)) => (dll_version, resourceex_version, false),
+        Err(e) => {
+            ui.log(format!("检测已安装组件失败：{e}"));
+            report_event("Env.DetectInstalled.Failed", Some(&format!("{e}")));
+
+            (None, None, true)
+        }
+    };
+    let bepinex_installed = root.join(BEPINEX_CORE_DLL).is_file();
 
     LocalInfo {
         bepinex_console: bepinex_console_enabled(&root),
+        bepinex_installed,
         bepinex_version: upgrader.read_bepinex_version(),
+        detect_failed,
         dll_version,
         game_root: Some(root),
         resourceex_version,
@@ -306,14 +323,18 @@ fn fetch_remote(ui: &GuiUi) -> Result<Prefetched> {
     let downloader = Downloader::new(ui);
     let version_info = downloader.get_version_info()?;
 
-    remote_config::get(ui, &version_info.config_url)?;
+    let config = remote_config::get(ui, &version_info.config_url)?;
 
     let release_notes = downloader
         .get_github_release_notes(version_info.latest_dll().ok())
         .ok()
         .flatten();
-    let manager_update =
-        (version_info.manager != env!("CARGO_PKG_VERSION")).then(|| version_info.manager.clone());
+    let manager_update = config
+        .self_update
+        .as_ref()
+        .and_then(|_| version_info.manager_version())
+        .filter(|version| *version != env!("CARGO_PKG_VERSION"))
+        .map(ToString::to_string);
 
     Ok(Prefetched {
         manager_update,
@@ -338,6 +359,8 @@ pub fn run_self_update(ui: &GuiUi) {
 
 /// 拉取指定版本的发行说明（切换安装版本时用）
 pub fn fetch_release_notes(ui: &GuiUi, version: String) {
+    ui.set_download_aborted(false);
+
     let downloader = Downloader::new(ui);
 
     let notes = downloader.get_version_info().ok().and_then(|_| {
@@ -350,7 +373,13 @@ pub fn fetch_release_notes(ui: &GuiUi, version: String) {
     ui.push_event(Event::Notes { notes, version });
 }
 
-impl Ui for GuiUi {
+#[allow(
+    clippy::missing_const_for_fn,
+    clippy::unnecessary_wraps,
+    clippy::unused_self,
+    reason = "事件方法保持统一签名，便于 emit 分发"
+)]
+impl GuiUi {
     fn display_version(&self, manager_version: Option<&str>) -> Result<()> {
         if let Some(version) = manager_version {
             self.log(format!("管理工具最新版本：v{version}"));
@@ -398,48 +427,6 @@ impl Ui for GuiUi {
     fn install_display_version_info(&self, version_info: &VersionInfo) -> Result<()> {
         self.log(format!("将安装：{version_info}"));
         Ok(())
-    }
-
-    fn install_warn_existing(
-        &self,
-        bepinex_installed: bool,
-        metamystia_installed: bool,
-        resourceex_installed: bool,
-    ) -> Result<()> {
-        let mut items = Vec::new();
-
-        if bepinex_installed {
-            items.push("BepInEx");
-        }
-        if metamystia_installed {
-            items.push("MetaMystia");
-        }
-        if resourceex_installed {
-            items.push("ResourceExample");
-        }
-
-        self.log(format!("检测到已安装：{}", items.join("、")));
-        Ok(())
-    }
-
-    fn install_confirm_overwrite(&self) -> Result<bool> {
-        let confirmed = self.confirm(
-            "覆盖安装？",
-            "检测到已安装的组件，继续会先备份再覆盖同名文件。",
-            "继续安装",
-            "取消",
-        );
-        report_event("UI.Install.Confirm", Some(yes_no(confirmed)));
-
-        Ok(confirmed)
-    }
-
-    fn install_ask_install_resourceex(&self) -> Result<bool> {
-        Ok(self.choices().install_resourceex)
-    }
-
-    fn install_ask_show_bepinex_console(&self) -> Result<bool> {
-        Ok(self.choices().show_bepinex_console)
     }
 
     fn install_downloads_completed(&self) -> Result<()> {
@@ -509,7 +496,8 @@ impl Ui for GuiUi {
     }
 
     fn upgrade_no_update_needed(&self) -> Result<()> {
-        self.log("所有组件都是最新版本");
+        self.log("没有需要执行的组件更新");
+        self.push(Event::NoUpdate);
         Ok(())
     }
 
@@ -591,14 +579,6 @@ impl Ui for GuiUi {
         Ok(())
     }
 
-    fn uninstall_select_mode(&self) -> Result<UninstallMode> {
-        Ok(if self.choices().uninstall_full {
-            UninstallMode::Full
-        } else {
-            UninstallMode::Light
-        })
-    }
-
     fn uninstall_no_files_found(&self) -> Result<()> {
         self.log("没有找到需要删除的 Mod 文件");
         Ok(())
@@ -612,13 +592,16 @@ impl Ui for GuiUi {
         Ok(())
     }
 
-    fn uninstall_confirm_deletion(&self) -> Result<bool> {
-        let confirmed = self.confirm(
-            "确认卸载？",
-            "删除后无法恢复，游戏本体文件不会被修改。",
-            "开始卸载",
-            "取消",
-        );
+    fn uninstall_confirm_deletion(&self, mode: UninstallMode) -> Result<bool> {
+        let content = match mode {
+            UninstallMode::Full => {
+                "删除 BepInEx、其他 Mod 与配置文件；游戏本体文件保持不变。删除后无法恢复。"
+            }
+            UninstallMode::Light => {
+                "只删除 MetaMystia 相关文件；BepInEx 与其他 Mod 保持不变。删除后无法恢复。"
+            }
+        };
+        let confirmed = self.confirm("确认卸载？", content, "开始卸载", "取消");
         report_event("UI.Uninstall.Confirm.Choice", Some(yes_no(confirmed)));
 
         Ok(confirmed)
@@ -712,13 +695,13 @@ impl Ui for GuiUi {
         Ok(())
     }
 
-    fn download_start(&self, filename: &str, total: Option<u64>) -> Result<usize> {
+    fn download_start(&self, slot: usize, filename: &str, total: Option<u64>) -> Result<usize> {
         let id = self.next_download_id.fetch_add(1, Ordering::Relaxed);
-        let slot = Self::slot_for(filename);
         self.download_slots
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(id, slot);
+
         self.push(Event::JobStart {
             name: filename.to_string(),
             slot,
@@ -733,13 +716,15 @@ impl Ui for GuiUi {
         reason = "采样区间内的字节数远小于 f64 的 2^53 精度上限"
     )]
     fn download_update(&self, id: usize, downloaded: u64) -> Result<()> {
-        let slot = self
+        let Some(slot) = self
             .download_slots
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(&id)
             .copied()
-            .unwrap_or(0);
+        else {
+            return Ok(());
+        };
 
         let speed = {
             let mut tracks = self
@@ -777,10 +762,10 @@ impl Ui for GuiUi {
             }
         };
 
-        self.progress
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push((slot, downloaded, speed));
+        if slot < JOB_SLOTS {
+            self.progress.lock().unwrap_or_else(PoisonError::into_inner)[slot] =
+                Some((slot, downloaded, speed));
+        }
 
         if !self.progress_posted.swap(true, Ordering::Relaxed) {
             self.post();
@@ -789,19 +774,11 @@ impl Ui for GuiUi {
         Ok(())
     }
 
-    fn download_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Relaxed)
-    }
-
-    fn download_paused(&self) -> bool {
-        self.paused.load(Ordering::Relaxed)
-    }
-
     fn download_plan(&self, names: &[&str]) -> Result<()> {
-        let items = names
+        let items: Vec<(usize, String)> = names
             .iter()
-            .map(|name| {
-                let slot = Self::slot_for(name);
+            .enumerate()
+            .map(|(slot, name)| {
                 let label = name.trim_start_matches("下载 ").trim_end_matches(" DLL");
 
                 (slot, label.to_string())
@@ -812,13 +789,12 @@ impl Ui for GuiUi {
         Ok(())
     }
 
-    fn download_finish(&self, id: usize, message: &str) -> Result<()> {
+    fn download_finish(&self, id: usize, message: &str, outcome: JobOutcome) -> Result<()> {
         let slot = self
             .download_slots
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .get(&id)
-            .copied()
+            .remove(&id)
             .unwrap_or(0);
         self.download_speeds
             .lock()
@@ -826,6 +802,7 @@ impl Ui for GuiUi {
             .remove(&id);
         self.push(Event::JobFinish {
             message: message.to_string(),
+            outcome,
             slot,
         });
         Ok(())
@@ -890,10 +867,6 @@ impl Ui for GuiUi {
         Ok(())
     }
 
-    fn download_ask_continue_after_release_notes(&self) -> Result<bool> {
-        Ok(true)
-    }
-
     fn download_switch_to_fallback(&self, reason: &str) -> Result<()> {
         self.log(format!("切换备用源：{reason}"));
         Ok(())
@@ -922,9 +895,13 @@ impl Ui for GuiUi {
         err: &str,
     ) -> Result<()> {
         self.log(format!(
-            "{op_desc}失败：{err}；{delay_secs} 秒后重试（{attempt}/{attempts}）"
+            "{op_desc} 失败：{err}；{delay_secs} 秒后重试（{attempt}/{attempts}）"
         ));
         Ok(())
+    }
+
+    fn network_retry_failed(&self, op_desc: &str, attempts: usize, err: &str) {
+        self.log(format!("{op_desc} 失败：{err}；已尝试 {attempts} 次"));
     }
 
     fn network_rate_limited(&self, secs: u64) -> Result<()> {
@@ -947,42 +924,28 @@ impl Ui for GuiUi {
         Ok(())
     }
 
-    fn select_version_ask_select(&self, component: &str) -> Result<bool> {
-        let choices = self.choices();
-
-        Ok(if component.contains("ResourceEx") {
-            choices.resourceex_version.is_some()
-        } else {
-            choices.dll_version.is_some()
-        })
-    }
-
-    fn select_version_from_list(&self, component: &str, versions: &[String]) -> Result<usize> {
-        let choices = self.choices();
-        let selected = if component.contains("ResourceEx") {
-            choices.resourceex_version.as_deref()
-        } else {
-            choices.dll_version.as_deref()
-        };
-
-        Ok(selected
-            .and_then(|version| {
-                versions.iter().position(|item| {
-                    VersionInfo::normalize_version(item) == VersionInfo::normalize_version(version)
-                })
-            })
-            .unwrap_or(0))
-    }
-
     fn sso_ask_open_browser(&self) -> Result<bool> {
-        self.stage(Stage::Login);
-        report_event("UI.Sso.OpenBrowser.Confirm", Some("yes"));
+        let confirmed = self.confirm(
+            "需要登录",
+            "安装/更新需要登录东方夜雀食堂小助手账号，接下来会在浏览器中完成授权。",
+            "打开浏览器",
+            "取消",
+        );
+        report_event("UI.Sso.OpenBrowser.Confirm", Some(yes_no(confirmed)));
 
-        Ok(true)
+        if confirmed {
+            self.stage(Stage::Login);
+        }
+
+        Ok(confirmed)
     }
 
     fn diagnostics_confirm_export(&self, entries: &[String]) -> Result<bool> {
-        let confirmed = self.confirm("导出诊断包？", &entries.join("\r\n"), "开始导出", "取消");
+        let content = format!(
+            "将收集以下内容，不会修改游戏文件：\r\n{}",
+            entries.join("\r\n")
+        );
+        let confirmed = self.confirm("确认导出诊断包？", &content, "开始导出", "取消");
         report_event("UI.Diagnostics.ConfirmExport", Some(yes_no(confirmed)));
 
         if !confirmed {
@@ -1001,7 +964,262 @@ impl Ui for GuiUi {
     }
 }
 
-/// 埋点用的“是/否”
+impl Ui for GuiUi {
+    #[allow(clippy::too_many_lines, reason = "全部界面事件的唯一分发点")]
+    fn emit(&self, event: UiEvent<'_>) -> Result<UiReply> {
+        match event {
+            UiEvent::DisplayVersion(version) => {
+                self.display_version(version)?;
+            }
+            UiEvent::GameRunningWarning => {
+                self.display_game_running_warning()?;
+            }
+            UiEvent::Message(text) => {
+                self.message(text)?;
+            }
+            UiEvent::Warn(text) => {
+                self.warn(text)?;
+            }
+            UiEvent::SteamFound { app_id, name, path } => {
+                self.path_display_steam_found(app_id, name, path)?;
+            }
+            UiEvent::InstallStep(step, description) => {
+                self.install_display_step(step, description)?;
+            }
+            UiEvent::InstallVersionInfo(info) => {
+                self.install_display_version_info(info)?;
+            }
+            UiEvent::InstallDownloadsCompleted => {
+                self.install_downloads_completed()?;
+            }
+            UiEvent::InstallStartCleanup => {
+                self.install_start_cleanup()?;
+            }
+            UiEvent::InstallCleanupResult(success, failed) => {
+                self.install_cleanup_result(success, failed)?;
+            }
+            UiEvent::InstallFinished(show_console) => {
+                self.install_finished(show_console)?;
+            }
+            UiEvent::UpgradeDeleted(path) => {
+                self.upgrade_deleted(path)?;
+            }
+            UiEvent::UpgradeDeleteFailed(path, err) => {
+                self.upgrade_delete_failed(path, err)?;
+            }
+            UiEvent::UpgradeCheckingInstalledVersion => {
+                self.upgrade_checking_installed_version()?;
+            }
+            UiEvent::UpgradeDetectedResourceex => {
+                self.upgrade_detected_resourceex()?;
+            }
+            UiEvent::UpgradeBepinexVersions(current, latest) => {
+                self.upgrade_display_current_and_latest_bepinex(current, latest)?;
+            }
+            UiEvent::UpgradeDllVersions(current, latest) => {
+                self.upgrade_display_current_and_latest_dll(current, latest)?;
+            }
+            UiEvent::UpgradeResourceexVersions(current, latest) => {
+                self.upgrade_display_current_and_latest_resourceex(current, latest)?;
+            }
+            UiEvent::UpgradeNoUpdateNeeded => {
+                self.upgrade_no_update_needed()?;
+            }
+            UiEvent::UpgradeBepinexNeedsUpgrade(installed) => {
+                self.upgrade_bepinex_needs_upgrade(installed)?;
+            }
+            UiEvent::UpgradeBepinexAlreadyLatest => {
+                self.upgrade_bepinex_already_latest()?;
+            }
+            UiEvent::UpgradeDllDetected(current, new) => {
+                self.upgrade_detected_new_dll(current, new)?;
+            }
+            UiEvent::UpgradeDllAlreadyLatest => {
+                self.upgrade_dll_already_latest()?;
+            }
+            UiEvent::UpgradeResourceexNeedsUpgrade(installed) => {
+                self.upgrade_resourceex_needs_upgrade(installed)?;
+            }
+            UiEvent::UpgradeDownloadingBepinex => {
+                self.upgrade_downloading_bepinex()?;
+            }
+            UiEvent::UpgradeDownloadingDll => {
+                self.upgrade_downloading_dll()?;
+            }
+            UiEvent::UpgradeDownloadingResourceex => {
+                self.upgrade_downloading_resourceex()?;
+            }
+            UiEvent::UpgradeInstallingBepinex => {
+                self.upgrade_installing_bepinex()?;
+            }
+            UiEvent::UpgradeInstallingDll => {
+                self.upgrade_installing_dll()?;
+            }
+            UiEvent::UpgradeInstallingResourceex => {
+                self.upgrade_installing_resourceex()?;
+            }
+            UiEvent::UpgradeInstallSuccess(path) => {
+                self.upgrade_install_success(path)?;
+            }
+            UiEvent::UpgradeCleanupStart => {
+                self.upgrade_cleanup_start()?;
+            }
+            UiEvent::UpgradeDone => {
+                self.upgrade_done()?;
+            }
+            UiEvent::UninstallNoFilesFound => {
+                self.uninstall_no_files_found()?;
+            }
+            UiEvent::UninstallTargetFiles(files) => {
+                self.uninstall_display_target_files(files)?;
+            }
+            UiEvent::UninstallConfirmDeletion(mode) => {
+                return Ok(UiReply::Bool(self.uninstall_confirm_deletion(mode)?));
+            }
+            UiEvent::UninstallFilesInUse => {
+                self.uninstall_files_in_use_warning()?;
+            }
+            UiEvent::UninstallWaitBeforeRetry(delay, attempt, attempts) => {
+                self.uninstall_wait_before_retry(delay, attempt, attempts)?;
+            }
+            UiEvent::UninstallAskElevate => {
+                return Ok(UiReply::Bool(self.uninstall_ask_elevate_permission()?));
+            }
+            UiEvent::UninstallRestartingElevated => {
+                self.uninstall_restarting_elevated()?;
+            }
+            UiEvent::UninstallAskRetryFailures => {
+                return Ok(UiReply::Bool(self.uninstall_ask_retry_failures()?));
+            }
+            UiEvent::UninstallRetryingFailedItems => {
+                self.uninstall_retrying_failed_items()?;
+            }
+            UiEvent::DeletionStart => {
+                self.deletion_start()?;
+            }
+            UiEvent::DeletionProgress(current, total, path) => {
+                self.deletion_display_progress(current, total, path)?;
+            }
+            UiEvent::DeletionSuccess(path) => {
+                self.deletion_display_success(path)?;
+            }
+            UiEvent::DeletionFailure(path, error) => {
+                self.deletion_display_failure(path, error)?;
+            }
+            UiEvent::DeletionSkipped(path) => {
+                self.deletion_display_skipped(path)?;
+            }
+            UiEvent::DeletionSummary(success, failed, skipped) => {
+                self.deletion_display_summary(success, failed, skipped)?;
+            }
+            UiEvent::DownloadPlan(names) => {
+                self.download_plan(names)?;
+            }
+            UiEvent::DownloadStart(slot, filename, total) => {
+                return Ok(UiReply::DownloadId(
+                    self.download_start(slot, filename, total)?,
+                ));
+            }
+            UiEvent::DownloadUpdate(id, downloaded) => {
+                self.download_update(id, downloaded)?;
+            }
+            UiEvent::DownloadFinish(id, message, outcome) => {
+                self.download_finish(id, message, outcome)?;
+            }
+            UiEvent::DownloadVersionInfoStart => {
+                self.download_version_info_start()?;
+            }
+            UiEvent::DownloadVersionInfoFailed(err) => {
+                self.download_version_info_failed(err)?;
+            }
+            UiEvent::DownloadVersionInfoSuccess => {
+                self.download_version_info_success()?;
+            }
+            UiEvent::DownloadVersionInfoParseFailed(err, snippet) => {
+                self.download_version_info_parse_failed(err, snippet)?;
+            }
+            UiEvent::DownloadShareCodeStart => {
+                self.download_share_code_start()?;
+            }
+            UiEvent::DownloadShareCodeFailed(err) => {
+                self.download_share_code_failed(err)?;
+            }
+            UiEvent::DownloadShareCodeSuccess => {
+                self.download_share_code_success()?;
+            }
+            UiEvent::DownloadAttemptGithubDll => {
+                self.download_attempt_github_dll()?;
+            }
+            UiEvent::DownloadFoundGithubAsset(name) => {
+                self.download_found_github_asset(name)?;
+            }
+            UiEvent::DownloadGithubDllNotFound => {
+                self.download_github_dll_not_found()?;
+            }
+            UiEvent::DownloadReleaseNotes(tag, name, body) => {
+                self.download_display_github_release_notes(tag, name, body)?;
+            }
+            UiEvent::DownloadSwitchToFallback(reason) => {
+                self.download_switch_to_fallback(reason)?;
+            }
+            UiEvent::DownloadTryFallbackMetamystia => {
+                self.download_try_fallback_metamystia()?;
+            }
+            UiEvent::DownloadBepinexAttemptPrimary => {
+                self.download_bepinex_attempt_primary()?;
+            }
+            UiEvent::DownloadBepinexPrimaryFailed(err) => {
+                self.download_bepinex_primary_failed(err)?;
+            }
+            UiEvent::NetworkRetrying(op_desc, delay, attempt, attempts, err) => {
+                self.network_retrying(op_desc, delay, attempt, attempts, err)?;
+            }
+            UiEvent::NetworkRetryFailed(op_desc, attempts, err) => {
+                self.network_retry_failed(op_desc, attempts, err);
+            }
+            UiEvent::NetworkRateLimited(secs) => {
+                self.network_rate_limited(secs)?;
+            }
+            UiEvent::ManagerUpdateStarting => {
+                self.manager_update_starting()?;
+            }
+            UiEvent::ManagerUpdateFailed(err) => {
+                self.manager_update_failed(err)?;
+            }
+            UiEvent::ManagerPromptManualUpdate => {
+                self.manager_prompt_manual_update()?;
+            }
+            UiEvent::SsoAskOpenBrowser => {
+                return Ok(UiReply::Bool(self.sso_ask_open_browser()?));
+            }
+            UiEvent::DiagnosticsConfirmExport(entries) => {
+                return Ok(UiReply::Bool(self.diagnostics_confirm_export(entries)?));
+            }
+            UiEvent::DiagnosticsExported(path) => {
+                self.diagnostics_exported(path)?;
+            }
+        }
+
+        Ok(UiReply::Ack)
+    }
+
+    fn download_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Relaxed)
+    }
+
+    fn download_aborted(&self) -> bool {
+        self.aborted.load(Ordering::Relaxed)
+    }
+
+    fn set_download_aborted(&self, aborted: bool) {
+        self.aborted.store(aborted, Ordering::Relaxed);
+    }
+
+    fn download_paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
+    }
+}
+
 pub const fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
 }

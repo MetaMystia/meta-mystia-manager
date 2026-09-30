@@ -32,7 +32,6 @@ struct SessionUser {
     username: String,
 }
 
-/// 用 `ticket` 与 `code_verifier` 向下载服务换取下载会话
 pub fn create_session(
     agent: &ureq::Agent,
     session_url: &str,

@@ -26,9 +26,7 @@ impl DirGuard {
 
         if let Some((_, counter)) = guard.iter().find(|(p, _)| p == &path) {
             let counter = counter.clone();
-            if let Ok(mut count) = counter.lock() {
-                *count += 1;
-            }
+            *counter.lock().unwrap_or_else(PoisonError::into_inner) += 1;
             return Self { counter, path };
         }
 
@@ -50,10 +48,11 @@ impl DirGuard {
 
 impl Drop for DirGuard {
     fn drop(&mut self) {
-        let should_delete = self.counter.lock().map_or(true, |mut count| {
-            *count -= 1;
+        let should_delete = {
+            let mut count = self.counter.lock().unwrap_or_else(PoisonError::into_inner);
+            *count = count.saturating_sub(1);
             *count == 0
-        });
+        };
 
         if should_delete && self.path.exists() {
             let _ = fs::remove_dir_all(&self.path);
