@@ -74,7 +74,13 @@ def read_sections(data, pe_offset):
         )
         sections.append((virtual_address, virtual_size, raw_pointer, raw_size, name))
 
-    return is_pe32_plus, directory, sections
+    image_base = struct.unpack_from(
+        "<Q" if is_pe32_plus else "<I",
+        data,
+        optional + (24 if is_pe32_plus else 28),
+    )[0]
+
+    return is_pe32_plus, image_base, directory, sections
 
 
 def rva_to_offset(sections, rva):
@@ -96,6 +102,7 @@ def read_imports(data, table_offset, is_pe32_plus, rva_to_off):
     imports = []
     step = 8 if is_pe32_plus else 4
     ordinal_flag = IMAGE_ORDINAL_FLAG64 if is_pe32_plus else IMAGE_ORDINAL_FLAG32
+    address_mask = 0x7FFF_FFFF_FFFF_FFFF if is_pe32_plus else 0x7FFFFFFF
 
     index = 0
     while True:
@@ -126,9 +133,73 @@ def read_imports(data, table_offset, is_pe32_plus, rva_to_off):
             if value & ordinal_flag:
                 imports.append((dll, f"#{value & 0xFFFF}"))
             else:
-                import_offset = rva_to_off(value & 0x7FFFFFFF)
+                import_offset = rva_to_off(value & address_mask)
                 if import_offset is not None:
                     # IMAGE_IMPORT_BY_NAME: 2 字节 hint + 名字
+                    imports.append((dll, read_c_string(data, import_offset + 2)))
+
+            entry += 1
+
+    return imports
+
+
+def read_delay_imports(data, table_offset, is_pe32_plus, image_base, rva_to_off):
+    """读取延迟导入表；IMAGE_DELAYLOAD_DESCRIPTOR 是 32 字节，不是普通导入描述符的 20 字节"""
+    imports = []
+    step = 8 if is_pe32_plus else 4
+    ordinal_flag = IMAGE_ORDINAL_FLAG64 if is_pe32_plus else IMAGE_ORDINAL_FLAG32
+    index = 0
+
+    while True:
+        descriptor = table_offset + index * 32
+        (
+            attributes,
+            name_field,
+            _module_handle,
+            _iat,
+            name_table_field,
+            _bound_iat,
+            _unload_iat,
+            _timestamp,
+        ) = struct.unpack_from("<IIIIIIII", data, descriptor)
+        index += 1
+
+        if attributes == 0 and name_field == 0 and name_table_field == 0:
+            break
+
+        rva_based = (attributes & 1) != 0
+
+        def to_rva(value):
+            if rva_based or value == 0:
+                return value
+            if value < image_base:
+                return None
+            return value - image_base
+
+        name_rva = to_rva(name_field)
+        name_offset = rva_to_off(name_rva) if name_rva is not None else None
+        dll = read_c_string(data, name_offset) if name_offset is not None else "?"
+
+        thunk_rva = to_rva(name_table_field)
+        thunk_offset = rva_to_off(thunk_rva) if thunk_rva is not None else None
+        if thunk_offset is None:
+            continue
+
+        entry = 0
+        while True:
+            value = struct.unpack_from(
+                "<Q" if is_pe32_plus else "<I", data, thunk_offset + entry * step
+            )[0]
+            if value == 0:
+                break
+
+            if value & ordinal_flag:
+                imports.append((dll, f"#{value & 0xFFFF}"))
+            else:
+                # 延迟导入的 thunk 直接是 RVA 或 VA；不要按普通导入那样去掉最高位
+                import_rva = to_rva(value)
+                import_offset = rva_to_off(import_rva) if import_rva is not None else None
+                if import_offset is not None:
                     imports.append((dll, read_c_string(data, import_offset + 2)))
 
             entry += 1
@@ -142,7 +213,7 @@ def collect_imports(path):
     if data[pe_offset : pe_offset + 4] != b"PE\0\0":
         raise SystemExit(f"{path}: 不是有效的 PE 文件")
 
-    is_pe32_plus, directory, sections = read_sections(data, pe_offset)
+    is_pe32_plus, image_base, directory, sections = read_sections(data, pe_offset)
     imports = []
 
     for index, label in (
@@ -157,9 +228,20 @@ def collect_imports(path):
         if offset is None:
             continue
 
-        for dll, function in read_imports(
-            data, offset, is_pe32_plus, lambda rva: rva_to_offset(sections, rva)
-        ):
+        if index == DIRECTORY_IMPORT:
+            entries = read_imports(
+                data, offset, is_pe32_plus, lambda rva: rva_to_offset(sections, rva)
+            )
+        else:
+            entries = read_delay_imports(
+                data,
+                offset,
+                is_pe32_plus,
+                image_base,
+                lambda rva: rva_to_offset(sections, rva),
+            )
+
+        for dll, function in entries:
             imports.append((dll, function, label))
 
     return imports

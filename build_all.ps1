@@ -27,9 +27,10 @@ $BinName = "meta-mystia-manager"
 $Triple = "x86_64-pc-windows-msvc"
 $OutputDir = Join-Path $PSScriptRoot "target" "output"
 
-# Detect host OS and choose the build tool
 # Both paths target MSVC; on non-Windows hosts cargo-xwin provides the SDK/CRT.
-if ($IsWindows) {
+# `$IsWindows` only exists on PowerShell 6+; Windows PowerShell 5.1 needs the platform check.
+$isWindowsHost = [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
+if ($isWindowsHost) {
   $BuildTool = "cargo"      # native MSVC toolchain
 }
 else {
