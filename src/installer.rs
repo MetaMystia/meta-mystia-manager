@@ -1,12 +1,9 @@
-use crate::config::{
-    BEPINEX_VERSION_FILE, METAMYSTIA_PLUGIN_GLOB, RESOURCEEX_ZIP_GLOB, UninstallMode,
-};
+use crate::config::{METAMYSTIA_PLUGIN_GLOB, RESOURCEEX_ZIP_GLOB, UninstallMode};
 use crate::downloader::{DownloadJob, Downloader};
 use crate::error::{ManagerError, Result};
 use crate::extractor::Extractor;
 use crate::file_ops::{
     atomic_rename_or_copy, count_results, execute_deletion, glob_matches, glob_matches_by_filename,
-    write_bepinex_version_marker,
 };
 use crate::metrics::report_event;
 use crate::model::VersionInfo;
@@ -333,7 +330,6 @@ impl<'a> Installer<'a> {
         // 干跑模式下不会真正写文件，无需备份
         if !fs_dry_run() {
             rollback.plan_zip(&bepinex_path, exclusions)?;
-            rollback.plan(&self.game_root.join(BEPINEX_VERSION_FILE))?;
             rollback.plan(&bepinex_cfg_path)?;
             rollback.plan(&dll_destination)?;
             if let Some(destination) = &resourceex_destination {
@@ -344,8 +340,6 @@ impl<'a> Installer<'a> {
         let deploy = || -> Result<()> {
             // 安装 BepInEx（如果之前存在则保留 plugins 目录）
             Extractor::deploy_bepinex(&bepinex_path, &self.game_root, exclusions)?;
-
-            write_bepinex_version_marker(&self.game_root, &version_info)?;
 
             // 确保配置目录存在
             let bepinex_config_dir = self.game_root.join("BepInEx").join("config");

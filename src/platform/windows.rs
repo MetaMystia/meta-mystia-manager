@@ -9,10 +9,11 @@ use crate::win32::dword_len;
 use std::{
     env, fs, io,
     mem::{size_of, zeroed},
-    os::windows::process::CommandExt,
-    path::PathBuf,
+    os::windows::{ffi::OsStrExt, process::CommandExt},
+    path::{Path, PathBuf},
     process::{self, Command},
     ptr::{null, null_mut},
+    slice,
 };
 use windows_sys::Win32::{
     Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, NTSTATUS},
@@ -25,6 +26,7 @@ use windows_sys::Win32::{
         },
         GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
     },
+    Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW},
     System::{
         Diagnostics::ToolHelp::{
             CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
@@ -295,6 +297,82 @@ pub fn open_url(url: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 文件版本资源
+// ---------------------------------------------------------------------------
+
+/// 读取 PE 文件版本资源中的 `ProductVersion` 字符串
+pub fn file_product_version(path: &Path) -> Option<String> {
+    let path_wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    let mut handle = 0u32;
+    let size = unsafe { GetFileVersionInfoSizeW(path_wide.as_ptr(), &raw mut handle) };
+    if size == 0 {
+        return None;
+    }
+
+    let mut block = vec![0u8; size as usize];
+    let loaded =
+        unsafe { GetFileVersionInfoW(path_wide.as_ptr(), 0, size, block.as_mut_ptr().cast()) };
+    if loaded == 0 {
+        return None;
+    }
+
+    let translation_query: Vec<u16> = "\\VarFileInfo\\Translation\0".encode_utf16().collect();
+    let mut translations = null_mut();
+    let mut translations_len = 0u32;
+    let has_translations = unsafe {
+        VerQueryValueW(
+            block.as_ptr().cast(),
+            translation_query.as_ptr(),
+            &raw mut translations,
+            &raw mut translations_len,
+        )
+    };
+    if has_translations == 0 {
+        return None;
+    }
+
+    let translations = unsafe {
+        slice::from_raw_parts(
+            translations.cast::<u16>(),
+            translations_len as usize / size_of::<u16>(),
+        )
+    };
+
+    for language in translations.as_chunks::<2>().0 {
+        let product_query: Vec<u16> = format!(
+            "\\StringFileInfo\\{:04x}{:04x}\\ProductVersion\0",
+            language[0], language[1]
+        )
+        .encode_utf16()
+        .collect();
+
+        let mut value = null_mut();
+        let mut value_len = 0u32;
+        let has_value = unsafe {
+            VerQueryValueW(
+                block.as_ptr().cast(),
+                product_query.as_ptr(),
+                &raw mut value,
+                &raw mut value_len,
+            )
+        };
+        if has_value == 0 || value.is_null() {
+            continue;
+        }
+
+        let value = unsafe { slice::from_raw_parts(value.cast::<u16>(), value_len as usize) };
+        let end = value.iter().position(|&c| c == 0).unwrap_or(value.len());
+        let text = String::from_utf16_lossy(&value[..end]);
+
+        if !text.is_empty() {
+            return Some(text);
+        }
+    }
+
+    None
 }
 
 // ---------------------------------------------------------------------------

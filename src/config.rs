@@ -6,7 +6,7 @@ pub const GAME_PROCESS_NAME: &str = "Touhou Mystia Izakaya.exe";
 #[cfg(windows)]
 pub const GAME_STEAM_APP_ID: u32 = 1_584_090;
 pub const TEMP_DIR_NAME: &str = concat!(".", env!("CARGO_PKG_NAME"), "-temp");
-pub const BEPINEX_VERSION_FILE: &str = "BepInEx/.mmm-bepinex-version";
+pub const BEPINEX_CORE_DLL: &str = "BepInEx/core/BepInEx.Core.dll";
 pub const METAMYSTIA_PLUGIN_GLOB: &str = "BepInEx/plugins/MetaMystia-v*.dll";
 pub const RESOURCEEX_ZIP_GLOB: &str = "ResourceEx/ResourceExample-v*.zip";
 pub const METAMYSTIA_PLUGIN_OLD_GLOB: &str = "BepInEx/plugins/MetaMystia-v*.dll.old*";

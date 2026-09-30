@@ -158,6 +158,11 @@ pub fn fs_dry_run() -> bool {
     dev_mode() && flag(ENV_SIM_FS, false)
 }
 
+/// 开发模拟下没有真实的 PE 版本资源
+pub fn file_product_version(_path: &Path) -> Option<String> {
+    None
+}
+
 /// 检查游戏进程是否正在运行（开发模式下由开关决定）
 #[allow(clippy::unnecessary_wraps, reason = "与 Windows 实现保持相同签名")]
 pub fn is_game_running() -> Result<bool> {

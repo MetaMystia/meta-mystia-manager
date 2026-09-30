@@ -1,13 +1,13 @@
 //! 诊断包：把管理工具信息、最近操作、BepInEx 与 Unity 日志打包成 zip，
 //! 生成在管理工具所在目录，只保存在本机，便于用户报障时提供。
 
-use crate::config::BEPINEX_VERSION_FILE;
 use crate::error::{ManagerError, Result};
 use crate::file_ops::glob_matches_by_filename;
 use crate::metrics::{get_user_id, recent_events};
 use crate::model::VersionInfo;
 use crate::preflight::format_bytes;
 use crate::ui::Ui;
+use crate::upgrader::read_bepinex_version;
 
 use std::{
     env,
@@ -200,15 +200,10 @@ fn build_manager_info(game_root: &Path) -> String {
         env::var("PROCESSOR_IDENTIFIER").unwrap_or_else(|_| "未知".to_string()),
     );
     let _ = writeln!(info, "游戏目录：{}", game_root.display());
-
-    let version_marker = game_root.join(BEPINEX_VERSION_FILE);
     let _ = writeln!(
         info,
         "BepInEx 构建号：{}",
-        fs::read_to_string(&version_marker).map_or_else(
-            |_| "未安装或缺失".to_string(),
-            |value| value.trim().to_string()
-        )
+        read_bepinex_version(game_root).unwrap_or_else(|| "未安装或无法识别".to_string())
     );
 
     let plugins = file_names(

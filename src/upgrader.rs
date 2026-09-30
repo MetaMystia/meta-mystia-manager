@@ -1,5 +1,5 @@
 use crate::config::{
-    BEPINEX_VERSION_FILE, METAMYSTIA_PLUGIN_GLOB, METAMYSTIA_PLUGIN_OLD_GLOB, RESOURCEEX_ZIP_GLOB,
+    BEPINEX_CORE_DLL, METAMYSTIA_PLUGIN_GLOB, METAMYSTIA_PLUGIN_OLD_GLOB, RESOURCEEX_ZIP_GLOB,
     RESOURCEEX_ZIP_OLD_GLOB,
 };
 use crate::downloader::{DownloadJob, Downloader};
@@ -7,12 +7,11 @@ use crate::error::{ManagerError, Result};
 use crate::extractor::Extractor;
 use crate::file_ops::{
     atomic_rename_or_copy, backup_paths_with_index, glob_matches_by_filename, remove_glob_files,
-    write_bepinex_version_marker,
 };
 use crate::installer::update_bepinex_config;
 use crate::metrics::report_event;
 use crate::model::VersionInfo;
-use crate::platform::fs_dry_run;
+use crate::platform::{file_product_version, fs_dry_run};
 use crate::preflight::check;
 use crate::rollback::Rollback;
 use crate::temp_dir::create_temp_dir_with_guard;
@@ -43,6 +42,20 @@ fn is_old_backup(filename: &str) -> bool {
     Path::new(filename)
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("old"))
+}
+
+/// 读取已安装的 BepInEx 构建号（`BepInEx.Core.dll` 产品版本里的 `be.<n>`）
+pub fn read_bepinex_version(game_root: &Path) -> Option<String> {
+    file_product_version(&game_root.join(BEPINEX_CORE_DLL))
+        .and_then(|product_version| parse_bepinex_build(&product_version))
+}
+
+/// 从产品版本字符串里提取 `be.<构建号>`
+fn parse_bepinex_build(product_version: &str) -> Option<String> {
+    let (_, build) = product_version.split_once("be.")?;
+    let digits: String = build.chars().take_while(char::is_ascii_digit).collect();
+
+    (!digits.is_empty()).then_some(digits)
 }
 
 impl Ord for ParsedVersion {
@@ -315,22 +328,13 @@ impl<'a> Upgrader<'a> {
         Ok((dll, res))
     }
 
-    /// 已安装的 BepInEx 版本
+    /// 已安装的 BepInEx 构建号
     pub fn read_bepinex_version(&self) -> Option<String> {
-        let version_file = self.game_root.join(BEPINEX_VERSION_FILE);
-        fs::read_to_string(&version_file)
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
+        read_bepinex_version(&self.game_root)
     }
 
     fn bepinex_installed(&self) -> bool {
-        self.game_root
-            .join("BepInEx")
-            .join("core")
-            .join("BepInEx.Core.dll")
-            .is_file()
-            || self.read_bepinex_version().is_some()
+        self.game_root.join(BEPINEX_CORE_DLL).is_file()
     }
 
     fn bepinex_config_path(&self) -> PathBuf {
@@ -536,7 +540,6 @@ impl<'a> Upgrader<'a> {
 
             if let Some(path) = &temp_bepinex_path {
                 rollback.plan_zip(path, &["BepInEx/config", "BepInEx/plugins"])?;
-                rollback.plan(&self.game_root.join(BEPINEX_VERSION_FILE))?;
             }
             if let Some((_, filename)) = &temp_dll_path {
                 rollback.plan(
@@ -568,8 +571,6 @@ impl<'a> Upgrader<'a> {
                     &self.game_root,
                     &["BepInEx/config", "BepInEx/plugins"],
                 )?;
-
-                write_bepinex_version_marker(&self.game_root, &version_info)?;
 
                 self.ui
                     .upgrade_install_success(&self.game_root.join("BepInEx"))?;

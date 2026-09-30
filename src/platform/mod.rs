@@ -20,8 +20,8 @@ use windows as imp;
 use dev as imp;
 
 pub use imp::{
-    elevate_and_restart, fs_dry_run, init, is_elevated, is_game_running, open_url, random_bytes,
-    self_update_enabled, sha256,
+    elevate_and_restart, file_product_version, fs_dry_run, init, is_elevated, is_game_running,
+    open_url, random_bytes, self_update_enabled, sha256,
 };
 
 // 只有 Windows 需要抑制子进程的控制台窗口
