@@ -1,20 +1,9 @@
-use std::time::Duration;
+//! 跨模块共享的全局约定：程序标识与目标游戏的目录、文件命名。
+//!
+//! 各模块自己的策略与阈值（端点、并发、超时、重试、上限等）定义在该模块内。
 
-pub const GAME_EXECUTABLE: &str = "Touhou Mystia Izakaya.exe";
-#[cfg(windows)]
-pub const GAME_PROCESS_NAME: &str = "Touhou Mystia Izakaya.exe";
-#[cfg(windows)]
-pub const GAME_STEAM_APP_ID: u32 = 1_584_090;
-pub const TEMP_DIR_NAME: &str = concat!(".", env!("CARGO_PKG_NAME"), "-temp");
-/// 进度槽位与下载并发上限
-pub const MAX_PARALLEL_DOWNLOADS: usize = 3;
-pub const BEPINEX_CORE_DLL: &str = "BepInEx/core/BepInEx.Core.dll";
-pub const METAMYSTIA_PLUGIN_GLOB: &str = "BepInEx/plugins/MetaMystia-v*.dll";
-pub const RESOURCEEX_ZIP_GLOB: &str = "ResourceEx/ResourceExample-v*.zip";
-pub const METAMYSTIA_PLUGIN_OLD_GLOB: &str = "BepInEx/plugins/MetaMystia-v*.dll.old*";
-pub const RESOURCEEX_ZIP_OLD_GLOB: &str = "ResourceEx/ResourceExample-v*.zip.old*";
-pub const METAMYSTIA_PLUGIN_PART_GLOB: &str = "BepInEx/plugins/MetaMystia-v*.dll.part";
-pub const RESOURCEEX_ZIP_PART_GLOB: &str = "ResourceEx/ResourceExample-v*.zip.part";
+// 应用标识
+/// 所有 HTTP 请求使用的 User-Agent。
 pub const USER_AGENT: &str = concat!(
     env!("CARGO_PKG_NAME"),
     "/",
@@ -22,109 +11,36 @@ pub const USER_AGENT: &str = concat!(
     " (+https://github.com/MetaMystia/meta-mystia-manager)"
 );
 
-#[derive(Clone, Copy, Eq, PartialEq)]
-pub enum OperationMode {
-    Diagnostics,
-    Install,
-    Uninstall,
-    Upgrade,
-}
+// 游戏路径约定
+/// BepInEx 核心 DLL 相对游戏根目录的路径。
+pub const BEPINEX_CORE_DLL: &str = "BepInEx/core/BepInEx.Core.dll";
 
-#[derive(Clone, Copy, Debug)]
-pub enum UninstallMode {
-    Full,
-    Light,
-}
+/// 游戏主程序文件名。
+pub const GAME_EXECUTABLE: &str = "Touhou Mystia Izakaya.exe";
 
-impl UninstallMode {
-    const LIGHT_TARGETS: &'static [(&'static str, bool)] = &[
-        (METAMYSTIA_PLUGIN_GLOB, false),
-        (METAMYSTIA_PLUGIN_OLD_GLOB, false),
-        (METAMYSTIA_PLUGIN_PART_GLOB, false),
-        (RESOURCEEX_ZIP_GLOB, false),
-        (RESOURCEEX_ZIP_OLD_GLOB, false),
-        (RESOURCEEX_ZIP_PART_GLOB, false),
-    ];
+/// 游戏进程名。
+pub const GAME_PROCESS_NAME: &str = GAME_EXECUTABLE;
 
-    const FULL_TARGETS: &'static [(&'static str, bool)] = &[
-        ("BepInEx", true),
-        (".doorstop_version", false),
-        ("changelog.txt", false),
-        ("doorstop_config.ini", false),
-        ("dotnet", true),
-        ("MinHook.x64.dll", false),
-        ("winhttp.dll", false),
-        ("ResourceEx", true),
-    ];
+/// 游戏的 Steam App ID。
+pub const GAME_STEAM_APP_ID: u32 = 1_584_090;
 
-    pub const fn description(&self) -> &str {
-        match self {
-            Self::Full => "移除所有和 Mod 有关的文件（还原为原版游戏）",
-            Self::Light => "仅移除 MetaMystia 相关文件（保留 BepInEx 框架和其他 Mod 相关文件）",
-        }
-    }
+/// MetaMystia 插件 DLL 的匹配模式。
+pub const METAMYSTIA_PLUGIN_GLOB: &str = "BepInEx/plugins/MetaMystia-v*.dll";
 
-    /// 获取卸载目标列表（模式字符串，是否为目录）
-    pub const fn targets(self) -> &'static [(&'static str, bool)] {
-        match self {
-            Self::Full => Self::FULL_TARGETS,
-            Self::Light => Self::LIGHT_TARGETS,
-        }
-    }
-}
+/// MetaMystia 插件改名备份（`.old*`）的匹配模式。
+pub const METAMYSTIA_PLUGIN_OLD_GLOB: &str = "BepInEx/plugins/MetaMystia-v*.dll.old*";
 
-pub struct RetryConfig {
-    /// 最大重试次数（至少 1）
-    pub attempts: usize,
-    /// 基础延迟（秒）
-    pub base_delay_secs: u64,
-    /// 最大延迟（秒）上限
-    pub max_delay_secs: u64,
-    /// 指数倍数（例如 2.0 表示每次延迟翻倍）
-    pub multiplier: f64,
-}
+/// MetaMystia 插件未完成下载（`.part`）的匹配模式。
+pub const METAMYSTIA_PLUGIN_PART_GLOB: &str = "BepInEx/plugins/MetaMystia-v*.dll.part";
 
-impl RetryConfig {
-    pub const fn network() -> Self {
-        Self {
-            attempts: 3,
-            base_delay_secs: 5,
-            max_delay_secs: 15,
-            multiplier: 2.0,
-        }
-    }
+/// ResourceExample ZIP 的匹配模式。
+pub const RESOURCEEX_ZIP_GLOB: &str = "ResourceEx/ResourceExample-v*.zip";
 
-    pub const fn github_release_note() -> Self {
-        Self {
-            attempts: 2,
-            base_delay_secs: 5,
-            max_delay_secs: 5,
-            multiplier: 1.0,
-        }
-    }
+/// ResourceExample ZIP 改名备份（`.old*`）的匹配模式。
+pub const RESOURCEEX_ZIP_OLD_GLOB: &str = "ResourceEx/ResourceExample-v*.zip.old*";
 
-    pub const fn uninstall() -> Self {
-        Self {
-            attempts: 3,
-            base_delay_secs: 10,
-            max_delay_secs: 60,
-            multiplier: 2.0,
-        }
-    }
+/// ResourceExample ZIP 未完成下载（`.part`）的匹配模式。
+pub const RESOURCEEX_ZIP_PART_GLOB: &str = "ResourceEx/ResourceExample-v*.zip.part";
 
-    /// 第 `attempt` 次重试（从 0 开始）前的等待时长
-    ///
-    /// 即 `base_delay_secs * multiplier^attempt`，并以 `max_delay_secs` 为上限。
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "退避时长最多几十秒，f64 足以精确表示"
-    )]
-    pub fn delay(&self, attempt: usize) -> Duration {
-        let exponent = i32::try_from(attempt).unwrap_or(i32::MAX);
-        let secs = (self.base_delay_secs as f64 * self.multiplier.powi(exponent))
-            .min(self.max_delay_secs as f64)
-            .ceil();
-
-        Duration::from_secs_f64(secs)
-    }
-}
+/// 管理工具在游戏目录下使用的临时目录名。
+pub const TEMP_DIR_NAME: &str = concat!(".", env!("CARGO_PKG_NAME"), "-temp");

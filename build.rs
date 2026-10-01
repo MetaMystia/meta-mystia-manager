@@ -1,3 +1,5 @@
+// 资源嵌入与 Win7 兼容层只在 Windows 宿主启用，其余宿主构建脚本为空实现。
+#[cfg(windows)]
 use std::{env, fs, path::Path};
 
 fn main() {
@@ -73,6 +75,7 @@ fn main() {
     }
 }
 
+#[cfg(windows)]
 fn manifest_version(version: &str) -> String {
     if version.matches('.').count() == 2 {
         format!("{version}.0")

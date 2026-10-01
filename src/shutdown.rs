@@ -1,8 +1,12 @@
-use crate::metrics::{report_event, shutdown};
+//! 进程退出清理与控制台事件处理。
+
+use crate::platform::set_console_ctrl_handler;
+use crate::telemetry::{report_event, shutdown};
 
 use std::{
     mem::take,
     panic::{AssertUnwindSafe, catch_unwind},
+    process,
     sync::{
         Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
@@ -12,13 +16,44 @@ use std::{
     time::{Duration, Instant},
 };
 
+type CleanupCallback = Box<dyn Fn() + Send + 'static>;
+
+// 退出超时
+/// 退出时等待清理与上报线程的总时长上限。
 pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
-type CleanupCallback = Box<dyn Fn() + Send + 'static>;
+// 控制台事件类型
+const CTRL_BREAK_EVENT: u32 = 1;
+const CTRL_C_EVENT: u32 = 0;
+const CTRL_CLOSE_EVENT: u32 = 2;
+const CTRL_LOGOFF_EVENT: u32 = 5;
+const CTRL_SHUTDOWN_EVENT: u32 = 6;
+
+/// 注册控制台退出事件处理器，让中断/关机事件走统一清理流程。
+pub fn install_console_handler() {
+    unsafe extern "system" fn handler(ctrl_type: u32) -> i32 {
+        if matches!(
+            ctrl_type,
+            CTRL_C_EVENT
+                | CTRL_BREAK_EVENT
+                | CTRL_CLOSE_EVENT
+                | CTRL_LOGOFF_EVENT
+                | CTRL_SHUTDOWN_EVENT
+        ) {
+            run_shutdown();
+            process::exit(0);
+        } else {
+            0
+        }
+    }
+
+    set_console_ctrl_handler(handler);
+}
+
 static CALLBACKS: OnceLock<Mutex<Vec<Option<CleanupCallback>>>> = OnceLock::new();
 static SHUTDOWN_STARTED: AtomicBool = AtomicBool::new(false);
 
-/// 注册清理回调；程序正常退出或收到中断事件时执行
+/// 注册清理回调；程序正常退出或收到中断事件时执行。
 pub fn register_cleanup<F>(f: F) -> usize
 where
     F: Fn() + Send + 'static,
@@ -34,7 +69,7 @@ where
     guard.len() - 1
 }
 
-/// 并发执行所有清理回调，总耗时不超过 [`SHUTDOWN_TIMEOUT`]；重复调用只生效一次
+/// 并发执行所有清理回调，总耗时不超过 [`SHUTDOWN_TIMEOUT`]；重复调用只生效一次。
 pub fn run_shutdown() {
     if SHUTDOWN_STARTED.swap(true, Ordering::SeqCst) {
         return;

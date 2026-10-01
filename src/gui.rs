@@ -1,4 +1,4 @@
-//! 主界面：安装向导 + Win32 原生控件 + comctl32 v6（清单见 app.manifest）
+//! 主界面：安装向导 + Win32 原生控件 + comctl32 v6（清单见 app.manifest）。
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
@@ -7,20 +7,22 @@
     unsafe_op_in_unsafe_fn
 )]
 
-use crate::config::{GAME_EXECUTABLE, OperationMode};
-use crate::env_check::{check_game_running, check_game_running_now};
-use crate::error::ManagerError;
-use crate::flow::{Input, run as run_flow};
-use crate::gui_ui::{
-    self, Choices, Event, GuiUi, JOB_SLOTS, LocalInfo, PrefetchOutcome, Prefetched, Stage,
-    WM_UI_EVENT,
+mod bridge;
+
+use self::bridge::{
+    Choices, Event, GuiUi, JOB_SLOTS, LocalInfo, PrefetchOutcome, RemoteInfo, Stage, WM_UI_EVENT,
 };
-use crate::metrics::{get_user_id, report_event};
-use crate::model::VersionInfo;
-use crate::platform::{acquire_single_instance, init};
-use crate::shutdown::run_shutdown;
+use crate::config::GAME_EXECUTABLE;
+use crate::env::{check_game_running, check_game_running_cached};
+use crate::error::ManagerError;
+use crate::mode::OperationMode;
+use crate::ops::flow::{Input, run as run_flow};
+use crate::platform::acquire_single_instance;
+use crate::platform::{MAIN_WINDOW_CLASS, focus_existing_manager_window, set_main_window};
+use crate::shutdown::{install_console_handler, run_shutdown};
+use crate::telemetry::{report_event, user_id};
 use crate::ui::{JobOutcome, Ui};
-use crate::window::{self, MAIN_WINDOW_CLASS, set_main_window};
+use crate::version::VersionInfo;
 
 use std::{
     any::Any,
@@ -78,32 +80,38 @@ use windows_sys::Win32::{
     },
 };
 
-const WINDOW_WIDTH: i32 = 620;
-const WINDOW_HEIGHT: i32 = 380;
-const STATUS_BAR_HEIGHT: i32 = 24;
+// 窗口布局
 const MARGIN: i32 = 20;
 const NAV_BUTTON_HEIGHT: i32 = 28;
+const STATUS_BAR_HEIGHT: i32 = 24;
+const WINDOW_HEIGHT: i32 = 380;
+const WINDOW_WIDTH: i32 = 620;
 
+// 控件样式与颜色
+const ERROR_COLOR: u32 = 0x0030_30C0;
+const LB_ADDSTRING: u32 = 0x0000_0180;
+const LB_GETCURSEL: u32 = 0x0000_0188;
+const LB_SETCURSEL: u32 = 0x0000_0186;
+const LBN_DBLCLK: u32 = 2;
+const LBS_NOTIFY: u32 = 0x0000_0001;
+const PBM_DEFAULT_BAR_COLOR: usize = 0xFF00_0000;
+const PBM_SETBARCOLOR: u32 = 0x0409;
 const SS_CENTERIMAGE: u32 = 0x0000_0200;
+const SS_ENDELLIPSIS: u32 = 0x0000_4000;
+const SS_ETCHEDHORZ: u32 = 0x0000_0010;
 const SS_ICON: u32 = 0x0000_0003;
 const SS_NOTIFY: u32 = 0x0000_0100;
-const LBS_NOTIFY: u32 = 0x0000_0001;
-const LB_ADDSTRING: u32 = 0x0000_0180;
-const LB_SETCURSEL: u32 = 0x0000_0186;
-const LB_GETCURSEL: u32 = 0x0000_0188;
-const SS_ENDELLIPSIS: u32 = 0x0000_4000;
 const SS_RIGHT_CENTER: u32 = 0x0000_0002 | SS_CENTERIMAGE;
-const SS_ETCHEDHORZ: u32 = 0x0000_0010;
-const PBM_SETBARCOLOR: u32 = 0x0409;
-const PBM_DEFAULT_BAR_COLOR: usize = 0xFF00_0000;
-const ERROR_COLOR: u32 = 0x0030_30C0;
 
+// 网络状态
+const NET_FAILED: usize = 2;
 const NET_LOADING: usize = 0;
 const NET_OK: usize = 1;
-const NET_FAILED: usize = 2;
 
+// 窗口样式
 const WINDOW_STYLE: u32 = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
 
+// 向导页面
 const KIND_OPERATION: usize = 0;
 const KIND_DIRECTORY: usize = 1;
 const KIND_COMPONENTS: usize = 2;
@@ -136,16 +144,18 @@ const fn kind_name(kind: usize, op: usize, upgrade: bool) -> &'static str {
     }
 }
 
-const OP_INSTALL: usize = 0;
-const OP_UNINSTALL: usize = 1;
+// 操作类型
 const OP_DIAGNOSTICS: usize = 2;
+const OP_INSTALL: usize = 0;
 const OP_SELF_UPDATE: usize = 3;
+const OP_UNINSTALL: usize = 1;
 
+// 控件 ID
 const ID_BACK: usize = 1000;
 const ID_NEXT: usize = 1001;
 const ID_CANCEL: usize = 1002;
 
-/// 确认框按钮 ID：避开 `IsDialogMessageW` 为 Enter/Esc 生成的 `IDOK`/`IDCANCEL`(1/2)
+/// 确认框按钮 ID：避开 `IsDialogMessageW` 为 Enter/Esc 生成的 `IDOK`/`IDCANCEL`（1/2）。
 const ID_DIALOG_CONFIRM: usize = 100;
 const ID_DIALOG_CANCEL: usize = 101;
 
@@ -165,7 +175,6 @@ const ID_NET_RETRY: usize = 1071;
 const ID_GAME_RUNNING_HINT: usize = 1072;
 const ID_RECHECK_GAME: usize = 1073;
 const ID_VERSION_LIST: usize = 3;
-const LBN_DBLCLK: u32 = 2;
 
 const ID_BROWSE: usize = 1010;
 const ID_PATH_EDIT: usize = 1013;
@@ -191,7 +200,8 @@ const ID_FINISH_NOTE: usize = 1062;
 const ID_OPEN_DIAGNOSTICS: usize = 1065;
 const ID_NOTES_TITLE: usize = 1066;
 const ID_NOTES_EDIT: usize = 1067;
-/// 进度条文件名列的参考文本（只用于测量列宽）
+// 文案与展示
+/// 进度条文件名列的参考文本（只用于测量列宽）。
 const JOB_NAME_SAMPLES: [&str; 3] = [
     "BepInEx-Unity.IL2CPP-win-x64-0.0.0-be.000+0000000.zip",
     "MetaMystia-v00.00.00.dll",
@@ -199,18 +209,18 @@ const JOB_NAME_SAMPLES: [&str; 3] = [
 ];
 const NOTES_PLACEHOLDER: &str = "正在获取发行说明…";
 const PRODUCT_NAME: &str = "MetaMystia Mod 管理工具";
-const SITE_URL: &str = "https://meta-mystia.izakaya.cc";
 const SITE_LABEL: &str = "官方网站：";
+const SITE_URL: &str = "https://meta-mystia.izakaya.cc";
 
 fn window_caption() -> String {
     format!("{PRODUCT_NAME} v{}", env!("CARGO_PKG_VERSION"))
 }
 
-static DPI: AtomicI32 = AtomicI32::new(96);
-
+// 界面状态
 static CONFIRM_CLASS_REGISTERED: AtomicBool = AtomicBool::new(false);
-static VERSION_CLASS_REGISTERED: AtomicBool = AtomicBool::new(false);
+static DPI: AtomicI32 = AtomicI32::new(96);
 static MODAL_DEPTH: AtomicUsize = AtomicUsize::new(0);
+static VERSION_CLASS_REGISTERED: AtomicBool = AtomicBool::new(false);
 
 struct ModalScope {
     owner: HWND,
@@ -249,7 +259,7 @@ fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain([0]).collect()
 }
 
-/// 确认框正文高度：按实际宽度折算自动换行后的行数，避免多行内容被截断
+/// 确认框正文高度：按实际宽度折算自动换行后的行数，避免多行内容被截断。
 unsafe fn confirm_content_height(font: HFONT, content: &str, dialog_width: i32) -> i32 {
     let available = (dialog_width - s(MARGIN * 2) - s(16)).max(1);
     let lines: i32 = content
@@ -260,7 +270,7 @@ unsafe fn confirm_content_height(font: HFONT, content: &str, dialog_width: i32) 
     s(18) * lines.max(1) + s(8)
 }
 
-/// 后台线程 panic 时给界面一个可读的错误，而不是让流程无声卡住
+/// 后台线程 panic 时给界面一个可读的错误，而不是让流程无声卡住。
 fn panic_message(payload: &(dyn Any + Send)) -> String {
     payload
         .downcast_ref::<&str>()
@@ -284,7 +294,7 @@ fn open_url(url: &str) -> bool {
     result as isize > 32
 }
 
-/// 载入 build.rs 嵌入的应用图标（资源 ID 1）并按目标尺寸缩放；无资源时返回空句柄
+/// 载入 build.rs 嵌入的应用图标（资源 ID 1）并按目标尺寸缩放；无资源时返回空句柄。
 fn load_app_icon(instance: HINSTANCE, cx: i32, cy: i32) -> HICON {
     let resource = ptr::without_provenance::<u16>(1);
     let mut icon: HICON = ptr::null_mut();
@@ -392,7 +402,7 @@ struct State {
     pending_manager_update: Option<String>,
     phase: usize,
     plan: Vec<usize>,
-    prefetched: Option<Prefetched>,
+    prefetched: Option<RemoteInfo>,
     resourceex_versions: Vec<String>,
     secondary: Vec<HWND>,
     stage: Option<Stage>,
@@ -406,6 +416,7 @@ struct State {
     width: i32,
 }
 
+/// 程序入口：初始化窗口、控件与消息循环。
 #[allow(
     clippy::too_many_lines,
     reason = "界面入口：初始化、创建窗口与消息循环集中在一处"
@@ -413,12 +424,11 @@ struct State {
 pub fn run() {
     unsafe {
         if !acquire_single_instance() {
-            window::focus_existing_manager_window();
+            focus_existing_manager_window();
             return;
         }
 
-        init();
-
+        install_console_handler();
         panic::set_hook(Box::new(|info| {
             let text = format!("{info}");
             MessageBoxW(
@@ -548,7 +558,7 @@ fn start_prefetch(ui: Arc<GuiUi>) {
     thread::spawn(move || {
         let task_ui = Arc::clone(&ui);
         let outcome =
-            panic::catch_unwind(panic::AssertUnwindSafe(move || gui_ui::prefetch(&task_ui)))
+            panic::catch_unwind(panic::AssertUnwindSafe(move || bridge::prefetch(&task_ui)))
                 .unwrap_or_else(|payload| PrefetchOutcome {
                     local: LocalInfo::default(),
                     remote: Err(ManagerError::Other(format!(
@@ -866,7 +876,7 @@ unsafe extern "system" fn confirm_dialog_proc(
     }
 }
 
-/// 模态确认框，返回 true 表示用户选择了确认按钮
+/// 模态确认框，返回 `true` 表示用户选择了确认按钮。
 #[allow(
     clippy::too_many_arguments,
     reason = "确认框文案/按钮/字体都由调用方给，拆参数反而绕"
@@ -894,7 +904,7 @@ unsafe fn confirm_dialog(
 }
 
 /// 只有一个“继续”按钮的提示框：用于必须完成的升级。
-/// 返回 true 表示点了继续；关掉窗口（X）返回 false，由调用方决定退出。
+/// 返回 `true` 表示点了继续；关掉窗口（X）返回 `false`，由调用方决定退出。
 #[allow(clippy::too_many_arguments, reason = "和确认框共用一套参数")]
 unsafe fn notice_dialog(
     owner: HWND,
@@ -1262,7 +1272,7 @@ unsafe fn build_children(hwnd: HWND) -> Box<State> {
     let margin = s(MARGIN);
     let gap = s(8);
     let logo_size = s(48);
-    let uid_label = get_user_id();
+    let uid_label = user_id();
     let uid_width = text_width(font, &uid_label) + s(12);
     let link_width = text_width(font, SITE_URL);
     let label_width = text_width(font, SITE_LABEL);
@@ -2350,7 +2360,7 @@ unsafe fn finish_values(state: &State) -> [String; 3] {
         |index: usize| SendMessageW(state.component_checks[index], BM_GETCHECK, 0, 0) == 1;
     let prefetched = state.prefetched.as_ref();
     let latest =
-        |pick: fn(&Prefetched) -> String| prefetched.map_or_else(|| "未知".to_string(), pick);
+        |pick: fn(&RemoteInfo) -> String| prefetched.map_or_else(|| "未知".to_string(), pick);
 
     [
         if checked(0) {
@@ -2597,7 +2607,7 @@ unsafe fn show_page(state: &mut State, step: usize) {
     }
 
     if kind == KIND_DIRECTORY {
-        let running = check_game_running().unwrap_or(false);
+        let running = check_game_running_cached().unwrap_or(false);
         let has_path = !state.choices.game_root.as_os_str().is_empty();
         ShowWindow(state.game_hint, if running { SW_SHOW } else { SW_HIDE });
         ShowWindow(state.game_recheck, if running { SW_SHOW } else { SW_HIDE });
@@ -2643,7 +2653,7 @@ unsafe fn set_notes_title(state: &State, version: &str) {
     );
 }
 
-/// 去掉 GitHub Release 里渲染不了的 Markdown 标记，文字内容原样保留
+/// 去掉 GitHub Release 里渲染不了的 Markdown 标记，文字内容原样保留。
 fn render_notes(body: &str) -> String {
     let mut lines: Vec<String> = Vec::new();
 
@@ -2697,7 +2707,7 @@ fn render_notes(body: &str) -> String {
     text.trim().to_string()
 }
 
-/// 去掉行内的 `**`、`__`、反引号，并把 Markdown 链接转成“文字（链接）”
+/// 去掉行内的 `**`、`__`、反引号，并把 Markdown 链接转成“文字（链接）”。
 fn strip_inline_markdown(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -3146,7 +3156,7 @@ fn bepinex_version_label(installed: bool, version: Option<&str>, latest: &str) -
     }
 }
 
-/// 本次操作预计要下载的组件；实际清单以下载开始时的登记为准
+/// 本次操作预计要下载的组件；实际清单以下载开始时的登记为准。
 unsafe fn expected_downloads(state: &State) -> Vec<(usize, &'static str)> {
     if state.op != OP_INSTALL {
         return Vec::new();
@@ -3200,7 +3210,7 @@ unsafe fn expected_downloads(state: &State) -> Vec<(usize, &'static str)> {
     items
 }
 
-/// 本次是否会更换 MetaMystia DLL；用于决定是否展示发行说明
+/// 本次是否会更换 MetaMystia DLL；用于决定是否展示发行说明。
 unsafe fn dll_will_change(state: &State) -> bool {
     if state.op != OP_INSTALL {
         return false;
@@ -3227,7 +3237,7 @@ unsafe fn dll_will_change(state: &State) -> bool {
     }
 }
 
-/// 提示并进入管理工具自更新；版本升级不可跳过，但允许关闭窗口退出
+/// 提示并进入管理工具自更新；版本升级不可跳过，但允许关闭窗口退出。
 unsafe fn prompt_manager_update(hwnd: HWND, state: &mut State, latest: &str) {
     let current = env!("CARGO_PKG_VERSION");
     let go = notice_dialog(
@@ -3484,7 +3494,7 @@ unsafe fn apply_local(state: &mut State, local: &LocalInfo) {
     state.local.clone_from(local);
 }
 
-/// 切到执行页并下载新版本；替换脚本会等本进程退出后覆盖并启动新版本
+/// 切到执行页并下载新版本；替换脚本会等本进程退出后覆盖并启动新版本。
 unsafe fn start_self_update(hwnd: HWND, state: &mut State) {
     state.op_before_self_update = state.op;
     state.op = OP_SELF_UPDATE;
@@ -3517,7 +3527,7 @@ unsafe fn start_self_update(hwnd: HWND, state: &mut State) {
     thread::spawn(move || {
         let task_ui = Arc::clone(&ui);
         let result = panic::catch_unwind(panic::AssertUnwindSafe(move || {
-            gui_ui::run_self_update(task_ui.as_ref());
+            bridge::run_self_update(task_ui.as_ref());
         }));
 
         if let Err(payload) = result {
@@ -3577,11 +3587,11 @@ unsafe fn start_operation(hwnd: HWND, state: &mut State) {
     if install {
         report_event(
             "UI.Install.ResourceEx.Choice",
-            Some(gui_ui::yes_no(choices.install_resourceex)),
+            Some(bridge::yes_no(choices.install_resourceex)),
         );
         report_event(
             "UI.Install.BepInExConsole.Choice",
-            Some(gui_ui::yes_no(choices.show_bepinex_console)),
+            Some(bridge::yes_no(choices.show_bepinex_console)),
         );
     }
 
@@ -3671,7 +3681,7 @@ unsafe fn on_command(hwnd: HWND, state: &mut State, id: usize) {
             let _modal = ModalScope::enter(hwnd);
 
             if let Some(path) = pick_folder(hwnd, &state.choices.game_root) {
-                let local = gui_ui::detect_local_at(&state.ui, path);
+                let local = bridge::detect_local_at(&state.ui, path);
                 apply_local(state, &local);
                 show_page(state, state.step);
             }
@@ -3842,7 +3852,7 @@ unsafe fn on_command(hwnd: HWND, state: &mut State, id: usize) {
             update_net_ui(state);
         }
         ID_RECHECK_GAME => {
-            if !check_game_running_now().unwrap_or(false) {
+            if !check_game_running().unwrap_or(false) {
                 ShowWindow(state.game_hint, SW_HIDE);
                 ShowWindow(state.game_recheck, SW_HIDE);
                 let has_path = !state.choices.game_root.as_os_str().is_empty();
@@ -3911,7 +3921,7 @@ unsafe fn on_command(hwnd: HWND, state: &mut State, id: usize) {
                         let task_ui = Arc::clone(&ui);
                         let task_version = version.clone();
                         let result = panic::catch_unwind(panic::AssertUnwindSafe(move || {
-                            gui_ui::fetch_release_notes(task_ui.as_ref(), task_version);
+                            bridge::fetch_release_notes(task_ui.as_ref(), task_version);
                         }));
 
                         if result.is_err() {

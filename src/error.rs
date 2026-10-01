@@ -1,19 +1,26 @@
-use crate::metrics::report_event;
+//! 统一错误类型与服务端错误文案。
+
+use crate::telemetry::report_event;
 
 use std::io;
 use thiserror::Error;
 
+/// 管理工具的统一错误类型。
 #[derive(Debug, Error)]
 pub enum ManagerError {
+    /// 解压失败，附原因
     #[error("解压失败：{0}")]
     ExtractFailed(String),
 
+    /// 目标文件被占用，附路径
     #[error("文件被占用：{0}")]
     FileInUse(String),
 
+    /// 未在游戏根目录下运行
     #[error("未在游戏根目录下运行")]
     GameNotFound,
 
+    /// 游戏正在运行，操作被拒绝
     #[error("游戏正在运行，请关闭游戏后重试")]
     GameRunning,
 
@@ -21,25 +28,32 @@ pub enum ManagerError {
     #[error("{0}")]
     HttpError(String),
 
+    /// 版本信息缺失或无法解析
     #[error("版本信息无效或解析失败")]
     InvalidVersionInfo,
 
+    /// IO 错误，附底层错误信息
     #[error("IO 错误：{0}")]
     Io(#[source] io::Error),
 
+    /// 网络错误，附原因
     #[error("网络错误：{0}")]
     NetworkError(String),
 
+    /// 未归类的其他错误
     #[error("其他错误：{0}")]
     Other(String),
 
+    /// 权限不足，附路径或原因
     #[error("权限不足：{0}")]
     PermissionDenied(String),
 
+    /// 枚举系统进程失败，附原因
     #[error("进程列表错误：{0}")]
     #[cfg(windows)]
     ProcessListError(String),
 
+    /// 服务端限流；第二个字段是建议等待秒数
     #[error("{0}")]
     RateLimited(String, Option<u64>),
 
@@ -47,21 +61,25 @@ pub enum ManagerError {
     #[error("{0}")]
     ServiceError(String),
 
+    /// 下载速度低于阈值被中止
     #[error("下载速度过慢：{0}")]
     SlowDownload(String),
 
+    /// SSO 登录失败，附原因
     #[error("{0}")]
     SsoLoginFailed(String),
 
+    /// 卸载过程未完成，附原因
     #[error("卸载未完成：{0}")]
     UninstallIncomplete(String),
 
+    /// 用户主动取消了操作
     #[error("用户取消了操作")]
     UserCancelled,
 }
 
 impl ManagerError {
-    /// 网络/IO 类问题可通过重试恢复；服务端语义错误、用户取消等重试无意义
+    /// 网络/IO 类问题可通过重试恢复；服务端语义错误、用户取消等重试无意义。
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::NetworkError(_) | Self::RateLimited(..) => true,
@@ -80,6 +98,7 @@ impl ManagerError {
     }
 }
 
+/// 由服务端错误码与 HTTP 状态构造用户可读错误。
 pub fn service_error(scope: &str, code: &str, status: u16) -> ManagerError {
     ManagerError::ServiceError(format!(
         "{scope}失败：{}",
@@ -87,6 +106,7 @@ pub fn service_error(scope: &str, code: &str, status: u16) -> ManagerError {
     ))
 }
 
+/// 把服务端错误码翻译成用户可读文案。
 pub fn service_error_reason(code: &str, status: u16) -> String {
     let code = code.trim();
     let http_status = code
@@ -127,7 +147,7 @@ pub fn service_error_reason(code: &str, status: u16) -> String {
 }
 
 impl From<ureq::Error> for ManagerError {
-    /// 传输层错误；4xx/5xx 由 `net::check_response_status` 处理，不会走到这里
+    /// 传输层错误；4xx/5xx 由 `net::check_response_status` 处理，不会走到这里。
     fn from(err: ureq::Error) -> Self {
         Self::NetworkError(format!("请求失败：{err}"))
     }
@@ -141,4 +161,5 @@ impl From<io::Error> for ManagerError {
     }
 }
 
+/// 统一 `Result` 别名。
 pub type Result<T> = std::result::Result<T, ManagerError>;

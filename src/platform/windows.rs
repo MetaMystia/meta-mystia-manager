@@ -2,16 +2,14 @@
 
 use crate::config::GAME_PROCESS_NAME;
 use crate::error::{ManagerError, Result};
-use crate::metrics::report_event;
-use crate::shutdown::run_shutdown;
-use crate::win32::dword_len;
+use crate::telemetry::report_event;
 
 use std::{
     env, io,
     mem::{size_of, zeroed},
     os::windows::{ffi::OsStrExt, process::CommandExt},
     path::Path,
-    process::{self, Command},
+    process::Command,
     ptr::{null, null_mut},
     slice, thread,
     time::Duration,
@@ -29,7 +27,9 @@ use windows_sys::Win32::{
         },
         GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
     },
-    Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW},
+    Storage::FileSystem::{
+        GetDiskFreeSpaceExW, GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
+    },
     System::{
         Diagnostics::ToolHelp::{
             CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
@@ -40,32 +40,53 @@ use windows_sys::Win32::{
     UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
 };
 
-const STATUS_SUCCESS: NTSTATUS = 0;
+mod machine_id;
+mod proxy;
+mod registry;
+mod window;
+
+pub use machine_id::machine_id;
+pub use proxy::{read_system_proxy_settings, resolve_pac_proxy};
+pub use window::{
+    MAIN_WINDOW_CLASS, focus_existing_manager_window, focus_manager_window, set_main_window,
+};
+
+// CNG 加密
 const SHA256_LENGTH: usize = 32;
+const STATUS_SUCCESS: NTSTATUS = 0;
 
-/// `ShellExecuteW` 返回值不大于该值即视为失败（`0`、`SE_ERR_*`）
-const SHELL_EXECUTE_ERROR_MAX: isize = 32;
-
-/// 单实例互斥体名称（每个登录会话一个）
-const INSTANCE_MUTEX_NAME: &str = "Local\\meta-mystia-manager";
-/// 提权重启时传给新进程的参数
-const ELEVATED_RESTART_ARG: &str = "--elevated-restart";
-/// 提权续任进程等待旧进程释放互斥体的次数与间隔（合计约 10 秒）
-const INSTANCE_WAIT_ATTEMPTS: usize = 40;
-const INSTANCE_RETRY_INTERVAL: Duration = Duration::from_millis(250);
-
-const CTRL_C_EVENT: u32 = 0;
-const CTRL_BREAK_EVENT: u32 = 1;
-const CTRL_CLOSE_EVENT: u32 = 2;
-const CTRL_LOGOFF_EVENT: u32 = 5;
-const CTRL_SHUTDOWN_EVENT: u32 = 6;
-
-/// 初始化平台能力：注册控制台事件钩子，让中断/关机事件走统一清理流程
-pub fn init() {
-    install_shutdown_handler();
+// 调用方缓冲区远小于 4 GiB，超出 u32 时按上限截断，由 API 自行报错。
+fn dword_len(bytes: usize) -> u32 {
+    u32::try_from(bytes).unwrap_or(u32::MAX)
 }
 
-/// 申请单实例互斥体；已有实例在运行时返回 false（调用方把已有窗口带到前台）。
+/// 返回指定路径所在磁盘的剩余空间（字节）。
+pub fn free_space(path: &Path) -> Option<u64> {
+    let wide = path
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<u16>>();
+    let mut free: u64 = 0;
+
+    let ok = unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &raw mut free, null_mut(), null_mut()) };
+
+    (ok != 0).then_some(free)
+}
+
+// 提权与单实例
+/// 提权重启时传给新进程的参数。
+const ELEVATED_RESTART_ARG: &str = "--elevated-restart";
+/// 单实例互斥体名称（每个登录会话一个）。
+const INSTANCE_MUTEX_NAME: &str = "Local\\meta-mystia-manager";
+/// 提权续任进程等待旧进程释放互斥体的间隔。
+const INSTANCE_RETRY_INTERVAL: Duration = Duration::from_millis(250);
+/// 提权续任进程等待旧进程释放互斥体的次数（合计约 10 秒）。
+const INSTANCE_WAIT_ATTEMPTS: usize = 40;
+/// `ShellExecuteW` 返回值不大于该值即视为失败（`0`、`SE_ERR_*`）。
+const MAX_SHELL_EXECUTE_ERROR: isize = 32;
+
+/// 申请单实例互斥体；已有实例在运行时返回 `false`（调用方把已有窗口带到前台）。
 /// 提权重启的续任进程会等旧进程退出、释放互斥体后再继续。
 pub fn acquire_single_instance() -> bool {
     let name: Vec<u16> = INSTANCE_MUTEX_NAME.encode_utf16().chain([0]).collect();
@@ -98,14 +119,17 @@ pub fn acquire_single_instance() -> bool {
     false
 }
 
-pub const fn self_update_enabled() -> bool {
+/// Windows 构建启用管理工具自更新。
+pub const fn is_self_update_enabled() -> bool {
     true
 }
 
-pub const fn fs_dry_run() -> bool {
+/// 正式构建不进入演练模式。
+pub const fn is_fs_dry_run() -> bool {
     false
 }
 
+/// 让外部命令不弹出控制台窗口。
 pub fn suppress_console_window(command: &mut Command) {
     command.creation_flags(CREATE_NO_WINDOW);
 }
@@ -130,6 +154,7 @@ impl Drop for TokenHandle {
     }
 }
 
+/// 当前进程是否以管理员权限运行。
 pub fn is_elevated() -> bool {
     unsafe {
         let mut token: HANDLE = null_mut();
@@ -159,6 +184,7 @@ pub fn is_elevated() -> bool {
     }
 }
 
+/// 以管理员权限重新启动管理工具。
 pub fn elevate_and_restart() -> Result<()> {
     let exe_path = env::current_exe()?;
     let directory = exe_path.parent().map(Path::to_path_buf).unwrap_or_default();
@@ -181,7 +207,7 @@ pub fn elevate_and_restart() -> Result<()> {
     };
     let code = result as isize;
 
-    if code <= SHELL_EXECUTE_ERROR_MAX {
+    if code <= MAX_SHELL_EXECUTE_ERROR {
         report_event("Permission.Elevate.Failed", Some(&code.to_string()));
 
         return Err(ManagerError::PermissionDenied(format!(
@@ -214,6 +240,7 @@ impl Drop for SnapshotHandle {
     }
 }
 
+/// 游戏进程是否正在运行。
 pub fn is_game_running() -> Result<bool> {
     unsafe {
         let raw_snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -269,6 +296,7 @@ pub fn is_game_running() -> Result<bool> {
     }
 }
 
+/// 用系统默认浏览器打开 URL。
 pub fn open_url(url: &str) -> Result<()> {
     let operation: Vec<u16> = "open\0".encode_utf16().collect();
     let target: Vec<u16> = url.encode_utf16().chain([0]).collect();
@@ -285,7 +313,7 @@ pub fn open_url(url: &str) -> Result<()> {
     };
     let code = result as isize;
 
-    if code <= SHELL_EXECUTE_ERROR_MAX {
+    if code <= MAX_SHELL_EXECUTE_ERROR {
         return Err(ManagerError::SsoLoginFailed(format!(
             "无法打开默认浏览器（ShellExecuteW 返回 {code}）"
         )));
@@ -294,6 +322,7 @@ pub fn open_url(url: &str) -> Result<()> {
     Ok(())
 }
 
+/// 读取 PE 文件的产品版本号。
 pub fn file_product_version(path: &Path) -> Option<String> {
     let path_wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
     let mut handle = 0u32;
@@ -365,7 +394,7 @@ pub fn file_product_version(path: &Path) -> Option<String> {
     None
 }
 
-/// 用 CNG 的系统首选随机数发生器填充缓冲区
+/// 用 CNG 的系统首选随机数发生器填充缓冲区。
 pub fn random_bytes(buffer: &mut [u8]) -> Result<()> {
     let len = u32::try_from(buffer.len())
         .map_err(|_| ManagerError::SsoLoginFailed("随机数长度超出限制".to_string()))?;
@@ -387,13 +416,13 @@ pub fn random_bytes(buffer: &mut [u8]) -> Result<()> {
     Ok(())
 }
 
+/// 使用 Windows CNG 计算 SHA-256。
 pub fn sha256(data: &[u8]) -> Result<[u8; SHA256_LENGTH]> {
     let len = u32::try_from(data.len())
         .map_err(|_| ManagerError::SsoLoginFailed("待哈希数据长度超出限制".to_string()))?;
 
     let mut algorithm: BCRYPT_ALG_HANDLE = null_mut();
     let mut hash: BCRYPT_HASH_HANDLE = null_mut();
-
     let mut digest = [0u8; SHA256_LENGTH];
 
     unsafe {
@@ -437,22 +466,6 @@ pub fn sha256(data: &[u8]) -> Result<[u8; SHA256_LENGTH]> {
     Ok(digest)
 }
 
-unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> i32 {
-    if matches!(
-        ctrl_type,
-        CTRL_C_EVENT
-            | CTRL_BREAK_EVENT
-            | CTRL_CLOSE_EVENT
-            | CTRL_LOGOFF_EVENT
-            | CTRL_SHUTDOWN_EVENT
-    ) {
-        run_shutdown();
-        process::exit(0);
-    } else {
-        0
-    }
-}
-
 unsafe extern "system" {
     fn SetConsoleCtrlHandler(
         handler: Option<unsafe extern "system" fn(u32) -> i32>,
@@ -460,9 +473,12 @@ unsafe extern "system" {
     ) -> i32;
 }
 
-pub fn install_shutdown_handler() {
-    // 注册失败不阻断运行，只是中断时少了统一清理
+/// 控制台事件处理器签名。
+pub type ConsoleHandler = unsafe extern "system" fn(u32) -> i32;
+
+/// 注册控制台退出事件处理器。
+pub fn set_console_ctrl_handler(handler: ConsoleHandler) {
     unsafe {
-        let _ = SetConsoleCtrlHandler(Some(console_ctrl_handler), 1);
+        let _ = SetConsoleCtrlHandler(Some(handler), 1);
     }
 }

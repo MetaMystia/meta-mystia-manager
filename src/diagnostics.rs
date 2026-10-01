@@ -2,12 +2,11 @@
 //! 生成在管理工具所在目录，只保存在本机，便于用户报障时提供。
 
 use crate::error::{ManagerError, Result};
-use crate::file_ops::glob_matches_by_filename;
-use crate::metrics::{get_user_id, recent_events};
-use crate::model::VersionInfo;
-use crate::preflight::format_bytes;
+use crate::format::format_bytes;
+use crate::fs::file_ops::glob_matches_by_filename;
+use crate::telemetry::{recent_events, user_id};
 use crate::ui::{Ui, UiEvent};
-use crate::upgrader::read_bepinex_version;
+use crate::version::{VersionInfo, read_bepinex_version};
 
 use std::{
     env,
@@ -232,7 +231,7 @@ fn build_manager_info(game_root: &Path, config_note: Option<&str>) -> String {
         info,
         "管理工具版本：{} - {}\n导出时间：{} UTC（epoch {now}）\n系统：{} {}\nCPU：{}\n",
         env!("CARGO_PKG_VERSION"),
-        get_user_id(),
+        user_id(),
         format_timestamp(now),
         env::consts::OS,
         env::consts::ARCH,
