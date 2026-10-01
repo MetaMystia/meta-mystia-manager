@@ -2,6 +2,7 @@
 
 use crate::config::GAME_PROCESS_NAME;
 use crate::error::{ManagerError, Result};
+use crate::platform::UPDATE_RESTART_ARG;
 
 use std::{
     env, fs,
@@ -93,11 +94,8 @@ const MAX_SHELL_EXECUTE_ERROR: isize = 32;
 /// 提权重启的续任进程会等旧进程退出、释放互斥体后再继续。
 pub fn acquire_single_instance() -> bool {
     let name: Vec<u16> = INSTANCE_MUTEX_NAME.encode_utf16().chain([0]).collect();
-    let attempts = if env::args().any(|arg| arg == ELEVATED_RESTART_ARG) {
-        INSTANCE_WAIT_ATTEMPTS
-    } else {
-        1
-    };
+    let restarted = env::args().any(|arg| arg == ELEVATED_RESTART_ARG || arg == UPDATE_RESTART_ARG);
+    let attempts = if restarted { INSTANCE_WAIT_ATTEMPTS } else { 1 };
 
     for attempt in 0..attempts {
         let handle = unsafe { CreateMutexW(null(), 0, name.as_ptr()) };

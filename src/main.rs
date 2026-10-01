@@ -27,7 +27,11 @@ mod gui;
 use std::process::ExitCode;
 
 #[cfg(windows)]
+use crate::ops::self_update::capture_restart_args;
+
+#[cfg(windows)]
 fn main() -> ExitCode {
+    capture_restart_args();
     gui::run();
     ExitCode::SUCCESS
 }

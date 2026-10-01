@@ -17,6 +17,7 @@ use crate::env::{check_game_running, check_game_running_cached};
 use crate::error::ManagerError;
 use crate::mode::OperationMode;
 use crate::ops::flow::{Input, run as run_flow};
+use crate::ops::self_update::remove_replaced_exe;
 use crate::platform::acquire_single_instance;
 use crate::platform::{MAIN_WINDOW_CLASS, focus_existing_manager_window, set_main_window};
 use crate::shutdown::{install_console_handler, run_shutdown};
@@ -543,6 +544,7 @@ pub fn run() {
 
         ShowWindow(hwnd, SW_SHOW);
         UpdateWindow(hwnd);
+        remove_replaced_exe();
 
         let mut message: MSG = mem::zeroed();
         while GetMessageW(&raw mut message, ptr::null_mut(), 0, 0) > 0 {

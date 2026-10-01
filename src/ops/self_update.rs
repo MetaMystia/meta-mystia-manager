@@ -6,21 +6,20 @@ use crate::error::Result;
 use crate::fs::temp_dir::create_temp_dir_with_guard;
 use crate::net::downloader::Downloader;
 #[cfg(windows)]
-use crate::platform::suppress_console_window;
+use crate::platform::{UPDATE_RESTART_ARG, suppress_console_window};
 use crate::telemetry::report_event;
 use crate::ui::{Ui, UiEvent};
 use crate::version::VersionInfo;
 
 use std::path::Path;
+#[cfg(windows)]
+use std::{env, fs, io, path::PathBuf, process::Command, sync::OnceLock, thread, time::Duration};
 
 #[cfg(windows)]
-use std::{
-    env, fs, io,
-    process::{self, Command},
-};
+static REPLACED_EXE: OnceLock<PathBuf> = OnceLock::new();
 
+/// 下载新版本，并以 `--self-update-restart` 模式启动它；旧 exe 由新版本删除。
 #[cfg(windows)]
-/// 下载并替换当前管理工具；返回是否真的完成了替换。
 pub fn run_self_update(
     base_dir: &Path,
     ui: &dyn Ui,
@@ -32,70 +31,106 @@ pub fn run_self_update(
     let (temp_dir, _guard) = create_temp_dir_with_guard(base_dir)?;
     let filename = version_info.manager_filename()?;
     let temp_path = temp_dir.join(&filename);
+    let target_path = base_dir.join(&filename);
 
     if let Err(e) = downloader.download_manager(version_info, &temp_path) {
+        ui.emit(UiEvent::ManagerPromptManualUpdate)?;
         ui.emit(UiEvent::ManagerUpdateFailed(&format!("下载失败：{e}")))?;
         report_event("SelfUpdate.Failed.Download", Some(&format!("{e}")));
         return Err(e);
     }
 
-    let exe_path = env::current_exe()?;
-    let run_dir = exe_path
-        .parent()
-        .ok_or_else(|| ManagerError::Other("无法确定运行目录".to_string()))?;
-    let target_path = run_dir.join(&filename);
-
-    match fs::copy(&temp_path, &target_path) {
-        Ok(_) => {}
-        Err(e) => {
-            ui.emit(UiEvent::ManagerPromptManualUpdate)?;
-            report_event("SelfUpdate.Failed.Copy", Some(&format!("{e}")));
-            return Err(ManagerError::from(io::Error::new(
-                e.kind(),
-                format!("复制到运行目录 {} 失败：{}", target_path.display(), e),
-            )));
-        }
-    }
-
-    let script_name = format!("{}-updater_{}.ps1", env!("CARGO_PKG_NAME"), process::id());
-    let script_path = env::temp_dir().join(&script_name);
-
-    let script = generate_powershell_script(
-        &exe_path.to_string_lossy(),
-        &target_path.to_string_lossy(),
-        process::id(),
-    );
-
-    fs::write(&script_path, script.as_bytes()).map_err(|e| {
-        report_event("SelfUpdate.Failed.ScriptWrite", Some(&format!("{e}")));
-        ManagerError::from(io::Error::new(
+    if let Err(e) = move_new_version(&temp_path, &target_path) {
+        ui.emit(UiEvent::ManagerPromptManualUpdate)?;
+        ui.emit(UiEvent::ManagerUpdateFailed(&format!(
+            "写入运行目录失败：{e}"
+        )))?;
+        report_event("SelfUpdate.Failed.Move", Some(&format!("{e}")));
+        return Err(ManagerError::from(io::Error::new(
             e.kind(),
-            format!("写入升级脚本 {} 失败：{}", script_path.display(), e),
-        ))
-    })?;
-
-    let shells = ["pwsh.exe", "powershell.exe"];
-
-    for shell in &shells {
-        let mut command = Command::new(shell);
-        command
-            .arg("-NoProfile")
-            .arg("-ExecutionPolicy")
-            .arg("Bypass")
-            .arg("-File")
-            .arg(&script_path);
-
-        suppress_console_window(&mut command);
-
-        if command.spawn().is_ok() {
-            report_event("SelfUpdate.Scheduled", version_info.manager_version());
-            ui.emit(UiEvent::ManagerUpdateStarting)?;
-            return Ok(filename);
-        }
+            format!("写入运行目录 {} 失败：{e}", target_path.display()),
+        )));
     }
 
-    ui.emit(UiEvent::ManagerUpdateFailed("无法执行升级脚本"))?;
-    Err(ManagerError::Other("无法启动 PowerShell".to_string()))
+    let old_exe = env::current_exe()?;
+    let mut command = Command::new(&target_path);
+    command
+        .arg(UPDATE_RESTART_ARG)
+        .arg(&old_exe)
+        .current_dir(base_dir);
+    suppress_console_window(&mut command);
+
+    if let Err(e) = command.spawn() {
+        ui.emit(UiEvent::ManagerPromptManualUpdate)?;
+        ui.emit(UiEvent::ManagerUpdateFailed(&format!(
+            "启动新版本失败：{e}"
+        )))?;
+        report_event("SelfUpdate.Failed.Spawn", Some(&format!("{e}")));
+        return Err(ManagerError::from(io::Error::new(
+            e.kind(),
+            format!("启动新版本 {} 失败：{e}", target_path.display()),
+        )));
+    }
+
+    report_event("SelfUpdate.Scheduled", version_info.manager_version());
+    ui.emit(UiEvent::ManagerUpdateStarting)?;
+
+    Ok(filename)
+}
+
+#[cfg(windows)]
+fn move_new_version(src: &Path, dst: &Path) -> io::Result<()> {
+    if fs::rename(src, dst).is_ok() {
+        return Ok(());
+    }
+
+    fs::copy(src, dst)?;
+    let _ = fs::remove_file(src);
+
+    Ok(())
+}
+
+/// 记录启动参数里的旧 exe 路径；界面就绪后由 [`remove_replaced_exe`] 删除。
+#[cfg(windows)]
+pub fn capture_restart_args() {
+    let mut args = env::args_os().skip(1);
+
+    while let Some(arg) = args.next() {
+        if arg.to_str() != Some(UPDATE_RESTART_ARG) {
+            continue;
+        }
+
+        if let Some(path) = args.next() {
+            let _ = REPLACED_EXE.set(PathBuf::from(path));
+        }
+        return;
+    }
+}
+
+/// 删除被替换掉的旧 exe；失败只上报，不影响新版本运行。
+#[cfg(windows)]
+pub fn remove_replaced_exe() {
+    let Some(path) = REPLACED_EXE.get() else {
+        return;
+    };
+
+    for attempt in 0..5 {
+        match fs::remove_file(path) {
+            Ok(()) => {
+                report_event(
+                    "SelfUpdate.Applied",
+                    path.file_name().and_then(|name| name.to_str()),
+                );
+                return;
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return,
+            Err(_) if attempt < 4 => thread::sleep(Duration::from_millis(200)),
+            Err(e) => {
+                report_event("SelfUpdate.Failed.Cleanup", Some(&format!("{e}")));
+                return;
+            }
+        }
+    }
 }
 
 /// 非 Windows 平台：不支持自更新。
@@ -123,82 +158,4 @@ pub fn run_self_update(
     eprintln!("[dev] 已获取 {filename}，跳过替换正在运行的可执行文件（仅 Windows 支持）");
 
     Ok(filename)
-}
-
-#[cfg(windows)]
-fn generate_powershell_script(target: &str, new_exe: &str, pid: u32) -> String {
-    let target = target.replace('\'', "''");
-    let new_exe = new_exe.replace('\'', "''");
-
-    format!(
-        r#"param(
-    [string]$Old = '{target}',
-    [string]$New = '{new_exe}',
-    [int]$OldPid = {pid}
-)
-
-$oldName = Split-Path $Old -Leaf
-$targetDir = Split-Path $Old -Parent
-$bak = $null
-
-function Remove-Self {{
-    param([string]$Script)
-
-    try {{ Remove-Item -LiteralPath $Script -Force -ErrorAction SilentlyContinue }} catch {{}}
-}}
-
-function WaitForExit($procId, $timeout_secs) {{
-    $start = Get-Date
-    while ((Get-Date) -lt $start.AddSeconds($timeout_secs)) {{
-        try {{
-            $p = Get-Process -Id $procId -ErrorAction SilentlyContinue
-            if ($null -eq $p) {{ return $true }}
-        }} catch {{ return $true }}
-        Start-Sleep -Seconds 1
-    }}
-    return $false
-}}
-
-# 等待旧进程退出
-$ok = WaitForExit $OldPid 10
-if (-not $ok) {{
-    Write-Output "Timeout waiting for process $OldPid to exit"
-    Remove-Self $PSCommandPath
-    exit 1
-}}
-
-# 备份旧 exe
-if (Test-Path $Old) {{
-    try {{
-        $t = Get-Date -Format "yyyyMMddHHmmss"
-        $bak = Join-Path $targetDir ($oldName + ".old." + $t)
-        Move-Item -Path $Old -Destination $bak -Force -ErrorAction Stop
-    }} catch {{
-        $bak = $null
-    }}
-}}
-
-# 启动新 exe
-try {{
-    Start-Process -FilePath $New -WorkingDirectory $targetDir
-}} catch {{
-    if ($bak -ne $null -and (Test-Path $bak)) {{
-        try {{ Move-Item -Path $bak -Destination $Old -Force -ErrorAction SilentlyContinue }} catch {{}}
-    }}
-    Remove-Self $PSCommandPath
-    exit 1
-}}
-
-# 清理
-Start-Sleep -Seconds 1
-if ($bak -ne $null -and (Test-Path $bak)) {{
-    try {{ Remove-Item -Path $bak -Force -ErrorAction SilentlyContinue }} catch {{}}
-}}
-
-# 清理自身：脚本内容已解析完，删除后继续执行不受影响
-Remove-Self $PSCommandPath
-
-exit 0
-"#
-    )
 }

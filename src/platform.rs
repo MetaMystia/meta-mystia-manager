@@ -30,6 +30,9 @@ pub use imp::{MAIN_WINDOW_CLASS, focus_existing_manager_window, set_main_window}
 
 pub use imp::set_console_ctrl_handler;
 
+/// 自更新重启参数：后面跟被替换的旧 exe 路径。
+pub const UPDATE_RESTART_ARG: &str = "--self-update-restart";
+
 /// 系统代理设置快照。
 #[derive(Default)]
 pub struct SystemProxySettings {
