@@ -429,6 +429,8 @@ pub fn run() {
         }
 
         install_console_handler();
+        report_event("Run", Some(env!("CARGO_PKG_VERSION")));
+
         panic::set_hook(Box::new(|info| {
             let text = format!("{info}");
             MessageBoxW(
@@ -3658,7 +3660,11 @@ unsafe fn start_operation(hwnd: HWND, state: &mut State) {
         let error = match result {
             Ok(Err(e)) => Some(e.to_string()),
             Ok(Ok(())) => None,
-            Err(payload) => Some(format!("内部错误：{}", panic_message(&*payload))),
+            Err(payload) => {
+                let message = panic_message(&*payload);
+                report_event("Run.Panic", Some(&message));
+                Some(format!("内部错误：{message}"))
+            }
         };
         ui.push_event(Event::Done(error));
     });

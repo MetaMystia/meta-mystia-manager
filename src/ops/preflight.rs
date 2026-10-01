@@ -2,13 +2,17 @@
 
 use crate::error::{ManagerError, Result};
 use crate::format::format_bytes;
-use crate::http::build_agent_with_timeouts;
+use crate::http::{build_agent_with_timeouts, host_key};
 use crate::net::remote_config;
 use crate::platform::free_space;
 use crate::telemetry::report_event;
 use crate::ui::{Ui, UiEvent};
 
-use std::{path::Path, thread, time::Duration};
+use std::{
+    path::Path,
+    thread,
+    time::{Duration, Instant},
+};
 
 // 预检阈值
 /// 下载 + 解压需要的余量（BepInEx 压缩包约 34MB，解压后约 100MB+）。
@@ -79,7 +83,19 @@ fn check_endpoints(ui: &dyn Ui, config_url: &str) -> Result<()> {
                             Some(PROBE_TIMEOUT),
                             Some(PROBE_TIMEOUT),
                         );
-                        agent.get(&url).call().is_err()
+                        let started = Instant::now();
+                        let ok = agent.get(&url).call().is_ok();
+                        report_event(
+                            "Preflight.Endpoint",
+                            Some(&format!(
+                                "{} {} {}ms",
+                                host_key(&url),
+                                if ok { "ok" } else { "failed" },
+                                started.elapsed().as_millis()
+                            )),
+                        );
+
+                        !ok
                     }),
                 )
             })

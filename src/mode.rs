@@ -18,6 +18,18 @@ pub enum OperationMode {
     Upgrade,
 }
 
+impl OperationMode {
+    /// 操作类型的小写名称（用于埋点与日志）。
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Diagnostics => "diagnostics",
+            Self::Install => "install",
+            Self::Uninstall => "uninstall",
+            Self::Upgrade => "upgrade",
+        }
+    }
+}
+
 /// 卸载范围。
 #[derive(Clone, Copy, Debug)]
 pub enum UninstallMode {

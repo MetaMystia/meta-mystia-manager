@@ -83,7 +83,8 @@ pub struct Downloader<'a> {
 
 static VERSION_CACHE: OnceLock<Mutex<Option<VersionInfo>>> = OnceLock::new();
 
-fn cached_version_info() -> Option<VersionInfo> {
+/// 本次会话已获取的远端版本信息；诊断包会附带这份快照。
+pub fn cached_version_info() -> Option<VersionInfo> {
     VERSION_CACHE
         .get()?
         .lock()

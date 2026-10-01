@@ -198,7 +198,11 @@ impl<'a> Uninstaller<'a> {
                 && !is_elevated
                 && self.ui.emit(UiEvent::UninstallAskElevate)?.bool()?
             {
-                elevate_and_restart()?;
+                if let Err(e) = elevate_and_restart() {
+                    report_event("Permission.Elevate.Failed", Some(&e.to_string()));
+                    return Err(e);
+                }
+                report_event("Permission.Elevate.Scheduled", None);
                 self.ui.emit(UiEvent::UninstallRestartingElevated)?;
                 run_shutdown();
                 process::exit(0);

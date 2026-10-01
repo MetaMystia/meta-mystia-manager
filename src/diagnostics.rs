@@ -1,418 +1,160 @@
-//! 诊断包：把管理工具信息、最近操作、BepInEx 与 Unity 日志打包成 zip，
-//! 生成在管理工具所在目录，只保存在本机，便于用户报障时提供。
+//! 诊断包：把管理工具信息、系统信息、BepInEx 与 Unity 日志打包成 zip，
+//! 只保存在本机，便于用户报障时提供；收集过程不额外写入任何日志文件。
 
-use crate::error::{ManagerError, Result};
+mod archive;
+mod collect;
+mod info;
+
+use crate::error::Result;
 use crate::format::format_bytes;
-use crate::fs::file_ops::glob_matches_by_filename;
-use crate::telemetry::{recent_events, user_id};
+use crate::platform::collect_system_report;
+use crate::telemetry::report_event;
 use crate::ui::{Ui, UiEvent};
-use crate::version::{VersionInfo, read_bepinex_version};
 
 use std::{
-    env,
-    fmt::Write as _,
     fs,
-    io::{self, Write as _},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
-use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
-/// Unity 日志目录（相对 `%USERPROFILE%\AppData\LocalLow`）
-const UNITY_LOG_DIR: &str = "Epicomic/Touhou Mystia Izakaya";
-const MAX_UNITY_LOG_BYTES: u64 = 20 * 1024 * 1024;
-const UNITY_LOG_NAMES: &[&str] = &["Player.log", "Player-prev.log", "crash.dmp"];
-/// `BepInEx/config` 下最多收集多少个 `.cfg` / 单个文件上限
-const MAX_CONFIG_FILES: usize = 30;
-const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
+#[derive(Clone, Copy)]
+enum Body {
+    Copy,
+    /// 超限时只保留头尾，中间以标记代替
+    TruncateText {
+        head: u64,
+        tail: u64,
+    },
+}
 
 struct Entry {
     archive_name: String,
-    description: String,
     source: PathBuf,
+    body: Body,
 }
 
-struct ConfigScan {
+struct Collector {
     entries: Vec<Entry>,
-    /// 未超过单文件上限的 `.cfg` 总数
-    packable: usize,
-    /// 因超过单文件上限或无法读取而未打包的数量
-    skipped_large: usize,
+    descriptions: Vec<String>,
+    notes: Vec<String>,
+    packed: Vec<String>,
+    crash_lines: Vec<String>,
+    offset_secs: Option<i64>,
 }
 
-pub fn export(ui: &dyn Ui, game_root: &Path) -> Result<PathBuf> {
-    let mut entries = Vec::new();
-    let mut descriptions = vec![
-        "manager-info.txt（管理工具信息、系统信息、已安装组件与插件列表、最近操作）".to_string(),
-    ];
-
-    for (relative, archive_name, description) in [
-        (
-            "BepInEx/LogOutput.log",
-            "game/BepInEx-LogOutput.log",
-            "BepInEx/LogOutput.log（Mod 日志，最关键）",
-        ),
-        (
-            "doorstop_config.ini",
-            "game/doorstop_config.ini",
-            "doorstop_config.ini",
-        ),
-    ] {
-        let source = game_root.join(relative);
-        if source.is_file() {
-            entries.push(Entry {
-                archive_name: archive_name.to_string(),
-                description: description.to_string(),
-                source,
-            });
-            descriptions.push(description.to_string());
+impl Collector {
+    fn new(offset_secs: Option<i64>) -> Self {
+        Self {
+            entries: Vec::new(),
+            descriptions: vec![
+                "manager-info.txt（管理工具与系统信息、部署状态、已安装组件、最近操作）"
+                    .to_string(),
+            ],
+            notes: Vec::new(),
+            packed: Vec::new(),
+            crash_lines: Vec::new(),
+            offset_secs,
         }
     }
 
-    for entry in collect_unity_logs() {
-        descriptions.push(entry.description.clone());
-        entries.push(entry);
+    fn add_file(&mut self, source: PathBuf, archive_name: String, label: &str, body: Body) {
+        let size = fs::metadata(&source).ok().map(|meta| meta.len());
+        let facts = size.map_or_else(
+            || "无法读取大小".to_string(),
+            |size| {
+                format!(
+                    "{}，修改于 {}",
+                    format_bytes(size),
+                    file_mtime(&source, self.offset_secs)
+                )
+            },
+        );
+
+        let (label, note) = collect::truncation_info(label, &archive_name, size, &body);
+        self.descriptions.push(label);
+        if let Some(note) = note {
+            self.notes.push(note);
+        }
+        self.packed
+            .push(format!("{archive_name} ← {}（{facts}）", source.display()));
+        self.entries.push(Entry {
+            archive_name,
+            source,
+            body,
+        });
     }
 
-    let config_scan = collect_config_files(game_root);
-    for entry in &config_scan.entries {
-        descriptions.push(entry.description.clone());
+    fn retain_readable(&mut self) {
+        let mut readable = Vec::with_capacity(self.entries.len());
+
+        for entry in self.entries.drain(..) {
+            if fs::File::open(&entry.source).is_ok() {
+                readable.push(entry);
+                continue;
+            }
+
+            self.notes
+                .push(format!("未打包（导出时无法读取）：{}", entry.archive_name));
+            let prefix = format!("{} ← ", entry.archive_name);
+            self.packed.retain(|line| !line.starts_with(&prefix));
+        }
+
+        self.entries = readable;
     }
-    let config_note = config_collection_note(&config_scan);
-    if let Some(note) = &config_note {
-        descriptions.push(note.clone());
-    }
-    entries.extend(config_scan.entries);
+}
+
+/// 导出诊断包并返回 zip 路径；用户取消时返回空路径。
+pub fn export(ui: &dyn Ui, game_root: &Path) -> Result<PathBuf> {
+    let system = collect_system_report();
+    let mut collector = collect::collect(game_root, system.utc_offset_seconds);
 
     if !ui
-        .emit(UiEvent::DiagnosticsConfirmExport(&descriptions))?
+        .emit(UiEvent::DiagnosticsConfirmExport(&collector.descriptions))?
         .bool()?
     {
         ui.emit(UiEvent::Message("已取消导出诊断包"))?;
         return Ok(PathBuf::new());
     }
 
-    let info = build_manager_info(game_root, config_note.as_deref());
-    let archive_path = archive_path()?;
+    collector.retain_readable();
+    let info = info::build_manager_info(game_root, &collector, &system);
+    let archive_path = archive::archive_path()?;
 
-    if let Err(e) = write_archive(&archive_path, &info, &entries) {
-        // 写包失败时清掉半成品，避免留下打不开的 zip
+    if let Err(e) = archive::write_archive(&archive_path, &info, &collector.entries) {
         let _ = fs::remove_file(&archive_path);
-
         return Err(e);
     }
+
+    report_event(
+        "Diagnostics.Exported",
+        archive_path.file_name().and_then(|name| name.to_str()),
+    );
 
     Ok(archive_path)
 }
 
-fn collect_config_files(game_root: &Path) -> ConfigScan {
-    let config_dir = game_root.join("BepInEx/config");
-    let mut scan = ConfigScan {
-        entries: Vec::new(),
-        packable: 0,
-        skipped_large: 0,
-    };
-
-    walk_configs(&config_dir, &config_dir, 0, &mut scan);
-
-    scan
+fn display_name(path: &Path) -> String {
+    path.file_name()
+        .map_or_else(String::new, |name| name.to_string_lossy().into_owned())
 }
 
-fn walk_configs(root: &Path, dir: &Path, depth: usize, scan: &mut ConfigScan) {
-    if depth > 2 {
-        return;
-    }
-
-    let Ok(read_dir) = fs::read_dir(dir) else {
-        return;
-    };
-
-    for entry in read_dir.flatten() {
-        let path = entry.path();
-
-        if path.is_dir() {
-            walk_configs(root, &path, depth + 1, scan);
-            continue;
-        }
-
-        let is_config = path
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("cfg"));
-        if !is_config {
-            continue;
-        }
-        if entry
-            .metadata()
-            .map_or(true, |meta| meta.len() > MAX_CONFIG_BYTES)
-        {
-            scan.skipped_large += 1;
-            continue;
-        }
-
-        scan.packable += 1;
-        if scan.entries.len() >= MAX_CONFIG_FILES {
-            continue;
-        }
-
-        let relative = path
-            .strip_prefix(root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .replace('\\', "/");
-
-        scan.entries.push(Entry {
-            archive_name: format!("game/BepInEx-config/{relative}"),
-            description: format!("BepInEx 配置：{relative}"),
-            source: path,
-        });
-    }
-}
-
-/// 收集被数量上限或单文件上限挡下的说明；没有截断时返回 `None`
-fn config_collection_note(scan: &ConfigScan) -> Option<String> {
-    let truncated = scan.packable.saturating_sub(scan.entries.len());
-
-    if truncated == 0 && scan.skipped_large == 0 {
-        return None;
-    }
-
-    let mut reasons = Vec::new();
-    if truncated > 0 {
-        reasons.push(format!("{truncated} 个超出 {MAX_CONFIG_FILES} 个数量上限"));
-    }
-    if scan.skipped_large > 0 {
-        reasons.push(format!("{} 个超过 1 MB 或无法读取", scan.skipped_large));
-    }
-
-    Some(format!(
-        "BepInEx 配置收集：共 {} 个 .cfg，已打包 {} 个；未打包：{}",
-        scan.packable + scan.skipped_large,
-        scan.entries.len(),
-        reasons.join("，")
-    ))
-}
-
-fn collect_unity_logs() -> Vec<Entry> {
-    let Some(profile) = env::var_os("USERPROFILE") else {
-        return Vec::new();
-    };
-
-    let dir = PathBuf::from(profile)
-        .join("AppData")
-        .join("LocalLow")
-        .join(UNITY_LOG_DIR);
-    let mut found = Vec::new();
-
-    for name in UNITY_LOG_NAMES {
-        let path = dir.join(name);
-        if fs::metadata(&path).map_or(true, |meta| {
-            !meta.is_file() || meta.len() > MAX_UNITY_LOG_BYTES
-        }) {
-            continue;
-        }
-
-        found.push(Entry {
-            archive_name: format!("unity/{name}"),
-            description: format!("Unity 日志：{name}"),
-            source: path,
-        });
-    }
-
-    found
-}
-
-fn build_manager_info(game_root: &Path, config_note: Option<&str>) -> String {
-    let mut info = String::new();
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs());
-
-    let _ = write!(
-        info,
-        "管理工具版本：{} - {}\n导出时间：{} UTC（epoch {now}）\n系统：{} {}\nCPU：{}\n",
-        env!("CARGO_PKG_VERSION"),
-        user_id(),
-        format_timestamp(now),
-        env::consts::OS,
-        env::consts::ARCH,
-        env::var("PROCESSOR_IDENTIFIER").unwrap_or_else(|_| "未知".to_string()),
-    );
-    let _ = writeln!(info, "游戏目录：{}", game_root.display());
-    let _ = writeln!(
-        info,
-        "BepInEx 构建号：{}",
-        read_bepinex_version(game_root).unwrap_or_else(|| "未安装或无法识别".to_string())
-    );
-
-    let plugins = file_names(
-        &game_root.join("BepInEx/plugins"),
-        VersionInfo::is_metamystia_filename,
-    );
-    let resourceex = file_names(
-        &game_root.join("ResourceEx"),
-        VersionInfo::is_resourceex_filename,
-    );
-    let _ = writeln!(
-        info,
-        "MetaMystia DLL：{}\nResourceExample ZIP：{}",
-        join_or_none(&plugins),
-        join_or_none(&resourceex),
-    );
-    if let Some(note) = config_note {
-        let _ = writeln!(info, "{note}");
-    }
-
-    info.push_str("\n已安装插件（BepInEx/plugins）：\n");
-    let installed = list_plugins(game_root);
-    if installed.is_empty() {
-        info.push_str("  未找到插件文件\n");
-    } else {
-        for line in &installed {
-            let _ = writeln!(info, "  {line}");
-        }
-    }
-
-    info.push_str("\n最近操作：\n");
-    for event in recent_events() {
-        let _ = writeln!(info, "  {event}");
-    }
-
-    info
-}
-
-fn file_names(dir: &Path, matcher: fn(&str) -> bool) -> Vec<String> {
-    glob_matches_by_filename(&dir.join("*"), matcher)
-        .iter()
-        .filter_map(|path| {
-            path.file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-        })
-        .collect()
-}
-
-fn join_or_none(names: &[String]) -> String {
-    if names.is_empty() {
-        "未安装".to_string()
-    } else {
-        names.join("、")
-    }
-}
-
-fn list_plugins(game_root: &Path) -> Vec<String> {
-    let root = game_root.join("BepInEx/plugins");
-    let mut found = Vec::new();
-
-    walk_plugin_files(&root, &root, 0, &mut found);
-    found.sort();
-
-    found
-}
-
-fn walk_plugin_files(root: &Path, dir: &Path, depth: usize, found: &mut Vec<String>) {
-    if depth > 4 {
-        return;
-    }
-
-    let Ok(read_dir) = fs::read_dir(dir) else {
-        return;
-    };
-
-    for entry in read_dir.flatten() {
-        let path = entry.path();
-
-        if path.is_dir() {
-            walk_plugin_files(root, &path, depth + 1, found);
-            continue;
-        }
-
-        let Ok(meta) = entry.metadata() else {
-            continue;
-        };
-        let relative = path
-            .strip_prefix(root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .replace('\\', "/");
-        let modified = meta
-            .modified()
-            .ok()
-            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-            .map_or_else(
-                || "未知".to_string(),
-                |elapsed| format_timestamp(elapsed.as_secs()),
-            );
-
-        found.push(format!(
-            "{relative}（{}，{modified}）",
-            format_bytes(meta.len())
-        ));
-    }
-}
-
-/// 诊断包路径：优先管理工具所在目录，不可写时回落到临时目录
-fn archive_path() -> Result<PathBuf> {
-    let stamp = format_timestamp(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_secs()),
-    );
-    let filename = format!("meta-mystia-manager-diagnostics-{stamp}.zip");
-
-    let dirs = env::current_exe()
+fn file_mtime(path: &Path, offset_secs: Option<i64>) -> String {
+    let modified = fs::metadata(path)
         .ok()
-        .and_then(|exe| exe.parent().map(Path::to_path_buf))
-        .into_iter()
-        .chain([env::temp_dir()]);
+        .and_then(|meta| meta.modified().ok());
 
-    for dir in dirs {
-        // 先用独立的探针文件试写，避免真正写包失败时留下空包
-        let probe = dir.join(format!(".{filename}.probe"));
-
-        if fs::File::create(&probe).is_ok() {
-            let _ = fs::remove_file(&probe);
-
-            return Ok(dir.join(&filename));
-        }
-    }
-
-    Err(ManagerError::PermissionDenied(
-        "无法在管理工具目录或临时目录创建诊断包".to_string(),
-    ))
+    system_time_label(modified, offset_secs)
 }
 
-fn write_archive(path: &Path, info: &str, entries: &[Entry]) -> Result<()> {
-    let file = fs::File::create(path).map_err(|e| {
-        ManagerError::from(io::Error::new(
-            e.kind(),
-            format!("创建诊断包 {} 失败：{}", path.display(), e),
-        ))
-    })?;
-    let mut zip = ZipWriter::new(file);
-    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
-
-    zip.start_file("manager-info.txt", options)
-        .map_err(|e| ManagerError::Other(format!("写入诊断包失败：{e}")))?;
-    zip.write_all(info.as_bytes())
-        .map_err(|e| ManagerError::Other(format!("写入诊断包失败：{e}")))?;
-
-    for entry in entries {
-        let Ok(mut source) = fs::File::open(&entry.source) else {
-            continue;
-        };
-
-        zip.start_file(&entry.archive_name, options)
-            .map_err(|e| ManagerError::Other(format!("写入诊断包失败：{e}")))?;
-        io::copy(&mut source, &mut zip)
-            .map_err(|e| ManagerError::Other(format!("写入诊断包失败：{e}")))?;
-    }
-
-    zip.finish()
-        .map_err(|e| ManagerError::Other(format!("完成诊断包失败：{e}")))?;
-
-    Ok(())
+fn system_time_label(time: Option<SystemTime>, offset_secs: Option<i64>) -> String {
+    time.and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map_or_else(
+            || "未知时间".to_string(),
+            |elapsed| format_time(elapsed.as_secs(), offset_secs),
+        )
 }
 
-/// epoch 秒 → `YYYYMMDD-HHMMSS`（UTC）
+/// epoch 秒 → `YYYYMMDD-HHMMSS`（UTC）。
 fn format_timestamp(seconds: u64) -> String {
     let days = i64::try_from(seconds / 86_400).unwrap_or(i64::MAX);
     let time = seconds % 86_400;
@@ -426,7 +168,31 @@ fn format_timestamp(seconds: u64) -> String {
     )
 }
 
-/// Howard Hinnant 的 `civil_from_days`（以 1970-01-01 为 0 天）
+/// epoch 秒 → 当地 `YYYY-MM-DD HH:MM:SS`；时区未知时标注 UTC。
+fn format_time(seconds: u64, offset_secs: Option<i64>) -> String {
+    offset_secs.map_or_else(
+        || format!("{} UTC", format_local_time(seconds, 0)),
+        |offset| format_local_time(seconds, offset),
+    )
+}
+
+fn format_local_time(seconds: u64, offset_secs: i64) -> String {
+    let adjusted = i64::try_from(seconds)
+        .unwrap_or(i64::MAX)
+        .saturating_add(offset_secs);
+    let days = adjusted.div_euclid(86_400);
+    let time = adjusted.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}",
+        time / 3600,
+        time % 3600 / 60,
+        time % 60
+    )
+}
+
+/// Howard Hinnant 的 `civil_from_days`（以 1970-01-01 为 0 天）。
 fn civil_from_days(days: i64) -> (i64, u64, u64) {
     let z = days + 719_468;
     let era = z.div_euclid(146_097);

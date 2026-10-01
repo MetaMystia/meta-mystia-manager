@@ -50,8 +50,40 @@ pub struct Input {
 
 /// 执行一次完整操作；界面在此之前已经拿到版本信息与游戏目录。
 pub fn run(ui: &dyn Ui, input: &Input) -> Result<()> {
-    report_event("Run", Some(env!("CARGO_PKG_VERSION")));
+    report_event("Run.Start", Some(env!("CARGO_PKG_VERSION")));
+    report_event("Run.Options", Some(&options_summary(input)));
 
+    let result = run_inner(ui, input);
+
+    match &result {
+        Ok(()) => report_event("Run.Finished", None),
+        Err(ManagerError::UserCancelled) => report_event("Run.Cancelled", None),
+        Err(e) => report_event("Run.Failed", Some(&e.to_string())),
+    }
+
+    result
+}
+
+fn options_summary(input: &Input) -> String {
+    match input.operation {
+        OperationMode::Diagnostics => "op=diagnostics".to_string(),
+        OperationMode::Uninstall => {
+            format!("op=uninstall;full_uninstall={}", input.uninstall_full)
+        }
+        OperationMode::Install | OperationMode::Upgrade => format!(
+            "op={};dll={};resourceex={};download={};bepinex={};dll_update={};console={}",
+            input.operation.name(),
+            input.dll_version.as_deref().unwrap_or("latest"),
+            input.resourceex_version.as_deref().unwrap_or("latest"),
+            input.needs_download,
+            input.upgrade_bepinex,
+            input.upgrade_dll,
+            input.show_bepinex_console,
+        ),
+    }
+}
+
+fn run_inner(ui: &dyn Ui, input: &Input) -> Result<()> {
     let downloader = Downloader::new(ui);
 
     if matches!(

@@ -2,15 +2,16 @@
 
 use crate::config::GAME_PROCESS_NAME;
 use crate::error::{ManagerError, Result};
-use crate::telemetry::report_event;
 
 use std::{
-    env, io,
+    env, fs,
+    io::{self, Read},
     mem::{size_of, zeroed},
     os::windows::{ffi::OsStrExt, process::CommandExt},
     path::Path,
     process::Command,
     ptr::{null, null_mut},
+    result::Result as StdResult,
     slice, thread,
     time::Duration,
 };
@@ -43,10 +44,12 @@ use windows_sys::Win32::{
 mod machine_id;
 mod proxy;
 mod registry;
+mod sysinfo;
 mod window;
 
 pub use machine_id::machine_id;
 pub use proxy::{read_system_proxy_settings, resolve_pac_proxy};
+pub use sysinfo::collect_system_report;
 pub use window::{
     MAIN_WINDOW_CLASS, focus_existing_manager_window, focus_manager_window, set_main_window,
 };
@@ -208,14 +211,10 @@ pub fn elevate_and_restart() -> Result<()> {
     let code = result as isize;
 
     if code <= MAX_SHELL_EXECUTE_ERROR {
-        report_event("Permission.Elevate.Failed", Some(&code.to_string()));
-
         return Err(ManagerError::PermissionDenied(format!(
             "无法以管理员身份重新启动（ShellExecuteW 返回 {code}）"
         )));
     }
-
-    report_event("Permission.Elevate.Scheduled", None);
 
     Ok(())
 }
@@ -246,10 +245,6 @@ pub fn is_game_running() -> Result<bool> {
         let raw_snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         if raw_snapshot == INVALID_HANDLE_VALUE {
             let e = io::Error::last_os_error();
-            report_event(
-                "Env.GameRunning.CheckFailed.CreateToolhelp32Snapshot",
-                Some(&format!("{e}")),
-            );
             return Err(ManagerError::ProcessListError(format!(
                 "无法获取进程列表：{e}"
             )));
@@ -262,10 +257,6 @@ pub fn is_game_running() -> Result<bool> {
 
         if Process32FirstW(snapshot, &raw mut entry) == 0 {
             let e = io::Error::last_os_error();
-            report_event(
-                "Env.GameRunning.CheckFailed.Process32FirstW",
-                Some(&format!("{e}")),
-            );
             return Err(ManagerError::ProcessListError(format!(
                 "读取进程列表失败：{e}"
             )));
@@ -283,7 +274,6 @@ pub fn is_game_running() -> Result<bool> {
             );
 
             if process_name.to_lowercase() == target {
-                report_event("Env.GameRunning", None);
                 return Ok(true);
             }
 
@@ -416,54 +406,106 @@ pub fn random_bytes(buffer: &mut [u8]) -> Result<()> {
     Ok(())
 }
 
-/// 使用 Windows CNG 计算 SHA-256。
-pub fn sha256(data: &[u8]) -> Result<[u8; SHA256_LENGTH]> {
-    let len = u32::try_from(data.len())
-        .map_err(|_| ManagerError::SsoLoginFailed("待哈希数据长度超出限制".to_string()))?;
+struct Sha256Hasher {
+    algorithm: BCRYPT_ALG_HANDLE,
+    hash: BCRYPT_HASH_HANDLE,
+}
 
-    let mut algorithm: BCRYPT_ALG_HANDLE = null_mut();
-    let mut hash: BCRYPT_HASH_HANDLE = null_mut();
-    let mut digest = [0u8; SHA256_LENGTH];
+impl Sha256Hasher {
+    fn new() -> StdResult<Self, String> {
+        let mut algorithm: BCRYPT_ALG_HANDLE = null_mut();
+        let mut hash: BCRYPT_HASH_HANDLE = null_mut();
 
-    unsafe {
-        let status =
-            BCryptOpenAlgorithmProvider(&raw mut algorithm, BCRYPT_SHA256_ALGORITHM, null(), 0);
-        if status != STATUS_SUCCESS {
-            return Err(ManagerError::SsoLoginFailed(format!(
-                "打开 SHA-256 算法提供程序失败：NTSTATUS {status:#x}"
-            )));
+        unsafe {
+            let status =
+                BCryptOpenAlgorithmProvider(&raw mut algorithm, BCRYPT_SHA256_ALGORITHM, null(), 0);
+            if status != STATUS_SUCCESS {
+                return Err(format!(
+                    "打开 SHA-256 算法提供程序失败：NTSTATUS {status:#x}"
+                ));
+            }
+
+            // 默认不提供哈希对象缓冲区，由 CNG 自行分配
+            let status = BCryptCreateHash(algorithm, &raw mut hash, null_mut(), 0, null(), 0, 0);
+            if status != STATUS_SUCCESS {
+                BCryptCloseAlgorithmProvider(algorithm, 0);
+                return Err(format!("创建哈希对象失败：NTSTATUS {status:#x}"));
+            }
         }
 
-        // 默认不提供哈希对象缓冲区，由 CNG 自行分配
-        let status = BCryptCreateHash(algorithm, &raw mut hash, null_mut(), 0, null(), 0, 0);
+        Ok(Self { algorithm, hash })
+    }
+
+    fn update(&mut self, data: &[u8]) -> StdResult<(), String> {
+        let len = u32::try_from(data.len()).map_err(|_| "待哈希数据长度超出限制".to_string())?;
+
+        let status = unsafe { BCryptHashData(self.hash, data.as_ptr(), len, 0) };
         if status != STATUS_SUCCESS {
-            BCryptCloseAlgorithmProvider(algorithm, 0);
-            return Err(ManagerError::SsoLoginFailed(format!(
-                "创建哈希对象失败：NTSTATUS {status:#x}"
-            )));
+            return Err(format!("计算 SHA-256 失败：NTSTATUS {status:#x}"));
         }
 
-        let mut status = BCryptHashData(hash, data.as_ptr(), len, 0);
-        if status == STATUS_SUCCESS {
-            status = BCryptFinishHash(
-                hash,
+        Ok(())
+    }
+
+    fn finish(self) -> StdResult<[u8; SHA256_LENGTH], String> {
+        let mut digest = [0u8; SHA256_LENGTH];
+
+        let status = unsafe {
+            BCryptFinishHash(
+                self.hash,
                 digest.as_mut_ptr(),
                 u32::try_from(SHA256_LENGTH).unwrap_or(u32::MAX),
                 0,
-            );
+            )
+        };
+        if status != STATUS_SUCCESS {
+            return Err(format!("计算 SHA-256 失败：NTSTATUS {status:#x}"));
         }
 
-        BCryptDestroyHash(hash);
-        BCryptCloseAlgorithmProvider(algorithm, 0);
+        Ok(digest)
+    }
+}
 
-        if status != STATUS_SUCCESS {
-            return Err(ManagerError::SsoLoginFailed(format!(
-                "计算 SHA-256 失败：NTSTATUS {status:#x}"
-            )));
+impl Drop for Sha256Hasher {
+    fn drop(&mut self) {
+        unsafe {
+            BCryptDestroyHash(self.hash);
+            BCryptCloseAlgorithmProvider(self.algorithm, 0);
         }
     }
+}
 
-    Ok(digest)
+/// 使用 Windows CNG 计算 SHA-256。
+pub fn sha256(data: &[u8]) -> Result<[u8; SHA256_LENGTH]> {
+    let mut hasher = Sha256Hasher::new().map_err(ManagerError::SsoLoginFailed)?;
+    hasher.update(data).map_err(ManagerError::SsoLoginFailed)?;
+
+    hasher.finish().map_err(ManagerError::SsoLoginFailed)
+}
+
+/// 分块读取文件并计算 SHA-256。
+pub fn sha256_file(path: &Path) -> Result<[u8; SHA256_LENGTH]> {
+    const BUFFER_SIZE: usize = 1024 * 1024;
+
+    let mut file = fs::File::open(path)
+        .map_err(|e| ManagerError::Other(format!("打开 {} 失败：{e}", path.display())))?;
+    let mut hasher = Sha256Hasher::new().map_err(ManagerError::Other)?;
+    let mut buffer = vec![0u8; BUFFER_SIZE];
+
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|e| ManagerError::Other(format!("读取 {} 失败：{e}", path.display())))?;
+        if read == 0 {
+            break;
+        }
+
+        hasher
+            .update(&buffer[..read])
+            .map_err(ManagerError::Other)?;
+    }
+
+    hasher.finish().map_err(ManagerError::Other)
 }
 
 unsafe extern "system" {

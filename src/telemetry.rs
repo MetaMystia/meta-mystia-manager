@@ -13,20 +13,32 @@ use std::{
         mpsc::{RecvTimeoutError, Sender, channel},
     },
     thread::{JoinHandle, spawn},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 // 上报
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_REPORT_DETAIL_BYTES: usize = 1024;
 const TRACKING_ENDPOINT: &str = "https://track.izakaya.cc/api.php";
 const TRACKING_SITE_ID: &str = "13";
 
 // 内存事件缓存
 /// 内存中保留的最近事件条数上限（供诊断包导出）。
-pub const MAX_RECENT_EVENTS: usize = 200;
+pub const MAX_RECENT_EVENTS: usize = 500;
 
 static STARTED_AT: OnceLock<Instant> = OnceLock::new();
-static RECENT_EVENTS: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
+static RECENT_EVENTS: OnceLock<Mutex<VecDeque<RecentEvent>>> = OnceLock::new();
+
+/// 一条内存中的操作记录，只在本次运行会话内保留。
+#[derive(Clone)]
+pub struct RecentEvent {
+    /// 事件发生时刻（Unix 秒）
+    pub at_epoch_secs: u64,
+    /// 相对本次进程启动的秒数
+    pub elapsed_secs: u64,
+    /// `动作：明细`
+    pub line: String,
+}
 
 fn build_tracking_url(
     visitor_id: &str,
@@ -209,7 +221,7 @@ pub fn report_event(action: &str, name: Option<&str>) {
     params.insert("e_c", "Manager".to_string());
     params.insert("e_a", action.to_string());
     if let Some(n) = name {
-        params.insert("e_n", n.to_string());
+        params.insert("e_n", truncate_for_report(n));
     }
 
     let url = build_tracking_url(&visitor_id, account_id.as_deref(), &params);
@@ -217,7 +229,7 @@ pub fn report_event(action: &str, name: Option<&str>) {
 }
 
 /// 最近事件（只留在内存里，供诊断包导出）。
-pub fn recent_events() -> Vec<String> {
+pub fn recent_events() -> Vec<RecentEvent> {
     RECENT_EVENTS.get().map_or_else(Vec::new, |events| {
         events
             .lock()
@@ -237,10 +249,42 @@ fn record_recent_event(action: &str, name: Option<&str>) {
     }
 
     let elapsed = STARTED_AT.get_or_init(Instant::now).elapsed().as_secs();
-    let line = name.map_or_else(
-        || format!("[+{elapsed}s] {action}"),
-        |name| format!("[+{elapsed}s] {action}：{name}"),
-    );
+    let at_epoch_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    let line = name.map_or_else(|| action.to_string(), |name| format!("{action}：{name}"));
 
-    events.push_back(line);
+    events.push_back(RecentEvent {
+        at_epoch_secs,
+        elapsed_secs: elapsed,
+        line,
+    });
+}
+
+fn truncate_for_report(detail: &str) -> String {
+    let ellipsis = '…';
+    let ellipsis_len = encoded_char_len(ellipsis);
+    let mut used = 0;
+    let mut truncated = String::new();
+
+    for ch in detail.chars() {
+        let len = encoded_char_len(ch);
+        if used + len + ellipsis_len > MAX_REPORT_DETAIL_BYTES {
+            truncated.push(ellipsis);
+            return truncated;
+        }
+
+        used += len;
+        truncated.push(ch);
+    }
+
+    truncated
+}
+
+fn encoded_char_len(ch: char) -> usize {
+    let mut buffer = [0u8; 4];
+
+    percent_encode(ch.encode_utf8(&mut buffer).as_bytes(), NON_ALPHANUMERIC)
+        .map(str::len)
+        .sum()
 }

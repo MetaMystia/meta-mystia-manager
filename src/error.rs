@@ -1,7 +1,5 @@
 //! 统一错误类型与服务端错误文案。
 
-use crate::telemetry::report_event;
-
 use std::io;
 use thiserror::Error;
 
@@ -155,8 +153,6 @@ impl From<ureq::Error> for ManagerError {
 
 impl From<io::Error> for ManagerError {
     fn from(err: io::Error) -> Self {
-        let s = err.to_string();
-        report_event("Error.From.Io", Some(&s));
         Self::Io(err)
     }
 }

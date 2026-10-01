@@ -20,9 +20,9 @@ use windows as imp;
 use dev as imp;
 
 pub use imp::{
-    elevate_and_restart, file_product_version, focus_manager_window, free_space, is_elevated,
-    is_fs_dry_run, is_game_running, is_self_update_enabled, machine_id, open_url, random_bytes,
-    read_system_proxy_settings, resolve_pac_proxy, sha256,
+    collect_system_report, elevate_and_restart, file_product_version, focus_manager_window,
+    free_space, is_elevated, is_fs_dry_run, is_game_running, is_self_update_enabled, machine_id,
+    open_url, random_bytes, read_system_proxy_settings, resolve_pac_proxy, sha256, sha256_file,
 };
 
 #[cfg(windows)]
@@ -41,6 +41,14 @@ pub struct SystemProxySettings {
     pub bypass: Option<String>,
     /// 静态代理服务器
     pub server: Option<String>,
+}
+
+/// 诊断用的系统信息快照。
+pub struct SystemReport {
+    /// 系统信息行
+    pub lines: Vec<String>,
+    /// 相对 UTC 的时区偏移秒数
+    pub utc_offset_seconds: Option<i64>,
 }
 
 #[cfg(windows)]

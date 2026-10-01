@@ -77,7 +77,7 @@ pub fn check_game_running_cached() -> Result<bool> {
         return Ok(result);
     }
 
-    let result = is_game_running()?;
+    let result = query_game_running()?;
     *cache.lock().unwrap_or_else(PoisonError::into_inner) = Some((result, Instant::now()));
 
     Ok(result)
@@ -85,9 +85,21 @@ pub fn check_game_running_cached() -> Result<bool> {
 
 /// 强制重新检测游戏进程是否正在运行，跳过缓存。
 pub fn check_game_running() -> Result<bool> {
-    let result = is_game_running()?;
+    let result = query_game_running()?;
     let cache = GAME_RUNNING_CACHE.get_or_init(|| Mutex::new(None));
     *cache.lock().unwrap_or_else(PoisonError::into_inner) = Some((result, Instant::now()));
 
     Ok(result)
+}
+
+fn query_game_running() -> Result<bool> {
+    let running = is_game_running().inspect_err(|e| {
+        report_event("Env.GameRunning.CheckFailed", Some(&e.to_string()));
+    })?;
+
+    if running {
+        report_event("Env.GameRunning", None);
+    }
+
+    Ok(running)
 }

@@ -4,7 +4,7 @@
 //! 让 macOS / Linux 上的 `cargo check` / `cargo clippy` 覆盖全部源码。
 
 use crate::error::{ManagerError, Result};
-use crate::platform::SystemProxySettings;
+use crate::platform::{SystemProxySettings, SystemReport};
 
 use sha2::{Digest, Sha256};
 use std::{fs, io::Read, path::Path};
@@ -13,6 +13,14 @@ use std::{fs, io::Read, path::Path};
 use std::process::Command;
 
 const SHA256_LENGTH: usize = 32;
+
+/// 非 Windows 平台：返回占位系统信息。
+pub fn collect_system_report() -> SystemReport {
+    SystemReport {
+        lines: vec!["CPU：未知".to_string()],
+        utc_offset_seconds: None,
+    }
+}
 
 /// 非 Windows 平台：返回默认代理设置（未启用）。
 pub fn read_system_proxy_settings() -> SystemProxySettings {
@@ -130,6 +138,26 @@ pub fn random_bytes(buffer: &mut [u8]) -> Result<()> {
 pub fn sha256(data: &[u8]) -> Result<[u8; SHA256_LENGTH]> {
     let mut hasher = Sha256::new();
     hasher.update(data);
+
+    Ok(hasher.finalize().into())
+}
+
+/// 分块读取文件并计算 SHA-256。
+pub fn sha256_file(path: &Path) -> Result<[u8; SHA256_LENGTH]> {
+    let mut file = fs::File::open(path)
+        .map_err(|e| ManagerError::Other(format!("打开 {} 失败：{e}", path.display())))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 1024 * 1024];
+
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|e| ManagerError::Other(format!("读取 {} 失败：{e}", path.display())))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
 
     Ok(hasher.finalize().into())
 }
