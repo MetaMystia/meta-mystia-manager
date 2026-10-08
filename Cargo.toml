@@ -68,7 +68,7 @@ steamlocate = "2.0.1"
 
 [target.'cfg(not(windows))'.dependencies]
 # 非 Windows 宿主的编译桩：Windows 使用 CNG，其他平台用纯 Rust 实现
-sha2 = "0.10"
+sha2 = "0.11"
 
 [target.'cfg(windows)'.build-dependencies]
 thunk-rs = { version = "0.3", features = ["win7"], default-features = false }
