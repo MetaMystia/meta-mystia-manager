@@ -54,7 +54,7 @@ use windows_sys::Win32::{
             INITCOMMONCONTROLSEX, InitCommonControlsEx, LoadIconWithScaleDown, NM_CLICK, NM_RETURN,
             NMHDR, PBM_SETPOS, PBM_SETRANGE32, SetWindowTheme,
         },
-        Input::KeyboardAndMouse::EnableWindow,
+        Input::KeyboardAndMouse::{EnableWindow, IsWindowEnabled},
         Shell::{
             BFFM_INITIALIZED, BFFM_SETSELECTIONW, BIF_RETURNONLYFSDIRS, BROWSEINFOW, ILFree,
             SHBrowseForFolderW, SHGetPathFromIDListW, ShellExecuteW,
@@ -404,6 +404,7 @@ struct State {
     phase: usize,
     plan: Vec<usize>,
     prefetched: Option<RemoteInfo>,
+    resource_note: HWND,
     resourceex_versions: Vec<String>,
     secondary: Vec<HWND>,
     stage: Option<Stage>,
@@ -719,10 +720,11 @@ unsafe fn window_state(hwnd: HWND) -> *mut State {
     GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut State
 }
 
-fn is_error_text(state: &State, control: HWND) -> bool {
+unsafe fn is_error_text(state: &State, control: HWND) -> bool {
     (state.failed && control == state.install_hint)
         || control == state.game_hint
         || (control == state.net_banner && state.net_phase == NET_FAILED)
+        || (control == state.resource_note && IsWindowEnabled(state.component_checks[2]) != 0)
 }
 
 fn is_blocked_install(state: &State, control: HWND) -> bool {
@@ -1674,13 +1676,13 @@ unsafe fn build_children(hwnd: HWND) -> Box<State> {
     let resource_note = create_child(
         hwnd,
         "STATIC",
-        "ResourceExample 为可选内容包：新增稀客、料理与食材等扩展内容。",
-        WS_CHILD | SS_CENTERIMAGE,
+        "ResourceExample 是 MetaMystia 提供的内容扩展包，为游戏增加了新的剧情、稀客、料理与食材等内容，您可根据实际需要选择是否安装。",
+        WS_CHILD,
         0,
         margin + s(15),
         s(176),
         content - s(15),
-        s(20),
+        s(40),
         0,
         font,
     );
@@ -1694,7 +1696,7 @@ unsafe fn build_children(hwnd: HWND) -> Box<State> {
         WS_CHILD | SS_ETCHEDHORZ,
         0,
         margin,
-        s(208),
+        s(220),
         content,
         s(2),
         0,
@@ -1708,7 +1710,7 @@ unsafe fn build_children(hwnd: HWND) -> Box<State> {
         WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX as u32,
         0,
         margin,
-        s(222),
+        s(234),
         text_width(font, console_label) + s(32),
         s(22),
         ID_CHECK_CONSOLE,
@@ -1722,7 +1724,7 @@ unsafe fn build_children(hwnd: HWND) -> Box<State> {
         WS_CHILD | SS_CENTERIMAGE,
         0,
         margin + s(15),
-        s(244),
+        s(256),
         content - s(20),
         s(20),
         0,
@@ -2250,6 +2252,7 @@ unsafe fn build_children(hwnd: HWND) -> Box<State> {
         phase: 0,
         plan: plan_for(OP_INSTALL),
         prefetched: None,
+        resource_note,
         resourceex_versions: Vec::new(),
         secondary,
         stage: None,
@@ -2308,6 +2311,15 @@ unsafe fn refresh_version_checkbox(state: &State, index: usize, selected: &str) 
 
     SendMessageW(state.component_checks[index], BM_SETCHECK, 1, 0);
     EnableWindow(state.component_checks[index], i32::from(enabled));
+
+    if index == 2 {
+        RedrawWindow(
+            state.resource_note,
+            ptr::null(),
+            ptr::null_mut(),
+            RDW_INVALIDATE | RDW_UPDATENOW,
+        );
+    }
 }
 
 unsafe fn update_selection_state(state: &State) {
@@ -3405,17 +3417,17 @@ unsafe fn apply_prefetch(hwnd: HWND, state: &mut State, outcome: PrefetchOutcome
                         .as_deref()
                         .is_some_and(|installed| !VersionInfo::versions_match(installed, target))
                 });
-            SendMessageW(
-                state.component_checks[2],
-                BM_SETCHECK,
-                usize::from(has_resourceex),
-                0,
-            );
             let resourceex_enabled = if has_resourceex {
                 upgrade && resourceex_actionable
             } else {
                 resourceex_target.is_some()
             };
+            SendMessageW(
+                state.component_checks[2],
+                BM_SETCHECK,
+                usize::from(has_resourceex || resourceex_enabled),
+                0,
+            );
             EnableWindow(state.component_checks[2], i32::from(resourceex_enabled));
             SendMessageW(
                 state.console_check,
