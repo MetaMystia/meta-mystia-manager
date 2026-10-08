@@ -157,7 +157,7 @@ fn login(ui: &dyn Ui, config_url: &str) -> Result<bool> {
     };
 
     store_session(session.clone());
-    telemetry::set_account_user_id(&session.user_id);
+    telemetry::report_event("Sso.Login.Success", Some(&session.user_id));
     ui.emit(UiEvent::Message(&format!(
         "已登录：{}",
         session.display_name()

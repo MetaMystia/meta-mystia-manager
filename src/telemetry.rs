@@ -40,18 +40,12 @@ pub struct RecentEvent {
     pub line: String,
 }
 
-fn build_tracking_url(
-    visitor_id: &str,
-    account_user_id: Option<&str>,
-    params: &HashMap<&str, String>,
-) -> String {
-    let user_id = account_user_id.unwrap_or(visitor_id);
-
+fn build_tracking_url(visitor_id: &str, params: &HashMap<&str, String>) -> String {
     let mut base = vec![
         ("idsite".to_string(), TRACKING_SITE_ID.to_string()),
         ("rec".to_string(), "1".to_string()),
         ("_id".to_string(), visitor_id.to_string()),
-        ("uid".to_string(), user_id.to_string()),
+        ("uid".to_string(), visitor_id.to_string()),
     ];
 
     for (k, v) in params {
@@ -88,23 +82,6 @@ pub fn user_id() -> String {
             md5_hex(&combined)
         })
         .clone()
-}
-
-static ACCOUNT_USER_ID: OnceLock<Mutex<Option<String>>> = OnceLock::new();
-
-/// 记录本次登录的账号 ID，之后的事件上报会携带它。
-pub fn set_account_user_id(user_id: &str) {
-    let slot = ACCOUNT_USER_ID.get_or_init(|| Mutex::new(None));
-    *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(user_id.to_string());
-}
-
-fn account_user_id() -> Option<String> {
-    let slot = ACCOUNT_USER_ID
-        .get()?
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
-
-    slot.clone()
 }
 
 static AGENT_CACHE: OnceLock<Mutex<HashMap<String, ureq::Agent>>> = OnceLock::new();
@@ -214,7 +191,6 @@ pub fn report_event(action: &str, name: Option<&str>) {
     }
 
     let visitor_id = user_id();
-    let account_id = account_user_id();
 
     let mut params: HashMap<&str, String> = HashMap::new();
     params.insert("ca", "1".to_string());
@@ -224,7 +200,7 @@ pub fn report_event(action: &str, name: Option<&str>) {
         params.insert("e_n", truncate_for_report(n));
     }
 
-    let url = build_tracking_url(&visitor_id, account_id.as_deref(), &params);
+    let url = build_tracking_url(&visitor_id, &params);
     send_tracking_request(url);
 }
 
