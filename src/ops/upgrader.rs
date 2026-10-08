@@ -1,20 +1,21 @@
 //! 升级与组件替换流程。
 
 use crate::config::{
-    BEPINEX_CORE_DLL, METAMYSTIA_PLUGIN_GLOB, METAMYSTIA_PLUGIN_OLD_GLOB, RESOURCEEX_ZIP_GLOB,
-    RESOURCEEX_ZIP_OLD_GLOB,
+    BEPINEX_CORE_DLL, DISABLED_DIR_NAME, METAMYSTIA_PLUGIN_GLOB, METAMYSTIA_PLUGIN_OLD_GLOB,
+    RESOURCEEX_ZIP_GLOB, RESOURCEEX_ZIP_OLD_GLOB,
 };
 use crate::error::{ManagerError, Result};
 use crate::fs::extractor::Extractor;
 use crate::fs::file_ops::{
     atomic_rename_or_copy, backup_to_path, cleanup_tmp_residue, delete_paths,
-    glob_matches_by_filename, next_backup_path,
+    glob_matches_by_filename, glob_matches_filtered, next_backup_path,
 };
 use crate::fs::temp_dir::create_temp_dir_with_guard;
 use crate::net::downloader::{DownloadJob, Downloader};
 use crate::ops::installer::update_bepinex_config;
 use crate::ops::preflight::run;
 use crate::ops::rollback::Rollback;
+use crate::ops::toggle::{Component, component_files, set_doorstop_enabled};
 use crate::platform::is_fs_dry_run;
 use crate::telemetry::report_event;
 use crate::ui::{Ui, UiEvent};
@@ -33,10 +34,32 @@ struct ParsedVersion {
     parts: Vec<u64>,
 }
 
-struct InstalledAssetPattern<'a> {
+struct AssetPattern<'a> {
+    /// 是否禁用区里的文件
+    disabled: bool,
     matcher: fn(&str) -> bool,
     pattern: &'a str,
     version_from_filename: fn(&str) -> Option<String>,
+}
+
+/// 待清理的备份模式（路径，文件名匹配）。
+type BackupPattern = (PathBuf, fn(&str) -> bool);
+
+/// 一个已安装组件的启用状态。
+#[derive(Clone, Debug)]
+pub struct EnabledState {
+    /// 是否处于禁用状态（文件在禁用区）
+    pub disabled: bool,
+    /// 已安装版本
+    pub version: String,
+}
+
+/// 两个组件的已安装版本。
+pub struct InstalledVersions {
+    /// MetaMystia DLL
+    pub dll: Option<EnabledState>,
+    /// ResourceExample ZIP
+    pub resourceex: Option<EnabledState>,
 }
 
 impl Ord for ParsedVersion {
@@ -142,12 +165,12 @@ impl<'a> Upgrader<'a> {
         self
     }
 
-    /// 已安装的 (MetaMystia DLL, ResourceExample ZIP) 版本；只读，不改动文件。
-    pub fn installed_versions(&self) -> Result<(Option<String>, Option<String>)> {
-        let dll = self.consolidate_installed_dlls()?.map(|(v, _)| v);
-        let res = self.consolidate_installed_resourceex()?.map(|(v, _)| v);
-
-        Ok((dll, res))
+    /// 已安装组件及其启用状态；只读，不改动文件。
+    pub fn installed_versions(&self) -> Result<InstalledVersions> {
+        Ok(InstalledVersions {
+            dll: self.installed_state(Component::MetaMystia)?,
+            resourceex: self.installed_state(Component::ResourceEx)?,
+        })
     }
 
     /// 读取当前已安装的 BepInEx 构建号。
@@ -167,13 +190,17 @@ impl<'a> Upgrader<'a> {
 
         let current_bepinex_version = self.read_bepinex_version();
         let bepinex_installed = self.is_bepinex_installed();
-        let (dll_opt, res_opt) = self.installed_versions()?;
-        let Some(current_dll_version) = dll_opt else {
+        let installed = self.installed_versions()?;
+        let Some(dll_state) = installed.dll else {
             return Err(ManagerError::Other(
                 "未找到已安装的 MetaMystia Mod，请先使用安装功能。".to_string(),
             ));
         };
-        let current_resourceex_version = res_opt.unwrap_or_default();
+        let current_dll_version = dll_state.version;
+        let resourceex_state = installed.resourceex;
+        let current_resourceex_version = resourceex_state
+            .as_ref()
+            .map_or_else(String::new, |state| state.version.clone());
 
         report_event(
             "Upgrade.Detected",
@@ -369,25 +396,26 @@ impl<'a> Upgrader<'a> {
             }
         }
 
+        let dll_destination = temp_dll_path
+            .as_ref()
+            .map(|(_, filename)| self.asset_destination(METAMYSTIA_PLUGIN_GLOB, filename));
+        let resourceex_destination = temp_resourceex_path
+            .as_ref()
+            .map(|(_, filename)| self.asset_destination(RESOURCEEX_ZIP_GLOB, filename));
+
         let mut rollback = Rollback::new(&self.game_root, &temp_dir);
-        // 干跑模式下不会真正写文件，无需备份
+
         if !is_fs_dry_run() {
             rollback.plan(&self.bepinex_config_path())?;
 
             if let Some(path) = &temp_bepinex_path {
                 rollback.plan_zip(path, &["BepInEx/config", "BepInEx/plugins"])?;
             }
-            if let Some((_, filename)) = &temp_dll_path {
-                rollback.plan(
-                    &self
-                        .game_root
-                        .join("BepInEx")
-                        .join("plugins")
-                        .join(filename),
-                )?;
+            if let Some(destination) = &dll_destination {
+                rollback.plan(destination)?;
             }
-            if let Some((_, filename)) = &temp_resourceex_path {
-                rollback.plan(&self.game_root.join("ResourceEx").join(filename))?;
+            if let Some(destination) = &resourceex_destination {
+                rollback.plan(destination)?;
             }
 
             rollback.arm()?;
@@ -408,6 +436,7 @@ impl<'a> Upgrader<'a> {
                     &self.game_root,
                     &["BepInEx/config", "BepInEx/plugins"],
                 )?;
+                let _ = set_doorstop_enabled(&self.game_root, true)?;
 
                 self.ui.emit(UiEvent::UpgradeInstallSuccess(
                     &self.game_root.join("BepInEx"),
@@ -416,11 +445,9 @@ impl<'a> Upgrader<'a> {
             }
 
             if let Some((temp_path, filename)) = &temp_dll_path {
-                let plugins_dir = self.game_root.join("BepInEx").join("plugins");
-
                 Self::backup_existing_assets(
                     &mut rollback,
-                    &self.game_root.join(METAMYSTIA_PLUGIN_GLOB),
+                    &self.asset_pattern(METAMYSTIA_PLUGIN_GLOB),
                     VersionInfo::is_metamystia_filename,
                     filename,
                     "dll.old",
@@ -428,28 +455,28 @@ impl<'a> Upgrader<'a> {
 
                 self.ui.emit(UiEvent::UpgradeInstallingDll)?;
 
-                let new_dll_path = plugins_dir.join(filename);
+                let new_dll_path = self.asset_destination(METAMYSTIA_PLUGIN_GLOB, filename);
                 Self::install_asset_from_temp(temp_path, &new_dll_path, "dll.tmp")?;
+                self.remove_disabled_copy(Component::MetaMystia)?;
 
                 self.ui
                     .emit(UiEvent::UpgradeInstallSuccess(&new_dll_path))?;
                 report_event("Upgrade.Installed.DLL", Some(filename));
             } else if !self.skip_dll {
-                // 没有新版本要装时，也把残留的其它版本改名备份
                 Self::backup_existing_assets(
                     &mut rollback,
-                    &self.game_root.join(METAMYSTIA_PLUGIN_GLOB),
+                    &self.asset_pattern(METAMYSTIA_PLUGIN_GLOB),
                     VersionInfo::is_metamystia_filename,
                     &VersionInfo::metamystia_filename(&current_dll_version),
                     "dll.old",
                 )?;
+                self.remove_disabled_copy(Component::MetaMystia)?;
             }
 
             if let Some((temp_path, filename)) = &temp_resourceex_path {
-                let resourceex_dir = self.game_root.join("ResourceEx");
                 Self::backup_existing_assets(
                     &mut rollback,
-                    &self.game_root.join(RESOURCEEX_ZIP_GLOB),
+                    &self.asset_pattern(RESOURCEEX_ZIP_GLOB),
                     VersionInfo::is_resourceex_filename,
                     filename,
                     "zip.old",
@@ -457,8 +484,9 @@ impl<'a> Upgrader<'a> {
 
                 self.ui.emit(UiEvent::UpgradeInstallingResourceex)?;
 
-                let new_zip_path = resourceex_dir.join(filename);
+                let new_zip_path = self.asset_destination(RESOURCEEX_ZIP_GLOB, filename);
                 Self::install_asset_from_temp(temp_path, &new_zip_path, "zip.tmp")?;
+                self.remove_disabled_copy(Component::ResourceEx)?;
 
                 self.ui
                     .emit(UiEvent::UpgradeInstallSuccess(&new_zip_path))?;
@@ -466,11 +494,12 @@ impl<'a> Upgrader<'a> {
             } else if !self.skip_resourceex && has_resourceex {
                 Self::backup_existing_assets(
                     &mut rollback,
-                    &self.game_root.join(RESOURCEEX_ZIP_GLOB),
+                    &self.asset_pattern(RESOURCEEX_ZIP_GLOB),
                     VersionInfo::is_resourceex_filename,
                     &VersionInfo::resourceex_filename(&current_resourceex_version),
                     "zip.old",
                 )?;
+                self.remove_disabled_copy(Component::ResourceEx)?;
             }
 
             Ok(())
@@ -608,38 +637,60 @@ impl<'a> Upgrader<'a> {
         Ok(())
     }
 
-    fn consolidate_installed_dlls(&self) -> Result<Option<(String, PathBuf)>> {
-        self.consolidate_installed_by_pattern(&InstalledAssetPattern {
-            matcher: VersionInfo::is_metamystia_filename,
-            pattern: METAMYSTIA_PLUGIN_GLOB,
-            version_from_filename: VersionInfo::metamystia_version_from_filename,
-        })
-    }
+    fn installed_state(&self, component: Component) -> Result<Option<EnabledState>> {
+        let spec = component.spec();
+        let matcher = spec.matcher;
+        let mut parsed = Vec::new();
 
-    fn consolidate_installed_resourceex(&self) -> Result<Option<(String, PathBuf)>> {
-        self.consolidate_installed_by_pattern(&InstalledAssetPattern {
-            matcher: VersionInfo::is_resourceex_filename,
-            pattern: RESOURCEEX_ZIP_GLOB,
-            version_from_filename: VersionInfo::resourceex_version_from_filename,
-        })
+        for is_disabled in [false, true] {
+            let pattern = if is_disabled {
+                spec.disabled_pattern
+            } else {
+                spec.enabled_pattern
+            };
+            let Some(entry) = self.consolidate_installed_by_pattern(&AssetPattern {
+                disabled: is_disabled,
+                matcher,
+                pattern,
+                version_from_filename: match component {
+                    Component::MetaMystia => VersionInfo::metamystia_version_from_filename,
+                    Component::ResourceEx => VersionInfo::resourceex_version_from_filename,
+                },
+            })?
+            else {
+                continue;
+            };
+
+            parsed.push((entry, is_disabled));
+        }
+
+        parsed.sort_by_key(|(_, is_disabled)| *is_disabled);
+
+        let Some(((version, _), disabled)) = parsed.pop() else {
+            return Ok(None);
+        };
+
+        Ok(Some(EnabledState { disabled, version }))
     }
 
     fn consolidate_installed_by_pattern(
         &self,
-        asset_pattern: &InstalledAssetPattern<'_>,
+        asset_pattern: &AssetPattern<'_>,
     ) -> Result<Option<(String, PathBuf)>> {
-        let pattern = self.game_root.join(asset_pattern.pattern);
-        let Some(dir) = pattern.parent() else {
-            return Ok(None);
+        let root = if asset_pattern.disabled {
+            self.game_root.join(DISABLED_DIR_NAME)
+        } else {
+            self.game_root.clone()
         };
-
-        if !dir.exists() {
-            return Ok(None);
-        }
+        let pattern = root.join(asset_pattern.pattern);
 
         let mut parsed = Vec::new();
 
-        for path in glob_matches_by_filename(&pattern, asset_pattern.matcher) {
+        for path in glob_matches_filtered(&pattern, |path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(asset_pattern.matcher)
+        }) {
             if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
                 let Some(version) = (asset_pattern.version_from_filename)(filename) else {
                     return Err(ManagerError::Other(format!(
@@ -674,17 +725,71 @@ impl<'a> Upgrader<'a> {
     }
 
     fn cleanup_old_files(&self) -> Result<()> {
-        self.cleanup_old_files_by_pattern(
-            &self.game_root.join(METAMYSTIA_PLUGIN_OLD_GLOB),
+        let mut targets: Vec<BackupPattern> = vec![
+            (
+                self.game_root.join(METAMYSTIA_PLUGIN_OLD_GLOB),
+                VersionInfo::is_canonical_metamystia_backup_filename,
+            ),
+            (
+                self.game_root.join(RESOURCEEX_ZIP_OLD_GLOB),
+                VersionInfo::is_canonical_resourceex_backup_filename,
+            ),
+        ];
+        let disabled_root = self.game_root.join(DISABLED_DIR_NAME);
+        targets.push((
+            disabled_root.join(METAMYSTIA_PLUGIN_OLD_GLOB),
             VersionInfo::is_canonical_metamystia_backup_filename,
-        )?;
-        self.cleanup_old_files_by_pattern(
-            &self.game_root.join(RESOURCEEX_ZIP_OLD_GLOB),
+        ));
+        targets.push((
+            disabled_root.join(RESOURCEEX_ZIP_OLD_GLOB),
             VersionInfo::is_canonical_resourceex_backup_filename,
-        )?;
+        ));
+
+        for (pattern, matcher) in targets {
+            self.cleanup_old_files_by_pattern(&pattern, matcher)?;
+        }
 
         Ok(())
     }
+
+    fn asset_pattern(&self, pattern: &str) -> PathBuf {
+        self.game_root.join(pattern)
+    }
+
+    fn asset_destination(&self, pattern: &str, filename: &str) -> PathBuf {
+        let parent = Path::new(pattern).parent().unwrap_or_else(|| Path::new(""));
+
+        self.game_root.join(parent).join(filename)
+    }
+
+    fn remove_disabled_copy(&self, component: Component) -> Result<()> {
+        let files = component_files(&self.game_root, component);
+        let (Some(source), true) = (files.disabled.first(), files.enabled.is_empty()) else {
+            return Ok(());
+        };
+        let root = self.game_root.join(DISABLED_DIR_NAME);
+
+        fs::remove_file(source).map_err(|e| {
+            ManagerError::from(io::Error::new(
+                e.kind(),
+                format!("删除禁用区旧副本 {} 失败：{}", source.display(), e),
+            ))
+        })?;
+
+        let mut dir = source.parent();
+        while let Some(current) = dir {
+            if !current.starts_with(&root) {
+                break;
+            }
+            if fs::remove_dir(current).is_err() {
+                break;
+            }
+            dir = current.parent();
+        }
+
+        Ok(())
+    }
+
     fn is_bepinex_installed(&self) -> bool {
         self.game_root.join(BEPINEX_CORE_DLL).is_file()
     }

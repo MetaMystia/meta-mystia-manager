@@ -5,5 +5,6 @@ pub mod installer;
 pub mod preflight;
 pub mod rollback;
 pub mod self_update;
+pub mod toggle;
 pub mod uninstaller;
 pub mod upgrader;

@@ -2,11 +2,15 @@
 
 use super::collect::unity_log_dir;
 use super::{Collector, display_name, file_mtime, format_time};
-use crate::config::{GAME_EXECUTABLE, GAME_STEAM_APP_ID, TEMP_DIR_NAME};
+use crate::config::{
+    DISABLED_DIR_NAME, DISABLED_METAMYSTIA_PLUGIN_GLOB, DISABLED_RESOURCEEX_ZIP_GLOB,
+    GAME_EXECUTABLE, GAME_STEAM_APP_ID, TEMP_DIR_NAME,
+};
 use crate::format::format_bytes;
 use crate::fs::file_ops::glob_matches_by_filename;
 use crate::net::downloader::cached_version_info;
 use crate::net::sso;
+use crate::ops::toggle::doorstop_enabled;
 use crate::platform::{
     SystemReport, file_product_version, free_space, is_game_running, sha256_file,
 };
@@ -120,6 +124,11 @@ pub(super) fn build_manager_info(
         info.push_str("  未找到可校验的 MetaMystia / winhttp.dll 文件\n");
     }
     for line in hashes {
+        let _ = writeln!(info, "{line}");
+    }
+
+    info.push_str("\n【已禁用组件】\n");
+    for line in disabled_component_lines(game_root) {
         let _ = writeln!(info, "{line}");
     }
 
@@ -357,6 +366,47 @@ fn deployment_lines(game_root: &Path) -> Vec<String> {
         });
     } else {
         lines.push("  dotnet/：不存在".to_string());
+    }
+
+    lines
+}
+
+fn disabled_component_lines(game_root: &Path) -> Vec<String> {
+    let root = game_root.join(DISABLED_DIR_NAME);
+    let mut lines = Vec::new();
+
+    if doorstop_enabled(game_root).is_ok_and(|enabled| !enabled) {
+        lines.push("  BepInEx（已禁用）".to_string());
+    }
+
+    let dll = glob_matches_by_filename(
+        &root.join(DISABLED_METAMYSTIA_PLUGIN_GLOB),
+        VersionInfo::is_metamystia_filename,
+    );
+    if let Some(version) = dll
+        .first()
+        .and_then(|path| path.file_name())
+        .and_then(|name| name.to_str())
+        .and_then(VersionInfo::metamystia_version_from_filename)
+    {
+        lines.push(format!("  MetaMystia {version}（已禁用）"));
+    }
+
+    let resourceex = glob_matches_by_filename(
+        &root.join(DISABLED_RESOURCEEX_ZIP_GLOB),
+        VersionInfo::is_resourceex_filename,
+    );
+    if let Some(version) = resourceex
+        .first()
+        .and_then(|path| path.file_name())
+        .and_then(|name| name.to_str())
+        .and_then(VersionInfo::resourceex_version_from_filename)
+    {
+        lines.push(format!("  ResourceExample {version}（已禁用）"));
+    }
+
+    if lines.is_empty() {
+        lines.push("  无（没有处于禁用状态的组件）".to_string());
     }
 
     lines

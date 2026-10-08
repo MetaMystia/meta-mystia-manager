@@ -74,6 +74,18 @@ pub enum UiEvent<'a> {
     UninstallAskRetryFailures,
     UninstallRetryingFailedItems,
 
+    /// 启用 / 禁用完成（BepInEx、MetaMystia、ResourceExample 的启用状态）
+    ManageCompleted {
+        bepinex: bool,
+        dll: bool,
+        resourceex: bool,
+    },
+
+    /// 导出前确认（将收集的条目说明）
+    DiagnosticsConfirmExport(&'a [String]),
+    /// 诊断包已生成（路径）
+    DiagnosticsExported(&'a Path),
+
     DeletionStart,
     /// 删除进度（已完成数，总数，当前路径）
     DeletionProgress(usize, usize, &'a str),
@@ -120,11 +132,6 @@ pub enum UiEvent<'a> {
     ManagerPromptManualUpdate,
 
     SsoAskOpenBrowser,
-
-    /// 导出前确认（将收集的条目说明）
-    DiagnosticsConfirmExport(&'a [String]),
-    /// 诊断包已生成（路径）
-    DiagnosticsExported(&'a Path),
 }
 
 /// 单个下载任务的最终结果。

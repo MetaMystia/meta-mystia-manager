@@ -1,8 +1,9 @@
 //! 卸载流程。
 
 use crate::config::{
-    METAMYSTIA_PLUGIN_GLOB, METAMYSTIA_PLUGIN_OLD_GLOB, METAMYSTIA_PLUGIN_PART_GLOB,
-    RESOURCEEX_ZIP_GLOB, RESOURCEEX_ZIP_OLD_GLOB, RESOURCEEX_ZIP_PART_GLOB, TEMP_DIR_NAME,
+    DISABLED_DIR_NAME, METAMYSTIA_PLUGIN_GLOB, METAMYSTIA_PLUGIN_OLD_GLOB,
+    METAMYSTIA_PLUGIN_PART_GLOB, RESOURCEEX_ZIP_GLOB, RESOURCEEX_ZIP_OLD_GLOB,
+    RESOURCEEX_ZIP_PART_GLOB, TEMP_DIR_NAME,
 };
 use crate::error::{ManagerError, Result};
 use crate::fs::file_ops::{
@@ -59,6 +60,22 @@ pub fn scan_existing_files(base: &Path, mode: UninstallMode) -> Vec<PathBuf> {
 
     for &(pattern, is_dir) in targets {
         scan_target(base, pattern, is_dir, &mut existing_files);
+    }
+
+    let disabled_root = base.join(DISABLED_DIR_NAME);
+
+    if matches!(mode, UninstallMode::Full) {
+        if disabled_root.is_dir() {
+            existing_files.push(disabled_root);
+        }
+    } else {
+        for &pattern in mode.disabled_targets() {
+            let target_path = disabled_root.join(pattern);
+
+            existing_files.extend(glob_matches_filtered(&target_path, |entry| {
+                entry.is_file() && matches_target_filename(pattern, entry)
+            }));
+        }
     }
 
     existing_files

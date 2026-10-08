@@ -10,6 +10,7 @@ use crate::net::remote_config;
 use crate::ops::flow::self_update;
 use crate::ops::installer::is_bepinex_console_enabled;
 use crate::ops::rollback;
+use crate::ops::toggle::doorstop_enabled;
 use crate::ops::upgrader::Upgrader;
 use crate::shutdown::run_shutdown;
 use crate::telemetry::report_event;
@@ -86,6 +87,14 @@ pub enum Event {
     },
     /// 追加一行日志
     Log(String),
+    /// 本地环境探测结果
+    Local(LocalInfo),
+    /// 启用 / 禁用完成（BepInEx、MetaMystia、ResourceExample 的启用状态）
+    ManageCompleted {
+        bepinex: bool,
+        dll: bool,
+        resourceex: bool,
+    },
     /// 没有可用更新
     NoUpdate,
     /// 版本更新说明（版本号与说明三元组）
@@ -93,8 +102,8 @@ pub enum Event {
         notes: Option<(String, String, String)>,
         version: String,
     },
-    /// 启动预取结果
-    Prefetch(Box<PrefetchOutcome>),
+    /// 远端版本信息获取结果
+    Remote(Result<RemoteInfo>),
     /// 管理工具自升级未完成：`None` 表示没有执行替换（平台跳过或版本已一致），`Some` 是错误信息
     SelfUpdate(Option<String>),
     /// 向导阶段变化
@@ -117,29 +126,31 @@ pub struct ConfirmRequest {
 
 /// 本地环境探测结果。
 #[derive(Clone, Default)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "字段直接对应界面上的组件状态"
+)]
 pub struct LocalInfo {
     /// 是否启用 BepInEx 控制台
     pub bepinex_console: bool,
+    /// BepInEx 是否被禁用（`doorstop_config.ini` 的 `[General] enabled`）
+    pub bepinex_disabled: bool,
     /// 是否安装 BepInEx
     pub bepinex_installed: bool,
     /// 已安装的 BepInEx 构建号
     pub bepinex_version: Option<String>,
     /// 探测过程是否失败
     pub detect_failed: bool,
+    /// MetaMystia 是否被禁用
+    pub dll_disabled: bool,
     /// 已安装的 MetaMystia 版本
     pub dll_version: Option<String>,
     /// 游戏目录
     pub game_root: Option<PathBuf>,
+    /// ResourceExample 是否被禁用
+    pub resourceex_disabled: bool,
     /// 已安装的 ResourceExample 版本
     pub resourceex_version: Option<String>,
-}
-
-/// 启动预取的本地与远端结果。
-pub struct PrefetchOutcome {
-    /// 本地探测结果
-    pub local: LocalInfo,
-    /// 远端版本获取结果
-    pub remote: Result<RemoteInfo>,
 }
 
 /// 预取到的远端信息。
@@ -165,6 +176,12 @@ pub struct Choices {
     pub game_root: PathBuf,
     /// 是否安装 ResourceExample
     pub install_resourceex: bool,
+    /// 启用 / 禁用操作：BepInEx 是否启用（`None` 表示不处理）
+    pub manage_bepinex: Option<bool>,
+    /// 启用 / 禁用操作：MetaMystia 是否启用（`None` 表示不处理）
+    pub manage_dll: Option<bool>,
+    /// 启用 / 禁用操作：ResourceExample 是否启用（`None` 表示不处理）
+    pub manage_resourceex: Option<bool>,
     /// 选定的操作
     pub operation: Option<OperationMode>,
     /// 选定的 ResourceExample 版本
@@ -321,8 +338,8 @@ impl GuiUi {
     }
 }
 
-/// 启动时的本地探测与远端预取。
-pub fn prefetch(ui: &GuiUi) -> PrefetchOutcome {
+/// 启动时的本地探测（含上次未完成操作的自动恢复）。
+pub fn prefetch_local(ui: &GuiUi) -> LocalInfo {
     ui.set_download_aborted(false);
 
     let mut local = detect_local(ui);
@@ -344,9 +361,7 @@ pub fn prefetch(ui: &GuiUi) -> PrefetchOutcome {
         }
     }
 
-    let remote = fetch_remote(ui);
-
-    PrefetchOutcome { local, remote }
+    local
 }
 
 /// 自动定位游戏目录并探测本地安装状态。
@@ -363,29 +378,51 @@ pub fn detect_local(ui: &GuiUi) -> LocalInfo {
 /// 探测指定游戏目录下的本地安装状态。
 pub fn detect_local_at(ui: &GuiUi, root: PathBuf) -> LocalInfo {
     let upgrader = Upgrader::new(root.clone(), ui);
-    let (dll_version, resourceex_version, detect_failed) = match upgrader.installed_versions() {
-        Ok((dll_version, resourceex_version)) => (dll_version, resourceex_version, false),
-        Err(e) => {
-            ui.log(format!("检测已安装组件失败：{e}"));
-            report_event("Env.DetectInstalled.Failed", Some(&format!("{e}")));
+    let (dll_disabled, dll_version, resourceex_disabled, resourceex_version, detect_failed) =
+        match upgrader.installed_versions() {
+            Ok(installed) => {
+                let dll_disabled = installed.dll.as_ref().is_some_and(|state| state.disabled);
+                let dll_version = installed.dll.map(|state| state.version);
+                let resourceex_disabled = installed
+                    .resourceex
+                    .as_ref()
+                    .is_some_and(|state| state.disabled);
+                let resourceex_version = installed.resourceex.map(|state| state.version);
 
-            (None, None, true)
-        }
-    };
+                (
+                    dll_disabled,
+                    dll_version,
+                    resourceex_disabled,
+                    resourceex_version,
+                    false,
+                )
+            }
+            Err(e) => {
+                ui.log(format!("检测已安装组件失败：{e}"));
+                report_event("Env.DetectInstalled.Failed", Some(&format!("{e}")));
+
+                (false, None, false, None, true)
+            }
+        };
     let bepinex_installed = root.join(BEPINEX_CORE_DLL).is_file();
+    let bepinex_disabled = bepinex_installed && !doorstop_enabled(&root).unwrap_or(true);
 
     LocalInfo {
         bepinex_console: is_bepinex_console_enabled(&root),
+        bepinex_disabled,
         bepinex_installed,
         bepinex_version: upgrader.read_bepinex_version(),
         detect_failed,
+        dll_disabled,
         dll_version,
         game_root: Some(root),
+        resourceex_disabled,
         resourceex_version,
     }
 }
 
-fn fetch_remote(ui: &GuiUi) -> Result<RemoteInfo> {
+/// 拉取远端版本信息与发行说明。
+pub fn fetch_remote(ui: &GuiUi) -> Result<RemoteInfo> {
     let downloader = Downloader::new(ui);
     let version_info = downloader.fetch_version_info()?;
 
@@ -569,6 +606,23 @@ impl Ui for GuiUi {
             UiEvent::UninstallRetryingFailedItems => {
                 self.uninstall_retrying_failed_items()?;
             }
+            UiEvent::ManageCompleted {
+                bepinex,
+                dll,
+                resourceex,
+            } => {
+                self.push(Event::ManageCompleted {
+                    bepinex,
+                    dll,
+                    resourceex,
+                });
+            }
+            UiEvent::DiagnosticsConfirmExport(entries) => {
+                return Ok(UiReply::Bool(self.diagnostics_confirm_export(entries)?));
+            }
+            UiEvent::DiagnosticsExported(path) => {
+                self.diagnostics_exported(path)?;
+            }
             UiEvent::DeletionStart => {
                 self.deletion_start()?;
             }
@@ -666,12 +720,6 @@ impl Ui for GuiUi {
             }
             UiEvent::SsoAskOpenBrowser => {
                 return Ok(UiReply::Bool(self.sso_ask_open_browser()?));
-            }
-            UiEvent::DiagnosticsConfirmExport(entries) => {
-                return Ok(UiReply::Bool(self.diagnostics_confirm_export(entries)?));
-            }
-            UiEvent::DiagnosticsExported(path) => {
-                self.diagnostics_exported(path)?;
             }
         }
 

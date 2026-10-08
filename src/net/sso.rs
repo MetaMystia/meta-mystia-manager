@@ -97,6 +97,7 @@ fn login(ui: &dyn Ui, config_url: &str) -> Result<bool> {
     let config = remote_config::get(ui, config_url)?;
 
     if !ui.emit(UiEvent::SsoAskOpenBrowser)?.bool()? {
+        telemetry::report_event("Sso.Login.Cancelled", Some("declined"));
         ui.emit(UiEvent::Message("已取消登录，未执行任何操作"))?;
         return Ok(false);
     }
@@ -127,10 +128,12 @@ fn login(ui: &dyn Ui, config_url: &str) -> Result<bool> {
             ticket
         }
         loopback::CallbackOutcome::Cancelled => {
+            telemetry::report_event("Sso.Login.Cancelled", Some("cancelled"));
             ui.emit(UiEvent::Message("已取消登录，未执行任何操作"))?;
             return Ok(false);
         }
         loopback::CallbackOutcome::TimedOut => {
+            telemetry::report_event("Sso.Login.Cancelled", Some("timeout"));
             ui.emit(UiEvent::Message("等待登录超时，未执行任何操作"))?;
             return Ok(false);
         }

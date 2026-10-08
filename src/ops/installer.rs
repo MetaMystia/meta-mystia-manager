@@ -1,8 +1,8 @@
 //! 全新安装流程。
 
 use crate::config::{
-    BEPINEX_CORE_DLL, METAMYSTIA_PLUGIN_GLOB, METAMYSTIA_PLUGIN_OLD_GLOB, RESOURCEEX_ZIP_GLOB,
-    RESOURCEEX_ZIP_OLD_GLOB,
+    BEPINEX_CORE_DLL, DISABLED_DIR_NAME, METAMYSTIA_PLUGIN_GLOB, METAMYSTIA_PLUGIN_OLD_GLOB,
+    RESOURCEEX_ZIP_GLOB, RESOURCEEX_ZIP_OLD_GLOB,
 };
 use crate::error::{ManagerError, Result};
 use crate::fs::extractor::Extractor;
@@ -15,6 +15,7 @@ use crate::mode::UninstallMode;
 use crate::net::downloader::{DownloadJob, Downloader};
 use crate::ops::preflight::run;
 use crate::ops::rollback::Rollback;
+use crate::ops::toggle::{Component, component_files, set_doorstop_enabled};
 use crate::platform::is_fs_dry_run;
 use crate::telemetry::report_event;
 use crate::ui::{Ui, UiEvent};
@@ -77,23 +78,14 @@ impl<'a> Installer<'a> {
 
     /// 游戏目录中是否已存在 MetaMystia 插件。
     pub fn is_metamystia_installed(&self) -> bool {
-        let matches = glob_matches_by_filename(
-            &self.game_root.join(METAMYSTIA_PLUGIN_GLOB),
-            VersionInfo::is_metamystia_filename,
-        );
-        !matches.is_empty()
+        let files = component_files(&self.game_root, Component::MetaMystia);
+        !files.enabled.is_empty() || !files.disabled.is_empty()
     }
 
     /// 是否存在 ResourceExample ZIP。
     pub fn is_resourceex_installed(&self) -> bool {
-        let resourceex_dir = self.game_root.join("ResourceEx");
-        resourceex_dir.exists() && resourceex_dir.is_dir() && {
-            let matches = glob_matches_by_filename(
-                &self.game_root.join(RESOURCEEX_ZIP_GLOB),
-                VersionInfo::is_resourceex_filename,
-            );
-            !matches.is_empty()
-        }
+        let files = component_files(&self.game_root, Component::ResourceEx);
+        !files.enabled.is_empty() || !files.disabled.is_empty()
     }
 
     /// 是否已安装 BepInEx 框架。
@@ -286,6 +278,7 @@ impl<'a> Installer<'a> {
 
         let deploy = || -> Result<()> {
             Extractor::deploy_bepinex(&bepinex_path, &self.game_root, exclusions)?;
+            let _ = set_doorstop_enabled(&self.game_root, true)?;
 
             let bepinex_config_dir = self.game_root.join("BepInEx").join("config");
             if !bepinex_config_dir.exists() && !is_fs_dry_run() {
@@ -416,6 +409,9 @@ impl<'a> Installer<'a> {
             if pattern == "BepInEx" || pattern == "ResourceEx" {
                 continue;
             }
+            if pattern == DISABLED_DIR_NAME {
+                continue;
+            }
 
             let target_path = game_root.join(pattern);
             if target_path.exists() {
@@ -536,7 +532,7 @@ pub fn update_bepinex_config(
 }
 
 /// 读取 INI 文本里 `[section]` 下的 `key` 值；不存在时返回 `None`。
-fn read_ini_value(text: &str, section: &str, key: &str) -> Option<String> {
+pub fn read_ini_value(text: &str, section: &str, key: &str) -> Option<String> {
     let header = format!("[{section}]");
     let mut in_section = false;
 
@@ -585,7 +581,7 @@ pub fn is_bepinex_console_enabled(game_root: &Path) -> bool {
 }
 
 /// 设置 INI 文本里 `[section]` 下的 `key = value`：存在则替换，不存在则追加，保留其它内容。
-fn set_ini_value(text: &str, section: &str, key: &str, value: &str) -> String {
+pub fn set_ini_value(text: &str, section: &str, key: &str, value: &str) -> String {
     let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
     let trailing_newline = text.is_empty() || text.ends_with('\n');
     let mut lines: Vec<String> = text.lines().map(ToString::to_string).collect();

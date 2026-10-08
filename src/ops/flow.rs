@@ -12,6 +12,9 @@ use crate::net::sso::ensure_logged_in;
 use crate::ops::installer::Installer;
 use crate::ops::rollback;
 use crate::ops::self_update::run_self_update;
+use crate::ops::toggle::{
+    Component, component_files, doorstop_enabled, set_component_enabled, set_doorstop_enabled,
+};
 use crate::ops::uninstaller::Uninstaller;
 use crate::ops::upgrader::Upgrader;
 use crate::platform::is_self_update_enabled;
@@ -32,6 +35,12 @@ pub struct Input {
     pub game_root: PathBuf,
     /// 升级/安装时是否处理 ResourceExample ZIP（界面可让用户跳过）
     pub install_resourceex: bool,
+    /// 是否启用 BepInEx（`None` 表示不改变）
+    pub manage_bepinex: Option<bool>,
+    /// 是否启用 MetaMystia（`None` 表示不改变）
+    pub manage_dll: Option<bool>,
+    /// 是否启用 ResourceExample（`None` 表示不改变）
+    pub manage_resourceex: Option<bool>,
     /// 是否需要下载文件
     pub needs_download: bool,
     /// 本次操作类型
@@ -67,9 +76,6 @@ pub fn run(ui: &dyn Ui, input: &Input) -> Result<()> {
 fn options_summary(input: &Input) -> String {
     match input.operation {
         OperationMode::Diagnostics => "op=diagnostics".to_string(),
-        OperationMode::Uninstall => {
-            format!("op=uninstall;full_uninstall={}", input.uninstall_full)
-        }
         OperationMode::Install | OperationMode::Upgrade => format!(
             "op={};dll={};resourceex={};download={};bepinex={};dll_update={};console={}",
             input.operation.name(),
@@ -80,6 +86,13 @@ fn options_summary(input: &Input) -> String {
             input.upgrade_dll,
             input.show_bepinex_console,
         ),
+        OperationMode::Manage => format!(
+            "op=manage;bepinex={:?};dll={:?};resourceex={:?}",
+            input.manage_bepinex, input.manage_dll, input.manage_resourceex
+        ),
+        OperationMode::Uninstall => {
+            format!("op=uninstall;full_uninstall={}", input.uninstall_full)
+        }
     }
 }
 
@@ -125,6 +138,7 @@ fn run_inner(ui: &dyn Ui, input: &Input) -> Result<()> {
                 run_install(input, ui)
             }
         }
+        OperationMode::Manage => run_manage(input, ui),
         OperationMode::Uninstall => run_uninstall(input, ui),
         OperationMode::Upgrade => run_upgrade(input, ui),
     }
@@ -141,6 +155,57 @@ fn run_install(input: &Input, ui: &dyn Ui) -> Result<()> {
         || installer.is_resourceex_installed();
 
     installer.install(has_installed)
+}
+
+fn manage_change(name: &str, enabled: bool, changed: bool) -> String {
+    format!(
+        "{name}:{}",
+        if !changed {
+            "unchanged"
+        } else if enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    )
+}
+
+fn run_manage(input: &Input, ui: &dyn Ui) -> Result<()> {
+    if check_game_running_cached()? {
+        ui.emit(UiEvent::GameRunningWarning)?;
+        return Err(ManagerError::GameRunning);
+    }
+
+    let mut changes = Vec::new();
+
+    if let Some(enable) = input.manage_bepinex {
+        let switched = set_doorstop_enabled(&input.game_root, enable)?;
+        changes.push(manage_change("bepinex", enable, switched));
+    }
+    if let Some(enable) = input.manage_dll {
+        let switched = set_component_enabled(&input.game_root, Component::MetaMystia, enable)?;
+        changes.push(manage_change("dll", enable, switched));
+    }
+    if let Some(enable) = input.manage_resourceex {
+        let switched = set_component_enabled(&input.game_root, Component::ResourceEx, enable)?;
+        changes.push(manage_change("resourceex", enable, switched));
+    }
+
+    let component_enabled = |component| {
+        component_files(&input.game_root, component)
+            .disabled
+            .is_empty()
+    };
+
+    report_event("Manage.Completed", Some(&changes.join(";")));
+
+    ui.emit(UiEvent::ManageCompleted {
+        bepinex: doorstop_enabled(&input.game_root)?,
+        dll: component_enabled(Component::MetaMystia),
+        resourceex: component_enabled(Component::ResourceEx),
+    })?;
+
+    Ok(())
 }
 
 fn run_upgrade(input: &Input, ui: &dyn Ui) -> Result<()> {

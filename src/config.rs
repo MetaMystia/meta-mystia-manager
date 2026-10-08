@@ -15,6 +15,15 @@ pub const USER_AGENT: &str = concat!(
 /// BepInEx 核心 DLL 相对游戏根目录的路径。
 pub const BEPINEX_CORE_DLL: &str = "BepInEx/core/BepInEx.Core.dll";
 
+/// 被禁用组件在游戏目录下的存放目录名（按原相对路径镜像）。
+pub const DISABLED_DIR_NAME: &str = concat!(".", env!("CARGO_PKG_NAME"), "-disabled");
+
+/// 禁用区里 MetaMystia 插件 DLL 的匹配模式。
+pub const DISABLED_METAMYSTIA_PLUGIN_GLOB: &str = "BepInEx/plugins/MetaMystia-v*.dll";
+
+/// 禁用区里 ResourceExample ZIP 的匹配模式。
+pub const DISABLED_RESOURCEEX_ZIP_GLOB: &str = "ResourceEx/ResourceExample-v*.zip";
+
 /// 游戏主程序文件名。
 pub const GAME_EXECUTABLE: &str = "Touhou Mystia Izakaya.exe";
 
