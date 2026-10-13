@@ -23,6 +23,7 @@ pub use imp::{
     collect_system_report, elevate_and_restart, file_product_version, focus_manager_window,
     free_space, is_elevated, is_fs_dry_run, is_game_running, is_self_update_enabled, machine_id,
     open_url, random_bytes, read_system_proxy_settings, resolve_pac_proxy, sha256, sha256_file,
+    system_locale_name,
 };
 
 #[cfg(windows)]

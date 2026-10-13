@@ -7,6 +7,7 @@ mod info;
 
 use crate::error::Result;
 use crate::format::format_bytes;
+use crate::i18n::{t, TextId};
 use crate::platform::collect_system_report;
 use crate::telemetry::report_event;
 use crate::ui::{Ui, UiEvent};
@@ -46,10 +47,7 @@ impl Collector {
     fn new(offset_secs: Option<i64>) -> Self {
         Self {
             entries: Vec::new(),
-            descriptions: vec![
-                "manager-info.txt（管理工具与系统信息、部署状态、已安装组件、最近操作）"
-                    .to_string(),
-            ],
+            descriptions: vec![t(TextId::Diag_Item_ManagerInfo).to_string()],
             notes: Vec::new(),
             packed: Vec::new(),
             crash_lines: Vec::new(),
@@ -112,7 +110,7 @@ pub fn export(ui: &dyn Ui, game_root: &Path) -> Result<PathBuf> {
         .emit(UiEvent::DiagnosticsConfirmExport(&collector.descriptions))?
         .bool()?
     {
-        ui.emit(UiEvent::Message("已取消导出诊断包"))?;
+        ui.emit(UiEvent::Message(t(TextId::Diag_Cancelled)))?;
         return Ok(PathBuf::new());
     }
 

@@ -4,6 +4,7 @@
 use crate::error::ManagerError;
 use crate::error::Result;
 use crate::fs::temp_dir::create_temp_dir_with_guard;
+use crate::i18n::{tf, TextId};
 use crate::net::downloader::Downloader;
 #[cfg(windows)]
 use crate::platform::{UPDATE_RESTART_ARG, suppress_console_window};
@@ -35,20 +36,30 @@ pub fn run_self_update(
 
     if let Err(e) = downloader.download_manager(version_info, &temp_path) {
         ui.emit(UiEvent::ManagerPromptManualUpdate)?;
-        ui.emit(UiEvent::ManagerUpdateFailed(&format!("下载失败：{e}")))?;
+        ui.emit(UiEvent::ManagerUpdateFailed(&tf(
+            TextId::Log_SelfUpdateDownloadFailed,
+            &[("error", &e.to_string())],
+        )))?;
         report_event("SelfUpdate.Failed.Download", Some(&format!("{e}")));
         return Err(e);
     }
 
     if let Err(e) = move_new_version(&temp_path, &target_path) {
         ui.emit(UiEvent::ManagerPromptManualUpdate)?;
-        ui.emit(UiEvent::ManagerUpdateFailed(&format!(
-            "写入运行目录失败：{e}"
+        ui.emit(UiEvent::ManagerUpdateFailed(&tf(
+            TextId::Log_SelfUpdateWriteFailed,
+            &[("error", &e.to_string())],
         )))?;
         report_event("SelfUpdate.Failed.Move", Some(&format!("{e}")));
         return Err(ManagerError::from(io::Error::new(
             e.kind(),
-            format!("写入运行目录 {} 失败：{e}", target_path.display()),
+            tf(
+                TextId::Log_SelfUpdateWriteFailedPath,
+                &[
+                    ("path", &target_path.display().to_string()),
+                    ("error", &e.to_string()),
+                ],
+            ),
         )));
     }
 
@@ -62,13 +73,20 @@ pub fn run_self_update(
 
     if let Err(e) = command.spawn() {
         ui.emit(UiEvent::ManagerPromptManualUpdate)?;
-        ui.emit(UiEvent::ManagerUpdateFailed(&format!(
-            "启动新版本失败：{e}"
+        ui.emit(UiEvent::ManagerUpdateFailed(&tf(
+            TextId::Log_SelfUpdateLaunchFailed,
+            &[("error", &e.to_string())],
         )))?;
         report_event("SelfUpdate.Failed.Spawn", Some(&format!("{e}")));
         return Err(ManagerError::from(io::Error::new(
             e.kind(),
-            format!("启动新版本 {} 失败：{e}", target_path.display()),
+            tf(
+                TextId::Log_SelfUpdateLaunchFailedPath,
+                &[
+                    ("path", &target_path.display().to_string()),
+                    ("error", &e.to_string()),
+                ],
+            ),
         )));
     }
 
@@ -148,7 +166,10 @@ pub fn run_self_update(
     let temp_path = temp_dir.join(&filename);
 
     if let Err(e) = downloader.download_manager(version_info, &temp_path) {
-        ui.emit(UiEvent::ManagerUpdateFailed(&format!("下载失败：{e}")))?;
+        ui.emit(UiEvent::ManagerUpdateFailed(&tf(
+            TextId::Log_SelfUpdateDownloadFailed,
+            &[("error", &e.to_string())],
+        )))?;
         report_event("SelfUpdate.Failed.Download", Some(&format!("{e}")));
         return Err(e);
     }

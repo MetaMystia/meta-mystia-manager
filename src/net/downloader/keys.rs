@@ -7,6 +7,7 @@ use super::{
 };
 use crate::error::service_error_reason;
 use crate::format::format_bytes;
+use crate::i18n::{t, tf, TextId};
 use crate::net::downloader::transfer::{
     ChunkReader, STALL_TIMEOUT, sleep_for_rate_limit, wait_while_paused,
 };
@@ -74,7 +75,13 @@ fn verify_digest(path: &Path, expected: &str, context: Option<md5::Context>) -> 
         let mut file = fs::File::open(path).map_err(|e| {
             ManagerError::from(io::Error::new(
                 e.kind(),
-                format!("读取文件 {} 失败：{}", path.display(), e),
+                tf(
+                    TextId::Err_ReadFileFailed,
+                    &[
+                        ("path", &path.display().to_string()),
+                        ("error", &e.to_string()),
+                    ],
+                ),
             ))
         })?;
         let mut context = md5::Context::new();
@@ -84,7 +91,13 @@ fn verify_digest(path: &Path, expected: &str, context: Option<md5::Context>) -> 
             let read = file.read(&mut buffer).map_err(|e| {
                 ManagerError::from(io::Error::new(
                     e.kind(),
-                    format!("读取文件 {} 失败：{}", path.display(), e),
+                    tf(
+                        TextId::Err_ReadFileFailed,
+                        &[
+                            ("path", &path.display().to_string()),
+                            ("error", &e.to_string()),
+                        ],
+                    ),
                 ))
             })?;
             if read == 0 {
@@ -108,12 +121,13 @@ fn verify_digest(path: &Path, expected: &str, context: Option<md5::Context>) -> 
     );
 
     Err(ManagerError::NetworkError(
-        "下载文件校验失败，请重试".to_string(),
+        t(TextId::Err_DownloadChecksumFailed).to_string(),
     ))
 }
 
 impl Downloader<'_> {
     /// 用当前下载会话申请一次性密钥；`category` 为 `None` 表示扁平路径。
+    #[allow(clippy::too_many_lines, reason = "密钥申请流程：请求与各类错误分支集中处理")]
     fn request_download_key(
         &self,
         config: &RemoteConfig,
@@ -121,7 +135,7 @@ impl Downloader<'_> {
         filename: &str,
     ) -> Result<DownloadKey> {
         let token = sso::current_download_token().ok_or_else(|| {
-            ManagerError::SsoLoginFailed("下载文件需要先登录，请重新登录后重试".to_string())
+            ManagerError::SsoLoginFailed(t(TextId::Err_DownloadLoginRequired).to_string())
         })?;
 
         let request_body = serde_json::json!({
@@ -129,7 +143,12 @@ impl Downloader<'_> {
             "filename": filename,
         });
         let request_body = serde_json::to_string(&request_body)
-            .map_err(|e| ManagerError::Other(format!("构造下载请求失败：{e}")))?;
+            .map_err(|e| {
+                ManagerError::Other(tf(
+                    TextId::Err_BuildDownloadRequestFailed,
+                    &[("error", &e.to_string())],
+                ))
+            })?;
 
         let response = self
             .metadata_agent(&config.download.keys_url)
@@ -142,19 +161,31 @@ impl Downloader<'_> {
 
         let status = response.status().as_u16();
         if status == 429 {
-            return Err(rate_limit_error(&response, self.ui, "申请下载密钥"));
+            return Err(rate_limit_error(
+                &response,
+                self.ui,
+                t(TextId::Err_Op_RequestKey),
+            ));
         }
 
         let text = response
             .into_body()
             .read_to_string()
-            .map_err(|e| ManagerError::NetworkError(format!("读取下载密钥响应失败：{e}")))?;
+            .map_err(|e| {
+                ManagerError::NetworkError(tf(
+                    TextId::Err_ReadKeyResponseFailed,
+                    &[("error", &e.to_string())],
+                ))
+            })?;
         let envelope: DownloadKeyEnvelope = serde_json::from_str(&text).map_err(|e| {
             report_event(
                 "Download.Key.ParseFailed",
                 Some(&format!("category={category:?};status={status};err={e}")),
             );
-            ManagerError::NetworkError(format!("申请下载密钥失败：HTTP {status}"))
+            ManagerError::NetworkError(tf(
+                TextId::Err_KeyRequestHttp,
+                &[("status", &status.to_string())],
+            ))
         })?;
 
         if status != 200 {
@@ -179,11 +210,15 @@ impl Downloader<'_> {
                     .is_some_and(|status| (500..=599).contains(&status));
 
             return if retryable {
-                Err(ManagerError::NetworkError(format!(
-                    "申请下载密钥失败：{reason}"
+                Err(ManagerError::NetworkError(tf(
+                    TextId::Err_ScopeFailed,
+                    &[("scope", t(TextId::Err_Op_RequestKey)), ("reason", &reason)],
                 )))
             } else {
-                Err(ManagerError::ServiceError(format!("下载失败：{reason}")))
+                Err(ManagerError::ServiceError(tf(
+                    TextId::Err_ScopeFailed,
+                    &[("scope", t(TextId::Err_Op_DownloadFile)), ("reason", &reason)],
+                )))
             };
         }
 
@@ -198,7 +233,7 @@ impl Downloader<'_> {
             );
 
             return Err(ManagerError::NetworkError(
-                "下载服务响应异常，请升级管理工具后重试".to_string(),
+                t(TextId::Err_DownloadServiceBroken).to_string(),
             ));
         };
         let Some(md5) = envelope.md5 else {
@@ -208,7 +243,7 @@ impl Downloader<'_> {
             );
 
             return Err(ManagerError::NetworkError(
-                "下载服务响应异常，请升级管理工具后重试".to_string(),
+                t(TextId::Err_DownloadServiceBroken).to_string(),
             ));
         };
         let rate_limit_bps = remote_config::rate_limit_bytes_per_second(rate_limit_kb_per_second);
@@ -258,7 +293,7 @@ impl Downloader<'_> {
                     .finish_download(&part, dest, id)
                     .map_err(KeyedDownloadError::Failed),
                 Err(e) => {
-                    let message = format!("下载失败：{filename}");
+                    let message = tf(TextId::Err_DownloadFileFailed, &[("name", &filename)]);
                     let _ = self
                         .ui
                         .emit(UiEvent::DownloadFinish(id, &message, JobOutcome::Failed));
@@ -286,7 +321,7 @@ impl Downloader<'_> {
             report_event("Download.Range.Restart", Some(&dest.display().to_string()));
             return Err(KeyedDownloadError::Restart);
         }
-        if let Some(err) = check_response_status(&response, self.ui, "下载文件") {
+        if let Some(err) = check_response_status(&response, self.ui, t(TextId::Err_Op_DownloadFile)) {
             return Err(KeyedDownloadError::Failed(err));
         }
 
@@ -294,7 +329,10 @@ impl Downloader<'_> {
         let append_from = if status == 206 { resume_from } else { 0 };
         // 续传时进度条只统计本次传输量，否则速度会瞬间跳到"已完成大小/0s"
         let label = if append_from > 0 {
-            format!("{filename}（续传，已完成 {}）", format_bytes(append_from))
+            tf(
+                TextId::Err_DownloadResume,
+                &[("name", &filename), ("size", &format_bytes(append_from))],
+            )
         } else {
             filename.clone()
         };
@@ -312,7 +350,7 @@ impl Downloader<'_> {
             Ok(()) => Ok(()),
             Err(e) => {
                 // 失败时收尾进度条，避免留下卡住的下载行
-                let message = format!("下载失败：{filename}");
+                let message = tf(TextId::Err_DownloadFileFailed, &[("name", &filename)]);
                 let _ = self
                     .ui
                     .emit(UiEvent::DownloadFinish(id, &message, JobOutcome::Failed));
@@ -341,7 +379,13 @@ impl Downloader<'_> {
             fs::create_dir_all(parent).map_err(|e| {
                 ManagerError::from(io::Error::new(
                     e.kind(),
-                    format!("创建目录 {} 失败：{}", parent.display(), e),
+                    tf(
+                        TextId::Err_CreateDirFailed,
+                        &[
+                            ("path", &parent.display().to_string()),
+                            ("error", &e.to_string()),
+                        ],
+                    ),
                 ))
             })?;
         }
@@ -353,14 +397,26 @@ impl Downloader<'_> {
                 .map_err(|e| {
                     ManagerError::from(io::Error::new(
                         e.kind(),
-                        format!("打开部分下载文件 {} 失败：{}", part.display(), e),
+                        tf(
+                            TextId::Err_OpenFileFailed,
+                            &[
+                                ("path", &part.display().to_string()),
+                                ("error", &e.to_string()),
+                            ],
+                        ),
                     ))
                 })?
         } else {
             fs::File::create(&part).map_err(|e| {
                 ManagerError::from(io::Error::new(
                     e.kind(),
-                    format!("创建部分下载文件 {} 失败：{}", part.display(), e),
+                    tf(
+                        TextId::Err_CreateFileFailed,
+                        &[
+                            ("path", &part.display().to_string()),
+                            ("error", &e.to_string()),
+                        ],
+                    ),
                 ))
             })?
         };
@@ -375,7 +431,13 @@ impl Downloader<'_> {
             file.write_all(&chunk).map_err(|e| {
                 ManagerError::from(io::Error::new(
                     e.kind(),
-                    format!("写入部分下载文件 {} 失败：{}", part.display(), e),
+                    tf(
+                        TextId::Err_WriteFileFailed,
+                        &[
+                            ("path", &part.display().to_string()),
+                            ("error", &e.to_string()),
+                        ],
+                    ),
                 ))
             })?;
 
@@ -404,7 +466,13 @@ impl Downloader<'_> {
         file.flush().map_err(|e| {
             ManagerError::from(io::Error::new(
                 e.kind(),
-                format!("同步部分下载文件 {} 失败：{}", part.display(), e),
+                tf(
+                    TextId::Err_SyncFileFailed,
+                    &[
+                        ("path", &part.display().to_string()),
+                        ("error", &e.to_string()),
+                    ],
+                ),
             ))
         })?;
         drop(file);
@@ -430,7 +498,8 @@ impl Downloader<'_> {
         }
 
         self.retry(op_desc, || {
-            let mut last_err = ManagerError::NetworkError("下载密钥已失效，请重试".to_string());
+            let mut last_err =
+                ManagerError::NetworkError(t(TextId::Err_DownloadKeyInvalid).to_string());
 
             for _ in 0..KEY_ATTEMPTS {
                 if self.is_cancelled() {
@@ -446,11 +515,14 @@ impl Downloader<'_> {
                             "Download.Key.Expired",
                             Some(&format!("category={category:?};file={filename}")),
                         );
-                        last_err = ManagerError::NetworkError("下载密钥已失效，请重试".to_string());
+                        last_err = ManagerError::NetworkError(
+                            t(TextId::Err_DownloadKeyInvalid).to_string(),
+                        );
                     }
                     Err(KeyedDownloadError::Restart) => {
-                        last_err =
-                            ManagerError::NetworkError("下载断点无效，重新下载失败".to_string());
+                        last_err = ManagerError::NetworkError(
+                            t(TextId::Err_ResumeInvalid).to_string(),
+                        );
                     }
                     Err(KeyedDownloadError::Failed(err)) => return Err(err),
                 }

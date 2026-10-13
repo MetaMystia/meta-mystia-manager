@@ -27,6 +27,11 @@ pub fn read_system_proxy_settings() -> SystemProxySettings {
     SystemProxySettings::default()
 }
 
+/// 非 Windows 平台：不提供系统语言。
+pub const fn system_locale_name() -> Option<String> {
+    None
+}
+
 /// 非 Windows 平台：不解析 PAC。
 pub const fn resolve_pac_proxy(
     _target_url: &str,

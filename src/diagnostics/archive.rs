@@ -2,6 +2,7 @@
 
 use super::{Body, Entry, format_timestamp};
 use crate::error::{ManagerError, Result};
+use crate::i18n::{t, tf, TextId};
 
 use std::{
     env, fs,
@@ -37,7 +38,7 @@ pub(super) fn archive_path() -> Result<PathBuf> {
     }
 
     Err(ManagerError::PermissionDenied(
-        "无法在管理工具目录或临时目录创建诊断包".to_string(),
+        t(TextId::Err_DiagPackDirMissing).to_string(),
     ))
 }
 
@@ -46,16 +47,26 @@ pub(super) fn write_archive(path: &Path, info: &str, entries: &[Entry]) -> Resul
     let file = fs::File::create(path).map_err(|e| {
         ManagerError::from(io::Error::new(
             e.kind(),
-            format!("创建诊断包 {} 失败：{}", path.display(), e),
+            tf(
+                TextId::Err_DiagCreateFailed,
+                &[
+                    ("path", &path.display().to_string()),
+                    ("error", &e.to_string()),
+                ],
+            ),
         ))
     })?;
     let mut zip = ZipWriter::new(file);
     let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
 
     zip.start_file("manager-info.txt", options)
-        .map_err(|e| ManagerError::Other(format!("写入诊断包失败：{e}")))?;
+        .map_err(|e| {
+            ManagerError::Other(tf(TextId::Err_DiagWriteFailed, &[("error", &e.to_string())]))
+        })?;
     zip.write_all(info.as_bytes())
-        .map_err(|e| ManagerError::Other(format!("写入诊断包失败：{e}")))?;
+        .map_err(|e| {
+            ManagerError::Other(tf(TextId::Err_DiagWriteFailed, &[("error", &e.to_string())]))
+        })?;
 
     for entry in entries {
         let Ok(mut source) = fs::File::open(&entry.source) else {
@@ -63,13 +74,19 @@ pub(super) fn write_archive(path: &Path, info: &str, entries: &[Entry]) -> Resul
         };
 
         zip.start_file(&entry.archive_name, options)
-            .map_err(|e| ManagerError::Other(format!("写入诊断包失败：{e}")))?;
+            .map_err(|e| {
+                ManagerError::Other(tf(TextId::Err_DiagWriteFailed, &[("error", &e.to_string())]))
+            })?;
         write_entry(&mut zip, &mut source, &entry.body)
-            .map_err(|e| ManagerError::Other(format!("写入诊断包失败：{e}")))?;
+            .map_err(|e| {
+                ManagerError::Other(tf(TextId::Err_DiagWriteFailed, &[("error", &e.to_string())]))
+            })?;
     }
 
     zip.finish()
-        .map_err(|e| ManagerError::Other(format!("完成诊断包失败：{e}")))?;
+        .map_err(|e| {
+            ManagerError::Other(tf(TextId::Err_DiagFinishFailed, &[("error", &e.to_string())]))
+        })?;
 
     Ok(())
 }

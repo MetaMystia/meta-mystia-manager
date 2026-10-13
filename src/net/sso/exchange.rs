@@ -3,6 +3,7 @@
 //! `client secret` 只保存在服务端，客户端不再直接调用主站的 validate 接口。
 
 use crate::error::{ManagerError, Result, service_error};
+use crate::i18n::{t, tf, TextId};
 
 use serde::Deserialize;
 
@@ -50,7 +51,12 @@ pub fn create_session(
         "code_verifier": code_verifier,
     });
     let request_body = serde_json::to_string(&request_body)
-        .map_err(|e| ManagerError::SsoLoginFailed(format!("登录失败：无法构造请求（{e}）")))?;
+        .map_err(|e| {
+            ManagerError::SsoLoginFailed(tf(
+                TextId::Err_LoginBuildRequestFailed,
+                &[("error", &e.to_string())],
+            ))
+        })?;
 
     // Agent 关闭了 http_status_as_error，因此 4xx/5xx 也会回到这里，由错误码决定提示
     let response = agent
@@ -64,15 +70,23 @@ pub fn create_session(
     let text = response
         .into_body()
         .read_to_string()
-        .map_err(|e| ManagerError::SsoLoginFailed(format!("登录失败：无法读取响应（{e}）")))?;
+        .map_err(|e| {
+            ManagerError::SsoLoginFailed(tf(
+                TextId::Err_LoginReadResponseFailed,
+                &[("error", &e.to_string())],
+            ))
+        })?;
 
     let body: SessionResponse = serde_json::from_str(&text).map_err(|e| {
-        ManagerError::SsoLoginFailed(format!("登录失败：无法解析登录服务响应（{e}）"))
+        ManagerError::SsoLoginFailed(tf(
+            TextId::Err_LoginParseResponseFailed,
+            &[("error", &e.to_string())],
+        ))
     })?;
 
     let (Some(download_token), Some(user)) = (body.token, body.user) else {
         return Err(service_error(
-            "登录",
+            t(TextId::Err_Op_Login),
             body.error.as_deref().unwrap_or_default(),
             http_status,
         ));
@@ -92,8 +106,11 @@ fn transport_error(e: ureq::Error) -> ManagerError {
         | ureq::Error::ConnectionFailed
         | ureq::Error::HostNotFound
         | ureq::Error::Timeout(_) => {
-            ManagerError::SsoLoginFailed("登录需要联网：请检查网络后重试".to_string())
+            ManagerError::SsoLoginFailed(t(TextId::Err_LoginOffline).to_string())
         }
-        other => ManagerError::SsoLoginFailed(format!("登录失败：{other}")),
+        other => ManagerError::SsoLoginFailed(tf(
+            TextId::Err_LoginFailedDetail,
+            &[("error", &other.to_string())],
+        )),
     }
 }

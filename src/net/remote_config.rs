@@ -4,6 +4,7 @@
 
 use crate::error::{ManagerError, Result};
 use crate::http::build_metadata_agent;
+use crate::i18n::{t, tf, TextId};
 use crate::net::check_response_status;
 use crate::telemetry::report_event;
 use crate::ui::Ui;
@@ -68,7 +69,7 @@ static REMOTE_CONFIG_CACHE: OnceLock<Mutex<Option<(String, RemoteConfig)>>> = On
 
 /// 获取运行期配置；进程内只请求一次。
 pub fn get(ui: &dyn Ui, config_url: &str) -> Result<RemoteConfig> {
-    require_https("版本配置地址", config_url)?;
+    require_https(t(TextId::Err_Label_VersionConfig), config_url)?;
 
     let cache = REMOTE_CONFIG_CACHE.get_or_init(|| Mutex::new(None));
 
@@ -83,29 +84,50 @@ pub fn get(ui: &dyn Ui, config_url: &str) -> Result<RemoteConfig> {
     let response = agent
         .get(config_url)
         .call()
-        .map_err(|e| ManagerError::NetworkError(format!("获取下载配置失败：{e}")))?;
+        .map_err(|e| {
+            ManagerError::NetworkError(tf(
+                TextId::Err_FetchConfigFailed,
+                &[("error", &e.to_string())],
+            ))
+        })?;
 
-    if let Some(err) = check_response_status(&response, ui, "获取下载配置") {
+    if let Some(err) = check_response_status(&response, ui, t(TextId::Err_Op_FetchDownloadConfig)) {
         return Err(err);
     }
 
     let text = response
         .into_body()
         .read_to_string()
-        .map_err(|e| ManagerError::NetworkError(format!("读取下载配置失败：{e}")))?;
+        .map_err(|e| {
+            ManagerError::NetworkError(tf(
+                TextId::Err_ReadConfigFailed,
+                &[("error", &e.to_string())],
+            ))
+        })?;
     let config: RemoteConfig = serde_json::from_str(&text)
-        .map_err(|e| ManagerError::NetworkError(format!("解析下载配置失败：{e}")))?;
+        .map_err(|e| {
+            ManagerError::NetworkError(tf(
+                TextId::Err_ParseConfigFailed,
+                &[("error", &e.to_string())],
+            ))
+        })?;
 
-    require_https("下载密钥地址", &config.download.keys_url)?;
-    require_https("登录授权地址", &config.sso.authorize_origin)?;
-    require_https("登录会话地址", &config.sso.session_url)?;
+    require_https(t(TextId::Err_Label_KeysUrl), &config.download.keys_url)?;
+    require_https(
+        t(TextId::Err_Label_AuthorizeOrigin),
+        &config.sso.authorize_origin,
+    )?;
+    require_https(t(TextId::Err_Label_SessionUrl), &config.sso.session_url)?;
     if let Some(self_update) = &config.self_update {
-        require_https("自更新下载地址", &self_update.api_base)?;
-        require_https("自更新入口", &self_update.entry_url)?;
+        require_https(t(TextId::Err_Label_SelfUpdateApi), &self_update.api_base)?;
+        require_https(t(TextId::Err_Label_SelfUpdateEntry), &self_update.entry_url)?;
     }
     if let Some(sources) = &config.sources {
-        require_https("BepInEx 主源", &sources.bep_in_ex_primary)?;
-        require_https("GitHub 发布信息地址", &sources.github_release_api)?;
+        require_https(t(TextId::Log_Endpoint_BepInExPrimary), &sources.bep_in_ex_primary)?;
+        require_https(
+            t(TextId::Err_Label_GithubReleaseApi),
+            &sources.github_release_api,
+        )?;
     }
 
     if let Ok(mut guard) = cache.lock() {
@@ -143,8 +165,9 @@ fn require_https(label: &str, url: &str) -> Result<()> {
         Some(&format!("{label}={url}")),
     );
 
-    Err(ManagerError::NetworkError(format!(
-        "配置无效：{label}不是 HTTPS 地址"
+    Err(ManagerError::NetworkError(tf(
+        TextId::Err_ConfigNotHttps,
+        &[("label", label)],
     )))
 }
 

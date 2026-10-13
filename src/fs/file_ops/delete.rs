@@ -2,6 +2,7 @@
 
 use super::{ensure_game_not_running_for_path, ensure_owner_writable};
 use crate::error::ManagerError;
+use crate::i18n::{tf, TextId};
 use crate::platform::is_fs_dry_run;
 use crate::telemetry::report_event;
 use crate::ui::{Ui, UiEvent};
@@ -266,7 +267,10 @@ pub fn run_deletion(files: &[PathBuf], ui: &dyn Ui) -> Vec<DeletionResult> {
 
     for (index, path) in files.iter().enumerate() {
         let label = if path.is_dir() {
-            format!("{}（目录，文件较多时请稍候）", path.display())
+            tf(
+                TextId::Log_DirManyFiles,
+                &[("path", &path.display().to_string())],
+            )
         } else {
             path.display().to_string()
         };
@@ -301,18 +305,18 @@ pub fn run_deletion(files: &[PathBuf], ui: &dyn Ui) -> Vec<DeletionResult> {
 }
 
 fn delete_file(path: &Path) -> DeletionResult {
-    delete_path(path, |path| fs::remove_file(path), "执行删除后文件仍存在")
+    delete_path(path, |path| fs::remove_file(path), TextId::Err_DeleteRemainsFile)
 }
 
 fn delete_directory(path: &Path) -> DeletionResult {
     delete_path(
         path,
         |path| fs::remove_dir_all(path),
-        "执行删除后文件夹仍存在",
+        TextId::Err_DeleteRemainsDir,
     )
 }
 
-fn delete_path<F>(path: &Path, remove: F, still_exists_message: &str) -> DeletionResult
+fn delete_path<F>(path: &Path, remove: F, still_exists_message: TextId) -> DeletionResult
 where
     F: Fn(&Path) -> io::Result<()>,
 {
@@ -332,7 +336,13 @@ where
     match remove(path) {
         Ok(()) => {
             if path.exists() {
-                deletion_failed(path, ManagerError::Other(still_exists_message.to_string()))
+                deletion_failed(
+                    path,
+                    ManagerError::Other(tf(
+                        still_exists_message,
+                        &[("path", &path.display().to_string())],
+                    )),
+                )
             } else {
                 deletion_success(path)
             }

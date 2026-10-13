@@ -3,6 +3,7 @@
 use crate::error::{ManagerError, Result};
 use crate::format::format_bytes;
 use crate::http::{build_agent_with_timeouts, host_key};
+use crate::i18n::{t, tf, TextId};
 use crate::net::remote_config;
 use crate::platform::free_space;
 use crate::telemetry::report_event;
@@ -21,9 +22,9 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// 安装/升级前的预检：磁盘空间与关键站点可达性。
 pub fn run(ui: &dyn Ui, game_root: &Path, temp_dir: &Path, config_url: &str) -> Result<()> {
-    check_free_space("游戏目录", game_root)?;
+    check_free_space(t(TextId::Log_Label_GameDir), game_root)?;
     if !temp_dir.starts_with(game_root) {
-        check_free_space("临时目录", temp_dir)?;
+        check_free_space(t(TextId::Log_Label_TempDir), temp_dir)?;
     }
 
     let config_url = config_url.trim();
@@ -48,11 +49,14 @@ fn check_free_space(label: &str, path: &Path) -> Result<()> {
         Some(&format!("{label};free={free}")),
     );
 
-    Err(ManagerError::ServiceError(format!(
-        "磁盘空间不足：{label}（{}）剩余 {}，至少需要 {}，请清理后重试",
-        path.display(),
-        format_bytes(free),
-        format_bytes(MIN_FREE_BYTES)
+    Err(ManagerError::ServiceError(tf(
+        TextId::Log_FreeSpaceLow,
+        &[
+            ("label", label),
+            ("path", &path.display().to_string()),
+            ("free", &format_bytes(free)),
+            ("needed", &format_bytes(MIN_FREE_BYTES)),
+        ],
     )))
 }
 
@@ -60,10 +64,13 @@ fn check_endpoints(ui: &dyn Ui, config_url: &str) -> Result<()> {
     let config = remote_config::get(ui, config_url)?;
     let mut endpoints: Vec<(&str, &str)> = Vec::new();
     if let Some(self_update) = &config.self_update {
-        endpoints.push(("文件服务", self_update.entry_url.as_str()));
+        endpoints.push((t(TextId::Log_Endpoint_FileService), self_update.entry_url.as_str()));
     }
     if let Some(sources) = &config.sources {
-        endpoints.push(("BepInEx 主源", sources.bep_in_ex_primary.as_str()));
+        endpoints.push((
+            t(TextId::Log_Endpoint_BepInExPrimary),
+            sources.bep_in_ex_primary.as_str(),
+        ));
         endpoints.push(("GitHub", sources.github_release_api.as_str()));
     }
     let unreachable = thread::scope(|scope| {
@@ -104,9 +111,9 @@ fn check_endpoints(ui: &dyn Ui, config_url: &str) -> Result<()> {
     });
 
     if !unreachable.is_empty() {
-        ui.emit(UiEvent::Warn(&format!(
-            "以下站点当前不可达：{}。下载可能变慢或回退到备用源。",
-            unreachable.join("、")
+        ui.emit(UiEvent::Warn(&tf(
+            TextId::Log_PreflightUnreachable,
+            &[("sites", &unreachable.join(t(TextId::ListSeparator)))],
         )))?;
     }
 

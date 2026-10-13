@@ -12,6 +12,7 @@ mod error;
 mod format;
 mod fs;
 mod http;
+mod i18n;
 mod mode;
 mod net;
 mod ops;

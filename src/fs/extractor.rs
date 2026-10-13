@@ -2,6 +2,7 @@
 
 use crate::error::{ManagerError, Result};
 use crate::fs::file_ops::atomic_rename_or_copy;
+use crate::i18n::{t, tf, TextId};
 use crate::platform::is_fs_dry_run;
 use crate::telemetry::report_event;
 
@@ -17,7 +18,13 @@ fn write_entry_to_file(entry: &mut impl io::Read, outpath: &Path) -> Result<()> 
         fs::create_dir_all(parent).map_err(|e| {
             ManagerError::from(io::Error::new(
                 e.kind(),
-                format!("创建父目录 {} 失败：{}", parent.display(), e),
+                tf(
+                    TextId::Err_CreateDirFailed,
+                    &[
+                        ("path", &parent.display().to_string()),
+                        ("error", &e.to_string()),
+                    ],
+                ),
             ))
         })?;
     }
@@ -32,7 +39,13 @@ fn write_entry_to_file(entry: &mut impl io::Read, outpath: &Path) -> Result<()> 
     let mut tmp_file = fs::File::create(&tmp_path).map_err(|e| {
         ManagerError::from(io::Error::new(
             e.kind(),
-            format!("创建临时文件 {} 失败：{}", tmp_path.display(), e),
+            tf(
+                TextId::Err_CreateTempFileFailed,
+                &[
+                    ("path", &tmp_path.display().to_string()),
+                    ("error", &e.to_string()),
+                ],
+            ),
         ))
     })?;
 
@@ -40,16 +53,24 @@ fn write_entry_to_file(entry: &mut impl io::Read, outpath: &Path) -> Result<()> 
         let _ = fs::remove_file(&tmp_path);
         return Err(ManagerError::from(io::Error::new(
             e.kind(),
-            format!("写入临时文件 {} 失败：{}", tmp_path.display(), e),
+            tf(
+                TextId::Err_WriteTempFileFailed,
+                &[
+                    ("path", &tmp_path.display().to_string()),
+                    ("error", &e.to_string()),
+                ],
+            ),
         )));
     }
 
     if let Err(e) = atomic_rename_or_copy(&tmp_path, outpath) {
         let _ = fs::remove_file(&tmp_path);
-        return Err(ManagerError::from(io::Error::other(format!(
-            "重命名或复制临时文件 {} 失败：{}",
-            tmp_path.display(),
-            e
+        return Err(ManagerError::from(io::Error::other(tf(
+            TextId::Err_RenameOrCopyFailed,
+            &[
+                ("path", &tmp_path.display().to_string()),
+                ("error", &e.to_string()),
+            ],
         ))));
     }
 
@@ -67,16 +88,30 @@ impl Extractor {
         let file = fs::File::open(zip_path).map_err(|e| {
             ManagerError::from(io::Error::new(
                 e.kind(),
-                format!("打开 ZIP 文件 {} 失败：{}", zip_path.display(), e),
+                tf(
+                    TextId::Err_OpenZipFailed,
+                    &[
+                        ("path", &zip_path.display().to_string()),
+                        ("error", &e.to_string()),
+                    ],
+                ),
             ))
         })?;
         let mut archive = ZipArchive::new(file)
-            .map_err(|e| ManagerError::ExtractFailed(format!("读取 ZIP 失败：{e}")))?;
+            .map_err(|e| {
+                ManagerError::ExtractFailed(tf(
+                    TextId::Err_ReadZipFailed,
+                    &[("error", &e.to_string())],
+                ))
+            })?;
         let mut entries = Vec::new();
 
         for i in 0..archive.len() {
             let file = archive.by_index(i).map_err(|e| {
-                ManagerError::ExtractFailed(format!("读取条目失败（index {i}）：{e}"))
+                ManagerError::ExtractFailed(tf(
+                    TextId::Err_ReadZipEntryFailed,
+                    &[("index", &i.to_string()), ("error", &e.to_string())],
+                ))
             })?;
             let Some(path) = file.enclosed_name() else {
                 continue;
@@ -108,7 +143,13 @@ impl Extractor {
             Err(e) => {
                 return Err(ManagerError::from(io::Error::new(
                     e.kind(),
-                    format!("打开 ZIP 文件 {} 失败：{}", zip_path.display(), e),
+                    tf(
+                        TextId::Err_OpenZipFailed,
+                        &[
+                            ("path", &zip_path.display().to_string()),
+                            ("error", &e.to_string()),
+                        ],
+                    ),
                 )));
             }
         };
@@ -120,7 +161,10 @@ impl Extractor {
                     "Extract.Failed.OpenArchive",
                     Some(&format!("{};err={}", zip_path.display(), e)),
                 );
-                return Err(ManagerError::ExtractFailed(format!("读取 ZIP 失败：{e}")));
+                return Err(ManagerError::ExtractFailed(tf(
+                    TextId::Err_ReadZipFailed,
+                    &[("error", &e.to_string())],
+                )));
             }
         };
 
@@ -132,7 +176,10 @@ impl Extractor {
                     "Extract.Entry.Failed.ReadEntry",
                     Some(&format!("index:{i};err={e}")),
                 );
-                ManagerError::ExtractFailed(format!("读取条目失败（index {i}）：{e}"))
+                ManagerError::ExtractFailed(tf(
+                    TextId::Err_ReadZipEntryFailed,
+                    &[("index", &i.to_string()), ("error", &e.to_string())],
+                ))
             })?;
 
             let file_path = if let Some(p) = file.enclosed_name() {
@@ -142,8 +189,9 @@ impl Extractor {
                     "Extract.Entry.Failed.UnsafeEnclosedName",
                     Some(&format!("index:{i}")),
                 );
-                return Err(ManagerError::ExtractFailed(format!(
-                    "条目 {i} 包含不安全的文件路径"
+                return Err(ManagerError::ExtractFailed(tf(
+                    TextId::Err_UnsafeZipPath,
+                    &[("path", &format!("index {i}") )],
                 )));
             };
 
@@ -152,9 +200,9 @@ impl Extractor {
                     "Extract.Entry.Failed.UnsafePath",
                     Some(&format!("index:{};path={}", i, file_path.display())),
                 );
-                return Err(ManagerError::ExtractFailed(format!(
-                    "不安全的文件路径：{}",
-                    file_path.display()
+                return Err(ManagerError::ExtractFailed(tf(
+                    TextId::Err_UnsafeZipPath,
+                    &[("path", &file_path.display().to_string())],
                 )));
             }
 
@@ -163,10 +211,9 @@ impl Extractor {
                     "Extract.Entry.Failed.SymlinkNotAllowed",
                     Some(&format!("index:{};path={}", i, file_path.display())),
                 );
-                return Err(ManagerError::ExtractFailed(format!(
-                    "条目 {} 为符号链接，禁止解压：{}",
-                    i,
-                    file_path.display()
+                return Err(ManagerError::ExtractFailed(tf(
+                    TextId::Err_ZipSymlink,
+                    &[("path", &file_path.display().to_string())],
                 )));
             }
 
@@ -180,7 +227,13 @@ impl Extractor {
                 fs::create_dir_all(&outpath).map_err(|e| {
                     ManagerError::from(io::Error::new(
                         e.kind(),
-                        format!("创建目录 {} 失败：{}", outpath.display(), e),
+                    tf(
+                        TextId::Err_CreateDirFailed,
+                        &[
+                            ("path", &outpath.display().to_string()),
+                            ("error", &e.to_string()),
+                        ],
+                    ),
                     ))
                 })?;
             } else {
@@ -243,7 +296,7 @@ impl Extractor {
                 Some(&plugins_dir.display().to_string()),
             );
             return Err(ManagerError::Other(
-                "BepInEx/plugins 目录不存在，请先执行安装操作".to_string(),
+                t(TextId::Err_PluginDirMissing).to_string(),
             ));
         }
 
@@ -252,7 +305,7 @@ impl Extractor {
                 "Deploy.MetaMystia.Failed.InvalidFileName",
                 Some(&dll_path.display().to_string()),
             );
-            ManagerError::Other("无效的文件名".to_string())
+            ManagerError::Other(t(TextId::Err_InvalidFileName).to_string())
         })?);
 
         report_event(
@@ -285,14 +338,25 @@ impl Extractor {
             fs::create_dir_all(&resourceex_dir).map_err(|e| {
                 ManagerError::from(io::Error::new(
                     e.kind(),
-                    format!("创建目录 {} 失败：{}", resourceex_dir.display(), e),
+                    tf(
+                        TextId::Err_CreateDirFailed,
+                        &[
+                            ("path", &resourceex_dir.display().to_string()),
+                            ("error", &e.to_string()),
+                        ],
+                    ),
                 ))
             })?;
         }
 
         let filename = zip_path
             .file_name()
-            .ok_or_else(|| ManagerError::Other(format!("无效的文件名：{}", zip_path.display())))?;
+            .ok_or_else(|| {
+                ManagerError::Other(tf(
+                    TextId::Err_InvalidFileName,
+                    &[("path", &zip_path.display().to_string())],
+                ))
+            })?;
         let dest = resourceex_dir.join(filename);
 
         report_event(
@@ -339,17 +403,25 @@ impl Extractor {
         fs::copy(src, &tmp_dest).map_err(|e| {
             ManagerError::from(io::Error::new(
                 e.kind(),
-                format!("复制文件 {} 失败：{}", src.display(), e),
+                tf(
+                    TextId::Err_CopyFileFailed,
+                    &[
+                        ("path", &src.display().to_string()),
+                        ("error", &e.to_string()),
+                    ],
+                ),
             ))
         })?;
 
         if let Err(e) = atomic_rename_or_copy(&tmp_dest, dest) {
             let _ = fs::remove_file(&tmp_dest);
 
-            return Err(ManagerError::from(io::Error::other(format!(
-                "安装 {} 失败：{}",
-                dest.display(),
-                e
+            return Err(ManagerError::from(io::Error::other(tf(
+                TextId::Err_InstallFailedName,
+                &[
+                    ("name", &dest.display().to_string()),
+                    ("error", &e.to_string()),
+                ],
             ))));
         }
 

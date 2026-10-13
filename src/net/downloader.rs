@@ -3,6 +3,7 @@
 use crate::error::{ManagerError, Result};
 use crate::fs::file_ops::atomic_rename_or_copy;
 use crate::http::{build_download_agent, build_metadata_agent, host_key};
+use crate::i18n::{t, tf, TextId};
 use crate::net::remote_config::{self, RemoteConfig};
 use crate::net::retry::RetryConfig;
 use crate::net::sso;
@@ -189,14 +190,19 @@ impl<'a> Downloader<'a> {
 
                 for (name, handle) in handles {
                     let result = handle.join().unwrap_or_else(|_| {
-                        Err(ManagerError::Other("下载线程异常结束".to_string()))
+                        Err(ManagerError::Other(
+                            t(TextId::Err_DownloadThreadEnded).to_string(),
+                        ))
                     });
 
                     if let Err(e) = result {
                         self.request_abort();
 
                         let cancelled = matches!(e, ManagerError::UserCancelled);
-                        let message = format!("{name}：{e}");
+                        let message = tf(
+                            TextId::Err_ScopeFailed,
+                            &[("scope", name), ("reason", &e.localized())],
+                        );
                         let replace = failed
                             .as_ref()
                             .is_none_or(|(was_cancelled, _)| *was_cancelled && !cancelled);
@@ -229,7 +235,9 @@ impl<'a> Downloader<'a> {
             return Ok(cached);
         }
 
-        let vi = self.retry("获取版本信息", || self.try_fetch_version_info())?;
+        let vi = self.retry(t(TextId::Err_Op_FetchVersionInfo), || {
+            self.try_fetch_version_info()
+        })?;
         store_version_info(&vi);
 
         Ok(vi)
@@ -268,17 +276,19 @@ impl<'a> Downloader<'a> {
                     }
                     Err(e) if matches!(e, ManagerError::UserCancelled) => return Err(e),
                     Err(e) => {
-                        self.ui.emit(UiEvent::DownloadSwitchToFallback(&format!(
-                            "从 GitHub 下载 MetaMystia DLL 失败：{e}，切换到备用源..."
-                        )))?;
+                        self.ui
+                            .emit(UiEvent::DownloadSwitchToFallback(&tf(
+                                TextId::Err_FallbackGithubDownload,
+                                &[("error", &e.localized())],
+                            )))?;
                         report_event("Download.Metamystia.Failed.GitHub", Some(&format!("{e}")));
                     }
                 },
                 Err(e) if matches!(e, ManagerError::UserCancelled) => return Err(e),
                 Err(e) => {
-                    self.ui.emit(UiEvent::DownloadSwitchToFallback(
-                        "从 GitHub 获取 MetaMystia DLL 下载链接失败，切换到备用源...",
-                    ))?;
+                    self.ui.emit(UiEvent::DownloadSwitchToFallback(t(
+                        TextId::Err_FallbackGithubLink,
+                    )))?;
                     report_event("Download.Metamystia.GitHubUrlFailed", Some(&format!("{e}")));
                 }
             }
@@ -286,8 +296,13 @@ impl<'a> Downloader<'a> {
             self.ui.emit(UiEvent::DownloadTryFallbackMetamystia)?;
         }
 
-        match self.download_asset_with_key(category, &filename, dest, "下载 MetaMystia DLL", slot)
-        {
+        match self.download_asset_with_key(
+            category,
+            &filename,
+            dest,
+            t(TextId::Err_Op_DownloadDll),
+            slot,
+        ) {
             Ok(()) => {
                 report_event("Download.Metamystia.Success.Fallback", Some(version));
                 Ok(())
@@ -315,8 +330,13 @@ impl<'a> Downloader<'a> {
 
         let filename = VersionInfo::resourceex_filename(version);
 
-        match self.download_asset_with_key(category, &filename, dest, "下载 ResourceExample", slot)
-        {
+        match self.download_asset_with_key(
+            category,
+            &filename,
+            dest,
+            t(TextId::Err_Op_DownloadResourceEx),
+            slot,
+        ) {
             Ok(()) => {
                 report_event("Download.ResourceEx.Success", Some(version));
                 Ok(())
@@ -362,7 +382,7 @@ impl<'a> Downloader<'a> {
                 &self.agent_for(&primary_url),
                 self.ui,
                 &primary_url,
-                "请求 BepInEx 主源",
+                t(TextId::Err_Op_QueryBepInEx),
                 None,
             );
 
@@ -392,19 +412,19 @@ impl<'a> Downloader<'a> {
                         }
                         Err(e) if matches!(e, ManagerError::UserCancelled) => return Err(e),
                         Err(e) => {
-                            self.ui
-                                .emit(UiEvent::DownloadBepinexPrimaryFailed(&format!(
-                                    "从 bepinex.dev 下载失败 ({e}), 切换到备用源..."
-                                )))?;
+                            self.ui.emit(UiEvent::DownloadBepinexPrimaryFailed(&tf(
+                                TextId::Err_FallbackBepInEx,
+                                &[("error", &e.localized())],
+                            )))?;
                             report_event("Download.BepInEx.Failed.Primary", Some(&format!("{e}")));
                         }
                     }
                 }
                 Err(e) if matches!(e, ManagerError::UserCancelled) => return Err(e),
                 Err(_) => {
-                    self.ui.emit(UiEvent::DownloadBepinexPrimaryFailed(
-                        "从 bepinex.dev 下载失败或超时，切换到备用源...",
-                    ))?;
+                    self.ui.emit(UiEvent::DownloadBepinexPrimaryFailed(t(
+                        TextId::Err_FallbackBepInExTimeout,
+                    )))?;
                     report_event("Download.BepInEx.PrimaryRequestFailed", Some(build));
                 }
             }
@@ -414,7 +434,7 @@ impl<'a> Downloader<'a> {
             version_info.paths.bep_in_ex.as_deref(),
             filename,
             dest,
-            "下载 BepInEx",
+            t(TextId::Err_Op_DownloadBepInEx),
             slot,
         ) {
             Ok(()) => {
@@ -433,7 +453,8 @@ impl<'a> Downloader<'a> {
         let filename = version_info.manager_filename()?;
 
         report_event("Download.Manager.Start", version_info.manager_version());
-        self.ui.emit(UiEvent::DownloadPlan(&["管理工具"]))?;
+        self.ui
+            .emit(UiEvent::DownloadPlan(&[t(TextId::Err_Label_Manager)]))?;
 
         let config = self.remote_config()?;
         let rate_limit_bps =
@@ -441,7 +462,7 @@ impl<'a> Downloader<'a> {
         let Some(self_update) = config.self_update.as_ref() else {
             report_event("Download.Manager.Disabled", None);
             return Err(ManagerError::Other(
-                "服务端未配置管理工具自更新地址".to_string(),
+                t(TextId::Err_SelfUpdateUrlMissing).to_string(),
             ));
         };
 
@@ -471,19 +492,21 @@ impl<'a> Downloader<'a> {
 
     fn convert_ureq_error(e: &ureq::Error) -> String {
         match e {
-            ureq::Error::ConnectionFailed | ureq::Error::HostNotFound => "连接失败".to_string(),
+            ureq::Error::ConnectionFailed | ureq::Error::HostNotFound => {
+                t(TextId::Err_ConnectFailed).to_string()
+            }
             ureq::Error::Io(err) => match err.kind() {
-                io::ErrorKind::TimedOut => "请求超时".to_string(),
+                io::ErrorKind::TimedOut => t(TextId::Err_RequestTimeout).to_string(),
                 io::ErrorKind::ConnectionRefused
                 | io::ErrorKind::ConnectionReset
                 | io::ErrorKind::ConnectionAborted
                 | io::ErrorKind::NotConnected
                 | io::ErrorKind::AddrNotAvailable
-                | io::ErrorKind::AddrInUse => "连接失败".to_string(),
-                _ => format!("请求失败：{e}"),
+                | io::ErrorKind::AddrInUse => t(TextId::Err_ConnectFailed).to_string(),
+                _ => tf(TextId::Err_RequestFailed, &[("error", &e.to_string())]),
             },
-            ureq::Error::Timeout(_) => "请求超时".to_string(),
-            _ => format!("请求失败：{e}"),
+            ureq::Error::Timeout(_) => t(TextId::Err_RequestTimeout).to_string(),
+            _ => tf(TextId::Err_RequestFailed, &[("error", &e.to_string())]),
         }
     }
 
@@ -532,17 +555,23 @@ impl<'a> Downloader<'a> {
                 ManagerError::NetworkError(msg)
             })?;
 
-        if let Some(err) = check_response_status(&response, self.ui, "获取版本信息") {
+        if let Some(err) = check_response_status(&response, self.ui, t(TextId::Err_Op_FetchVersionInfo))
+        {
             let _ = self
                 .ui
-                .emit(UiEvent::DownloadVersionInfoFailed(&err.to_string()));
+                .emit(UiEvent::DownloadVersionInfoFailed(&err.localized()));
             return Err(err);
         }
 
         let text = response
             .into_body()
             .read_to_string()
-            .map_err(|e| ManagerError::NetworkError(format!("读取响应失败：{e}")))?;
+            .map_err(|e| {
+                ManagerError::NetworkError(tf(
+                    TextId::Err_ReadResponseFailed,
+                    &[("error", &e.to_string())],
+                ))
+            })?;
 
         let mut vi: VersionInfo = serde_json::from_str(&text).map_err(|e| {
             let snippet: String = text.chars().take(200).collect();
@@ -556,7 +585,10 @@ impl<'a> Downloader<'a> {
                 Some(&format!("err={e};snippet={snippet}")),
             );
 
-            ManagerError::Other(format!("版本信息格式不符合预期：{e}"))
+            ManagerError::Other(tf(
+                TextId::Err_VersionInfoMalformed,
+                &[("error", &e.to_string())],
+            ))
         })?;
 
         vi.normalize_versions();
@@ -570,7 +602,7 @@ impl<'a> Downloader<'a> {
 
     /// 获取自更新入口短链最终跳转到的分享码。
     fn fetch_share_code(&self, redirect_url: &str) -> Result<String> {
-        self.retry("获取下载链接", || {
+        self.retry(t(TextId::Err_Op_FetchDownloadLink), || {
             self.try_fetch_share_code(redirect_url)
         })
     }
@@ -588,10 +620,11 @@ impl<'a> Downloader<'a> {
                 ManagerError::NetworkError(msg)
             })?;
 
-        if let Some(err) = check_response_status(&response, self.ui, "获取下载链接") {
+        if let Some(err) = check_response_status(&response, self.ui, t(TextId::Err_Op_FetchDownloadLink))
+        {
             let _ = self
                 .ui
-                .emit(UiEvent::DownloadShareCodeFailed(&err.to_string()));
+                .emit(UiEvent::DownloadShareCodeFailed(&err.localized()));
             return Err(err);
         }
 
@@ -606,7 +639,7 @@ impl<'a> Downloader<'a> {
                 Some(&format!("final_uri={final_uri}")),
             );
             Err(ManagerError::NetworkError(
-                "下载链接未跳转到分享页，请稍后重试".to_string(),
+                t(TextId::Err_ShareLinkInvalid).to_string(),
             ))
         }
     }

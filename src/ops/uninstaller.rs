@@ -10,6 +10,7 @@ use crate::fs::file_ops::{
     DeletionResult, DeletionStatus, collect_tmp_residue, count_results, extract_failed_files,
     glob_matches_filtered, run_deletion,
 };
+use crate::i18n::{tf, TextId};
 use crate::mode::UninstallMode;
 use crate::net::retry::RetryConfig;
 use crate::platform::{elevate_and_restart, is_elevated};
@@ -268,8 +269,9 @@ impl<'a> Uninstaller<'a> {
         if failed > 0 {
             report_event("Uninstall.Finished.WithFailures", Some(&failed.to_string()));
 
-            return Err(ManagerError::UninstallIncomplete(format!(
-                "{failed} 项未能删除，请关闭占用文件的程序或以管理员身份重试"
+            return Err(ManagerError::UninstallIncomplete(tf(
+                TextId::Err_UninstallRemaining,
+                &[("count", &failed.to_string())],
             )));
         }
 

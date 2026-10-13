@@ -1,6 +1,7 @@
 //! HTTP 响应校验、限速处理与重试。
 
 use crate::error::{ManagerError, Result};
+use crate::i18n::{t, tf, TextId};
 use crate::net::retry::RetryConfig;
 use crate::telemetry::report_event;
 use crate::ui::{Ui, UiEvent};
@@ -26,7 +27,7 @@ where
 
     if cfg.attempts == 0 {
         return Err(ManagerError::Other(
-            "重试配置无效：attempts 必须至少为 1".to_string(),
+            t(TextId::Err_RetryConfigInvalid).to_string(),
         ));
     }
 
@@ -44,7 +45,7 @@ where
 
                 if attempt < cfg.attempts - 1 {
                     let delay = retry_delay(&e, &cfg, attempt);
-                    let error = e.to_string();
+                    let error = e.localized();
 
                     ui.emit(UiEvent::NetworkRetrying(
                         op_desc,
@@ -69,7 +70,7 @@ where
                     ui.emit(UiEvent::NetworkRetryFailed(
                         op_desc,
                         cfg.attempts,
-                        &e.to_string(),
+                        &e.localized(),
                     ))?;
                     report_event("Network.RetryFailed", Some(op_desc));
                     return Err(e);
@@ -78,7 +79,9 @@ where
         }
     }
 
-    Err(ManagerError::Other("重试流程意外结束".to_string()))
+    Err(ManagerError::Other(
+        t(TextId::Err_RetryUnexpectedEnd).to_string(),
+    ))
 }
 
 /// 429 已在错误里带了服务端要求的等待时长，这里不再叠加客户端退避。
@@ -132,7 +135,10 @@ pub fn rate_limit_error(resp: &Response<Body>, ui: &dyn Ui, op_desc: &str) -> Ma
     }
 
     ManagerError::RateLimited(
-        format!("{op_desc}失败：请求过于频繁，请稍后再试"),
+        tf(
+            TextId::Err_ScopeFailed,
+            &[("scope", op_desc), ("reason", t(TextId::Err_TooManyRequests))],
+        ),
         retry_after,
     )
 }
@@ -161,7 +167,10 @@ pub fn check_response_status(
         Some(&format!("{op_desc};status={code}")),
     );
 
-    let message = format!("{op_desc}返回错误：HTTP {code}");
+    let message = tf(
+        TextId::Err_HttpStatusForOp,
+        &[("scope", op_desc), ("status", &code.to_string())],
+    );
 
     // 4xx（429 除外）重试无意义；5xx 视为暂时故障
     if status.is_client_error() {
@@ -185,7 +194,7 @@ pub fn fetch_json_with_retry_stopping_on_status<T: DeserializeOwned>(
 
     if cfg.attempts == 0 {
         return Err(JsonRequestError::Other(ManagerError::Other(
-            "重试配置无效：attempts 必须至少为 1".to_string(),
+            t(TextId::Err_RetryConfigInvalid).to_string(),
         )));
     }
 
@@ -211,8 +220,9 @@ pub fn fetch_json_with_retry_stopping_on_status<T: DeserializeOwned>(
                 } else {
                     let text = resp.into_body().read_to_string().map_err(|e| {
                         report_event("Network.ReadFailed", Some(&format!("{op_desc};err={e}")));
-                        JsonRequestError::Other(ManagerError::NetworkError(format!(
-                            "读取响应失败：{e}"
+                        JsonRequestError::Other(ManagerError::NetworkError(tf(
+                            TextId::Err_ReadResponseFailed,
+                            &[("error", &e.to_string())],
                         )))
                     })?;
 
@@ -221,8 +231,9 @@ pub fn fetch_json_with_retry_stopping_on_status<T: DeserializeOwned>(
                             "Network.JsonParseFailed",
                             Some(&format!("{op_desc};err={e}")),
                         );
-                        JsonRequestError::Other(ManagerError::NetworkError(format!(
-                            "解析 JSON 失败：{e}"
+                        JsonRequestError::Other(ManagerError::NetworkError(tf(
+                            TextId::Err_ParseJsonFailed,
+                            &[("error", &e.to_string())],
                         )))
                     });
                 }
@@ -242,7 +253,7 @@ pub fn fetch_json_with_retry_stopping_on_status<T: DeserializeOwned>(
                 delay.as_secs(),
                 attempt + 1,
                 cfg.attempts,
-                &err.to_string(),
+                &err.localized(),
             ))
             .map_err(JsonRequestError::Other)?;
             report_event(
@@ -261,7 +272,7 @@ pub fn fetch_json_with_retry_stopping_on_status<T: DeserializeOwned>(
             ui.emit(UiEvent::NetworkRetryFailed(
                 op_desc,
                 cfg.attempts,
-                &err.to_string(),
+                &err.localized(),
             ))
             .map_err(JsonRequestError::Other)?;
             report_event("Network.RetryFailed", Some(op_desc));
@@ -270,7 +281,7 @@ pub fn fetch_json_with_retry_stopping_on_status<T: DeserializeOwned>(
     }
 
     Err(JsonRequestError::Other(ManagerError::Other(
-        "重试流程意外结束".to_string(),
+        t(TextId::Err_RetryUnexpectedEnd).to_string(),
     )))
 }
 

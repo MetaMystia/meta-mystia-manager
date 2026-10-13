@@ -3,6 +3,7 @@
 use super::{Body, Collector, display_name, system_time_label};
 use crate::config::{GAME_EXECUTABLE, TEMP_DIR_NAME};
 use crate::format::format_bytes;
+use crate::i18n::{t, tf, TextId};
 
 use std::{
     cmp::Reverse,
@@ -59,13 +60,13 @@ fn collect_game_files(game_root: &Path, collector: &mut Collector) {
         (
             "BepInEx/LogOutput.log",
             "game/BepInEx-LogOutput.log",
-            "BepInEx/LogOutput.log（Mod 日志）",
+            t(TextId::Diag_Item_BepInExLog),
             bepinex_log,
         ),
         (
             "BepInEx/ErrorLog.log",
             "game/BepInEx-ErrorLog.log",
-            "BepInEx/ErrorLog.log（Mod 错误日志）",
+            t(TextId::Diag_Item_BepInExErrorLog),
             bepinex_log,
         ),
         (
@@ -97,12 +98,12 @@ fn collect_output_logs(game_root: &Path, collector: &mut Collector) {
         (
             game_root.join("output_log.txt"),
             "game/output_log.txt".to_string(),
-            "Unity 日志：output_log.txt（游戏根目录）".to_string(),
+            t(TextId::Diag_Item_UnityOutputRoot).to_string(),
         ),
         (
             game_root.join(&data_dir).join("output_log.txt"),
             format!("game/{data_dir}-output_log.txt"),
-            format!("Unity 日志：output_log.txt（{data_dir} 目录）"),
+            tf(TextId::Diag_Item_UnityOutputData, &[("dir", &data_dir)]),
         ),
     ] {
         if source.is_file() {
@@ -126,7 +127,7 @@ fn collect_unity_logs(collector: &mut Collector) {
         }
 
         let archive_name = format!("unity/{name}");
-        let label = format!("Unity 日志：{name}");
+        let label = tf(TextId::Diag_Item_UnityLog, &[("name", *name)]);
 
         if *name == "crash.dmp" {
             if meta.len() > MAX_UNITY_TEXT_LOG_BYTES {
@@ -177,11 +178,14 @@ pub(super) fn truncation_info(
         return (label.to_string(), None);
     };
 
-    let label = format!(
-        "{label}（{}，超过上限，仅打包头 {} + 尾 {}）",
-        format_bytes(size),
-        format_bytes(*head),
-        format_bytes(*tail)
+    let label = tf(
+        TextId::Diag_Item_Truncated,
+        &[
+            ("label", label),
+            ("size", &format_bytes(size)),
+            ("head", &format_bytes(*head)),
+            ("tail", &format_bytes(*tail)),
+        ],
     );
     let note = format!(
         "日志截断：{archive_name} 原始 {}，仅打包前 {} 与后 {}",
@@ -227,7 +231,7 @@ fn collect_config_files(game_root: &Path, collector: &mut Collector) {
         collector.add_file(
             file.source.clone(),
             format!("game/BepInEx-config/{}", file.relative),
-            &format!("BepInEx 配置：{}", file.relative),
+            &tf(TextId::Diag_Item_BepInExConfig, &[("name", &file.relative)]),
             Body::Copy,
         );
     }
@@ -303,19 +307,30 @@ fn config_collection_note(scan: &ConfigScan, kept: usize) -> Option<String> {
     let mut reasons = Vec::new();
 
     if truncated > 0 {
-        reasons.push(format!("{truncated} 个超出 {MAX_CONFIG_FILES} 个数量上限"));
+        reasons.push(tf(
+            TextId::Diag_Config_OverCount,
+            &[
+                ("count", &truncated.to_string()),
+                ("max", &MAX_CONFIG_FILES.to_string()),
+            ],
+        ));
     }
     if scan.skipped_large > 0 {
-        reasons.push(format!(
-            "{} 个超过 {} 或无法读取",
-            scan.skipped_large,
-            format_bytes(MAX_CONFIG_BYTES)
+        reasons.push(tf(
+            TextId::Diag_Config_TooLarge,
+            &[
+                ("count", &scan.skipped_large.to_string()),
+                ("size", &format_bytes(MAX_CONFIG_BYTES)),
+            ],
         ));
     }
     if scan.unscanned > 0 {
-        reasons.push(format!(
-            "{} 个超过 {MAX_CONFIG_SCAN} 个扫描上限",
-            scan.unscanned
+        reasons.push(tf(
+            TextId::Diag_Config_OverScan,
+            &[
+                ("count", &scan.unscanned.to_string()),
+                ("max", &MAX_CONFIG_SCAN.to_string()),
+            ],
         ));
     }
 
@@ -323,9 +338,13 @@ fn config_collection_note(scan: &ConfigScan, kept: usize) -> Option<String> {
         return None;
     }
 
-    Some(format!(
-        "BepInEx 配置收集：共 {total} 个 .cfg，已打包 {kept} 个（优先 BepInEx.cfg 与 MetaMystia*.cfg）；未打包：{}",
-        reasons.join("，")
+    Some(tf(
+        TextId::Diag_Config_Summary,
+        &[
+            ("total", &total.to_string()),
+            ("kept", &kept.to_string()),
+            ("reasons", &reasons.join(t(TextId::ListSeparator))),
+        ],
     ))
 }
 
@@ -348,7 +367,7 @@ fn collect_rollback_journal(game_root: &Path, collector: &mut Collector) {
     collector.add_file(
         journal,
         "manager/rollback-journal.json".to_string(),
-        "上次未完成的回滚记录（journal.json）",
+        t(TextId::Diag_Item_RollbackJournal),
         Body::Copy,
     );
 }
@@ -482,7 +501,7 @@ fn collect_wer_reports(local: &Path, collector: &mut Collector) {
         collector.add_file(
             report,
             archive_name,
-            &format!("Windows 错误报告：{}", display_name(path)),
+            &tf(TextId::Diag_Item_WerReport, &[("name", &display_name(path))]),
             Body::Copy,
         );
     }

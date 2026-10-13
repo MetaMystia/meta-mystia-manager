@@ -4,6 +4,7 @@ use super::{
     Downloader, JsonRequestError, ManagerError, Result, RetryConfig, VersionInfo,
     fetch_json_with_retry_stopping_on_status, report_event,
 };
+use crate::i18n::{t, tf, TextId};
 use crate::ui::UiEvent;
 
 use std::{
@@ -67,7 +68,10 @@ impl Downloader<'_> {
     }
 
     fn github_release_not_found_error() -> ManagerError {
-        ManagerError::NetworkError("请求 GitHub API 返回错误：HTTP 404".to_string())
+        ManagerError::NetworkError(tf(
+            TextId::Err_GithubHttpError,
+            &[("status", "404")],
+        ))
     }
 
     fn fetch_github_release_json_from_url(
@@ -81,7 +85,7 @@ impl Downloader<'_> {
             self.ui,
             api_url,
             Some("application/vnd.github+json"),
-            "请求 GitHub API ",
+            t(TextId::Err_Op_QueryGithub),
             Some(RetryConfig::github_release_note()),
             &[404],
         )
@@ -92,14 +96,14 @@ impl Downloader<'_> {
         let Some(sources) = config.sources.as_ref() else {
             report_event("Download.GitHub.Disabled", None);
             return Err(ManagerError::NetworkError(
-                "服务端未配置 GitHub 发布信息地址".to_string(),
+                t(TextId::Err_GithubUrlMissing).to_string(),
             ));
         };
         let api_base = sources.github_release_api.trim();
         if api_base.is_empty() {
             report_event("Download.GitHub.Disabled", None);
             return Err(ManagerError::NetworkError(
-                "服务端未配置 GitHub 发布信息地址".to_string(),
+                t(TextId::Err_GithubUrlMissing).to_string(),
             ));
         }
 
@@ -136,8 +140,9 @@ impl Downloader<'_> {
                             return Err(err);
                         }
                         Err(JsonRequestError::HttpStatus(status)) => {
-                            return Err(ManagerError::NetworkError(format!(
-                                "请求 GitHub API 返回错误：HTTP {status}"
+                            return Err(ManagerError::NetworkError(tf(
+                                TextId::Err_GithubHttpError,
+                                &[("status", &status.to_string())],
                             )));
                         }
                     }
@@ -148,8 +153,9 @@ impl Downloader<'_> {
                 return Err(err);
             }
             Err(JsonRequestError::HttpStatus(status)) => {
-                return Err(ManagerError::NetworkError(format!(
-                    "请求 GitHub API 返回错误：HTTP {status}"
+                return Err(ManagerError::NetworkError(tf(
+                    TextId::Err_GithubHttpError,
+                    &[("status", &status.to_string())],
                 )));
             }
         };
@@ -195,10 +201,12 @@ impl Downloader<'_> {
                 "Download.GitHub.Dll.TagMismatch",
                 Some(&format!("requested={version};tag={tag}")),
             );
-            return Err(ManagerError::NetworkError(format!(
-                "GitHub Release 标签与目标版本不一致：目标 {}，实际 {}",
-                version,
-                if tag.is_empty() { "<empty>" } else { tag }
+            return Err(ManagerError::NetworkError(tf(
+                TextId::Err_GithubTagMismatch,
+                &[
+                    ("target", version),
+                    ("actual", if tag.is_empty() { "<empty>" } else { tag }),
+                ],
             )));
         }
 
@@ -209,9 +217,9 @@ impl Downloader<'_> {
                 "Download.GitHub.Dll.InvalidTag",
                 Some(&format!("requested={version};tag={tag}")),
             );
-            return Err(ManagerError::NetworkError(format!(
-                "无法从 GitHub Release 标签解析 MetaMystia 文件名：{}",
-                if tag.is_empty() { "<empty>" } else { tag }
+            return Err(ManagerError::NetworkError(tf(
+                TextId::Err_GithubTagParseFailed,
+                &[("tag", if tag.is_empty() { "<empty>" } else { tag })],
             )));
         }
 
@@ -238,7 +246,7 @@ impl Downloader<'_> {
         report_event("Download.GitHub.Dll.NotFound", None);
 
         Err(ManagerError::NetworkError(
-            "未找到 MetaMystia DLL 文件".to_string(),
+            t(TextId::Err_DllNotInRelease).to_string(),
         ))
     }
 

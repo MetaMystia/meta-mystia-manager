@@ -2,6 +2,7 @@
 
 use crate::config::GAME_PROCESS_NAME;
 use crate::error::{ManagerError, Result};
+use crate::i18n::{t, tf, TextId};
 use crate::platform::UPDATE_RESTART_ARG;
 
 use std::{
@@ -39,6 +40,7 @@ use windows_sys::Win32::{
         },
         Threading::{CREATE_NO_WINDOW, CreateMutexW, GetCurrentProcess, OpenProcessToken},
     },
+    Globalization::GetUserDefaultLocaleName,
     UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
 };
 
@@ -58,6 +60,19 @@ pub use window::{
 // CNG 加密
 const SHA256_LENGTH: usize = 32;
 const STATUS_SUCCESS: NTSTATUS = 0;
+
+/// `GetUserDefaultLocaleName` 缓冲区长度上限（`LOCALE_NAME_MAX_LENGTH`）。
+const LOCALE_NAME_MAX_LENGTH: usize = 85;
+
+/// 读取当前用户区域设置名称（如 `zh-CN`、`ja-JP`）。
+pub fn system_locale_name() -> Option<String> {
+    let mut buffer = [0u16; LOCALE_NAME_MAX_LENGTH];
+    let capacity = i32::try_from(buffer.len()).unwrap_or(i32::MAX);
+    let len = unsafe { GetUserDefaultLocaleName(buffer.as_mut_ptr(), capacity) };
+
+    let chars = usize::try_from(len).ok()?.checked_sub(1)?;
+    Some(String::from_utf16_lossy(&buffer[..chars]))
+}
 
 // 调用方缓冲区远小于 4 GiB，超出 u32 时按上限截断，由 API 自行报错。
 fn dword_len(bytes: usize) -> u32 {
@@ -209,8 +224,9 @@ pub fn elevate_and_restart() -> Result<()> {
     let code = result as isize;
 
     if code <= MAX_SHELL_EXECUTE_ERROR {
-        return Err(ManagerError::PermissionDenied(format!(
-            "无法以管理员身份重新启动（ShellExecuteW 返回 {code}）"
+        return Err(ManagerError::PermissionDenied(tf(
+            TextId::Err_ElevateFailed,
+            &[("code", &code.to_string())],
         )));
     }
 
@@ -243,8 +259,9 @@ pub fn is_game_running() -> Result<bool> {
         let raw_snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         if raw_snapshot == INVALID_HANDLE_VALUE {
             let e = io::Error::last_os_error();
-            return Err(ManagerError::ProcessListError(format!(
-                "无法获取进程列表：{e}"
+            return Err(ManagerError::ProcessListError(tf(
+                TextId::Err_ProcessListAcquireFailed,
+                &[("error", &e.to_string())],
             )));
         }
         let snapshot_handle = SnapshotHandle::new(raw_snapshot);
@@ -255,8 +272,9 @@ pub fn is_game_running() -> Result<bool> {
 
         if Process32FirstW(snapshot, &raw mut entry) == 0 {
             let e = io::Error::last_os_error();
-            return Err(ManagerError::ProcessListError(format!(
-                "读取进程列表失败：{e}"
+            return Err(ManagerError::ProcessListError(tf(
+                TextId::Err_ProcessListReadFailed,
+                &[("error", &e.to_string())],
             )));
         }
 
@@ -302,8 +320,9 @@ pub fn open_url(url: &str) -> Result<()> {
     let code = result as isize;
 
     if code <= MAX_SHELL_EXECUTE_ERROR {
-        return Err(ManagerError::SsoLoginFailed(format!(
-            "无法打开默认浏览器（ShellExecuteW 返回 {code}）"
+        return Err(ManagerError::SsoLoginFailed(tf(
+            TextId::Err_OpenBrowserFailed,
+            &[("code", &code.to_string())],
         )));
     }
 
@@ -385,7 +404,9 @@ pub fn file_product_version(path: &Path) -> Option<String> {
 /// 用 CNG 的系统首选随机数发生器填充缓冲区。
 pub fn random_bytes(buffer: &mut [u8]) -> Result<()> {
     let len = u32::try_from(buffer.len())
-        .map_err(|_| ManagerError::SsoLoginFailed("随机数长度超出限制".to_string()))?;
+        .map_err(|_| {
+            ManagerError::SsoLoginFailed(t(TextId::Err_RandomLengthTooLong).to_string())
+        })?;
 
     let status = unsafe {
         BCryptGenRandom(
@@ -396,8 +417,9 @@ pub fn random_bytes(buffer: &mut [u8]) -> Result<()> {
         )
     };
     if status != STATUS_SUCCESS {
-        return Err(ManagerError::SsoLoginFailed(format!(
-            "生成随机数失败：NTSTATUS {status:#x}"
+        return Err(ManagerError::SsoLoginFailed(tf(
+            TextId::Err_RandomGenerateFailed,
+            &[("status", &format!("{status:#x}"))],
         )));
     }
 
@@ -418,8 +440,9 @@ impl Sha256Hasher {
             let status =
                 BCryptOpenAlgorithmProvider(&raw mut algorithm, BCRYPT_SHA256_ALGORITHM, null(), 0);
             if status != STATUS_SUCCESS {
-                return Err(format!(
-                    "打开 SHA-256 算法提供程序失败：NTSTATUS {status:#x}"
+                return Err(tf(
+                    TextId::Err_ShaProviderFailed,
+                    &[("status", &format!("{status:#x}"))],
                 ));
             }
 
@@ -427,7 +450,10 @@ impl Sha256Hasher {
             let status = BCryptCreateHash(algorithm, &raw mut hash, null_mut(), 0, null(), 0, 0);
             if status != STATUS_SUCCESS {
                 BCryptCloseAlgorithmProvider(algorithm, 0);
-                return Err(format!("创建哈希对象失败：NTSTATUS {status:#x}"));
+                return Err(tf(
+                    TextId::Err_HashCreateFailed,
+                    &[("status", &format!("{status:#x}"))],
+                ));
             }
         }
 
@@ -435,11 +461,15 @@ impl Sha256Hasher {
     }
 
     fn update(&mut self, data: &[u8]) -> StdResult<(), String> {
-        let len = u32::try_from(data.len()).map_err(|_| "待哈希数据长度超出限制".to_string())?;
+        let len = u32::try_from(data.len())
+            .map_err(|_| t(TextId::Err_HashTooLong).to_string())?;
 
         let status = unsafe { BCryptHashData(self.hash, data.as_ptr(), len, 0) };
         if status != STATUS_SUCCESS {
-            return Err(format!("计算 SHA-256 失败：NTSTATUS {status:#x}"));
+            return Err(tf(
+                TextId::Err_HashComputeFailed,
+                &[("status", &format!("{status:#x}"))],
+            ));
         }
 
         Ok(())
@@ -457,7 +487,10 @@ impl Sha256Hasher {
             )
         };
         if status != STATUS_SUCCESS {
-            return Err(format!("计算 SHA-256 失败：NTSTATUS {status:#x}"));
+            return Err(tf(
+                TextId::Err_HashComputeFailed,
+                &[("status", &format!("{status:#x}"))],
+            ));
         }
 
         Ok(digest)
@@ -486,14 +519,30 @@ pub fn sha256_file(path: &Path) -> Result<[u8; SHA256_LENGTH]> {
     const BUFFER_SIZE: usize = 1024 * 1024;
 
     let mut file = fs::File::open(path)
-        .map_err(|e| ManagerError::Other(format!("打开 {} 失败：{e}", path.display())))?;
+        .map_err(|e| {
+            ManagerError::Other(tf(
+                TextId::Err_OpenFileFailed,
+                &[
+                    ("path", &path.display().to_string()),
+                    ("error", &e.to_string()),
+                ],
+            ))
+        })?;
     let mut hasher = Sha256Hasher::new().map_err(ManagerError::Other)?;
     let mut buffer = vec![0u8; BUFFER_SIZE];
 
     loop {
         let read = file
             .read(&mut buffer)
-            .map_err(|e| ManagerError::Other(format!("读取 {} 失败：{e}", path.display())))?;
+            .map_err(|e| {
+                ManagerError::Other(tf(
+                    TextId::Err_ReadFileFailed,
+                    &[
+                        ("path", &path.display().to_string()),
+                        ("error", &e.to_string()),
+                    ],
+                ))
+            })?;
         if read == 0 {
             break;
         }

@@ -4,6 +4,7 @@
 //! 需要用户拍板的事件通过 [`UiReply`] 回传结果。下载期间的高频状态查询不走事件通道。
 
 use crate::error::{ManagerError, Result};
+use crate::i18n::{t, TextId};
 use crate::mode::UninstallMode;
 use crate::version::VersionInfo;
 
@@ -153,7 +154,7 @@ pub enum UiReply {
 
 impl UiReply {
     fn mismatch() -> ManagerError {
-        ManagerError::Other("界面事件响应类型不匹配".to_string())
+        ManagerError::Other(t(TextId::Err_UiReplyMismatch).to_string())
     }
 
     /// 把回复解释为布尔值（确认/取消）。

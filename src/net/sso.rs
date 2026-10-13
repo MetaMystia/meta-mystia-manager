@@ -10,6 +10,7 @@ mod pkce;
 
 use crate::error::Result;
 use crate::http::build_agent_with_timeouts;
+use crate::i18n::{t, tf, TextId};
 use crate::net::remote_config;
 use crate::platform;
 use crate::telemetry;
@@ -90,15 +91,13 @@ pub fn current_download_token() -> Option<String> {
 }
 
 fn login(ui: &dyn Ui, config_url: &str) -> Result<bool> {
-    ui.emit(UiEvent::Message(
-        "需要登录东方夜雀食堂小助手账号才能继续（登录在浏览器中完成）。",
-    ))?;
+    ui.emit(UiEvent::Message(t(TextId::Err_LoginIntro)))?;
 
     let config = remote_config::get(ui, config_url)?;
 
     if !ui.emit(UiEvent::SsoAskOpenBrowser)?.bool()? {
         telemetry::report_event("Sso.Login.Cancelled", Some("declined"));
-        ui.emit(UiEvent::Message("已取消登录，未执行任何操作"))?;
+        ui.emit(UiEvent::Message(t(TextId::Err_LoginCancelled)))?;
         return Ok(false);
     }
 
@@ -114,11 +113,12 @@ fn login(ui: &dyn Ui, config_url: &str) -> Result<bool> {
     );
 
     if platform::open_url(&authorize_url).is_err() {
-        ui.emit(UiEvent::Message(&format!(
-            "如果浏览器没有自动打开，请手动访问：{authorize_url}"
+        ui.emit(UiEvent::Message(&tf(
+            TextId::Err_LoginManualUrl,
+            &[("url", &authorize_url)],
         )))?;
     }
-    ui.emit(UiEvent::Message("请在浏览器中完成登录并确认授权……"))?;
+    ui.emit(UiEvent::Message(t(TextId::Err_LoginWaiting)))?;
 
     let cancelled = || ui.is_download_cancelled();
     let ticket = match server.wait_for_callback(&state, LOGIN_TIMEOUT, &cancelled)? {
@@ -129,12 +129,12 @@ fn login(ui: &dyn Ui, config_url: &str) -> Result<bool> {
         }
         loopback::CallbackOutcome::Cancelled => {
             telemetry::report_event("Sso.Login.Cancelled", Some("cancelled"));
-            ui.emit(UiEvent::Message("已取消登录，未执行任何操作"))?;
+            ui.emit(UiEvent::Message(t(TextId::Err_LoginCancelled)))?;
             return Ok(false);
         }
         loopback::CallbackOutcome::TimedOut => {
             telemetry::report_event("Sso.Login.Cancelled", Some("timeout"));
-            ui.emit(UiEvent::Message("等待登录超时，未执行任何操作"))?;
+            ui.emit(UiEvent::Message(t(TextId::Err_LoginTimeout)))?;
             return Ok(false);
         }
     };
@@ -161,9 +161,9 @@ fn login(ui: &dyn Ui, config_url: &str) -> Result<bool> {
 
     store_session(session.clone());
     telemetry::report_event("Sso.Login.Success", Some(&session.user_id));
-    ui.emit(UiEvent::Message(&format!(
-        "已登录：{}",
-        session.display_name()
+    ui.emit(UiEvent::Message(&tf(
+        TextId::Err_LoginAs,
+        &[("name", &session.display_name())],
     )))?;
 
     Ok(true)

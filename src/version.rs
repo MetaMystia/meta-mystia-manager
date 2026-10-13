@@ -2,6 +2,7 @@
 
 use crate::config::BEPINEX_CORE_DLL;
 use crate::error::{ManagerError, Result};
+use crate::i18n::{tf, TextId};
 use crate::platform::file_product_version;
 use crate::telemetry::report_event;
 
@@ -217,8 +218,9 @@ impl VersionInfo {
             .map(Some)
             .ok_or_else(|| {
                 report_event("Model.VersionInfo.Unavailable", Some(component));
-                ManagerError::Other(format!(
-                    "所选 {component} 版本已不在可用列表中，请返回上一步重新选择"
+                ManagerError::Other(tf(
+                    TextId::Err_VersionUnavailable,
+                    &[("component", component)],
                 ))
             })
     }

@@ -6,6 +6,7 @@
 use crate::diagnostics::export;
 use crate::env::check_game_running_cached;
 use crate::error::{ManagerError, Result};
+use crate::i18n::{t, tf, TextId};
 use crate::mode::{OperationMode, UninstallMode};
 use crate::net::downloader::Downloader;
 use crate::net::sso::ensure_logged_in;
@@ -109,9 +110,7 @@ fn run_inner(ui: &dyn Ui, input: &Input) -> Result<()> {
         }
 
         if rollback::recover_interrupted(&input.game_root)? {
-            ui.emit(UiEvent::Message(
-                "检测到上次安装/升级未完成，已自动恢复到操作前的状态",
-            ))?;
+            ui.emit(UiEvent::Message(t(TextId::Log_AutoRecovered)))?;
         }
 
         let version_info = downloader.fetch_version_info()?;
@@ -241,9 +240,9 @@ fn run_diagnostics(input: &Input, ui: &dyn Ui) -> Result<()> {
     }
 
     ui.emit(UiEvent::DiagnosticsExported(&path))?;
-    ui.emit(UiEvent::Message(&format!(
-        "诊断包已生成：{}",
-        path.display()
+    ui.emit(UiEvent::Message(&tf(
+        TextId::Log_DiagnosticsExported,
+        &[("path", &path.display().to_string())],
     )))?;
 
     Ok(())
@@ -269,7 +268,7 @@ pub fn self_update(ui: &dyn Ui) -> Result<bool> {
     let exe_dir = env::current_exe()?
         .parent()
         .map(PathBuf::from)
-        .ok_or_else(|| ManagerError::Other("无法确定管理工具所在目录".to_string()))?;
+        .ok_or_else(|| ManagerError::Other(t(TextId::Err_ManagerDirUnknown).to_string()))?;
 
     run_self_update(&exe_dir, ui, &downloader, &version_info)?;
 

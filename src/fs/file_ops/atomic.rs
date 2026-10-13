@@ -4,6 +4,8 @@ use super::ensure_game_not_running_for_path;
 use crate::error::ManagerError;
 use crate::platform::is_fs_dry_run;
 
+use crate::i18n::{tf, TextId};
+
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -33,12 +35,14 @@ pub fn atomic_rename_or_copy(src: &Path, dst: &Path) -> Result<(), ManagerError>
             }
 
             fs::copy(src, &tmp_path).map_err(|e| {
-                ManagerError::from(io::Error::other(format!(
-                    "重命名 {} 失败：{}；复制到临时文件 {} 失败：{}",
-                    src.display(),
-                    rename_err,
-                    tmp_path.display(),
-                    e
+                ManagerError::from(io::Error::other(tf(
+                    TextId::Err_RenameFromFailed,
+                    &[
+                        ("from", &src.display().to_string()),
+                        ("error", &rename_err.to_string()),
+                        ("temp", &tmp_path.display().to_string()),
+                        ("copy_error", &e.to_string()),
+                    ],
                 )))
             })?;
 
@@ -53,10 +57,12 @@ pub fn atomic_rename_or_copy(src: &Path, dst: &Path) -> Result<(), ManagerError>
                 }
                 Err(e) => {
                     let _ = fs::remove_file(&tmp_path);
-                    Err(ManagerError::from(io::Error::other(format!(
-                        "重命名或替换目标 {} 失败：{}",
-                        dst.display(),
-                        e
+                    Err(ManagerError::from(io::Error::other(tf(
+                        TextId::Err_RenameTargetFailed,
+                        &[
+                            ("path", &dst.display().to_string()),
+                            ("error", &e.to_string()),
+                        ],
                     ))))
                 }
             }
@@ -90,7 +96,10 @@ pub fn backup_to_path(path: &Path, backup: &Path) -> Result<(), ManagerError> {
     if !path.exists() {
         return Err(ManagerError::from(io::Error::new(
             io::ErrorKind::NotFound,
-            format!("源路径不存在：{}", path.display()),
+            tf(
+                TextId::Err_SourceMissing,
+                &[("path", &path.display().to_string())],
+            ),
         )));
     }
 

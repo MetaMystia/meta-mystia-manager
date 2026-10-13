@@ -6,6 +6,7 @@ use crate::config::{
 };
 use crate::error::{ManagerError, Result};
 use crate::fs::file_ops::{atomic_rename_or_copy, glob_matches_by_filename};
+use crate::i18n::{tf, TextId};
 use crate::ops::installer::{read_ini_value, set_ini_value};
 use crate::version::VersionInfo;
 
@@ -91,7 +92,13 @@ pub fn doorstop_enabled(game_root: &Path) -> Result<bool> {
         Err(e) => {
             return Err(ManagerError::from(io::Error::new(
                 e.kind(),
-                format!("读取 {} 失败：{}", path.display(), e),
+                tf(
+                    TextId::Err_ReadFileFailed,
+                    &[
+                        ("path", &path.display().to_string()),
+                        ("error", &e.to_string()),
+                    ],
+                ),
             )));
         }
     };
@@ -117,14 +124,21 @@ pub fn set_component_enabled(
 
         let relative = source
             .strip_prefix(&root)
-            .map_err(|_| ManagerError::Other(format!("无效的禁用区路径：{}", source.display())))?;
+            .map_err(|_| {
+                ManagerError::Other(tf(
+                    TextId::Err_InvalidDisabledPath,
+                    &[("path", &source.display().to_string())],
+                ))
+            })?;
         let destination = game_root.join(relative);
 
         if destination.exists() {
-            return Err(ManagerError::Other(format!(
-                "{} 已存在同名文件，请先删除或还原后再试：{}",
-                spec.name,
-                destination.display()
+            return Err(ManagerError::Other(tf(
+                TextId::Err_ConflictFile,
+                &[
+                    ("path", &destination.display().to_string()),
+                    ("name", spec.name),
+                ],
             )));
         }
 
@@ -140,14 +154,18 @@ pub fn set_component_enabled(
 
     let relative = source
         .strip_prefix(game_root)
-        .map_err(|_| ManagerError::Other(format!("无效的组件路径：{}", source.display())))?;
+        .map_err(|_| {
+            ManagerError::Other(tf(
+                TextId::Err_InvalidComponentPath,
+                &[("path", &source.display().to_string())],
+            ))
+        })?;
     let destination = root.join(relative);
 
     if destination.exists() {
-        return Err(ManagerError::Other(format!(
-            "{} 的禁用区已存在同名文件（可能是旧版本备份），请先还原或删除后再试：{}",
-            spec.name,
-            destination.display()
+        return Err(ManagerError::Other(tf(
+            TextId::Err_ConflictDisabled,
+            &[("path", &destination.display().to_string())],
         )));
     }
 
@@ -160,9 +178,9 @@ pub fn set_component_enabled(
 pub fn set_doorstop_enabled(game_root: &Path, enabled: bool) -> Result<bool> {
     let path = game_root.join("doorstop_config.ini");
     let Ok(text) = fs::read_to_string(&path) else {
-        return Err(ManagerError::Other(format!(
-            "未找到 {}，请先安装 BepInEx",
-            path.display()
+        return Err(ManagerError::Other(tf(
+            TextId::Err_BepInExRequired,
+            &[("name", &path.display().to_string())],
         )));
     };
     let wanted = if enabled { "true" } else { "false" };
@@ -177,7 +195,13 @@ pub fn set_doorstop_enabled(game_root: &Path, enabled: bool) -> Result<bool> {
     fs::write(&path, updated.as_bytes()).map_err(|e| {
         ManagerError::from(io::Error::new(
             e.kind(),
-            format!("写入 {} 失败：{}", path.display(), e),
+            tf(
+                TextId::Err_WriteFileFailed,
+                &[
+                    ("path", &path.display().to_string()),
+                    ("error", &e.to_string()),
+                ],
+            ),
         ))
     })?;
 

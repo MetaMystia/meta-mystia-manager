@@ -6,6 +6,7 @@ use crate::config::TEMP_DIR_NAME;
 use crate::error::{ManagerError, Result};
 use crate::fs::extractor::Extractor;
 use crate::fs::file_ops::atomic_rename_or_copy;
+use crate::i18n::{tf, TextId};
 use crate::telemetry::report_event;
 
 use serde::{Deserialize, Serialize};
@@ -65,7 +66,13 @@ impl Rollback {
                 fs::create_dir_all(parent).map_err(|e| {
                     ManagerError::from(io::Error::new(
                         e.kind(),
-                        format!("创建回滚备份目录 {} 失败：{}", parent.display(), e),
+                        tf(
+                            TextId::Err_BackupDirFailed,
+                            &[
+                                ("path", &parent.display().to_string()),
+                                ("error", &e.to_string()),
+                            ],
+                        ),
                     ))
                 })?;
             }
@@ -73,7 +80,13 @@ impl Rollback {
             fs::copy(target, &backup).map_err(|e| {
                 ManagerError::from(io::Error::new(
                     e.kind(),
-                    format!("备份文件 {} 失败：{}", target.display(), e),
+                    tf(
+                        TextId::Err_BackupFailed,
+                        &[
+                            ("path", &target.display().to_string()),
+                            ("error", &e.to_string()),
+                        ],
+                    ),
                 ))
             })?;
             self.overwritten.push(relative.to_path_buf());
@@ -108,7 +121,13 @@ impl Rollback {
             fs::create_dir_all(parent).map_err(|e| {
                 ManagerError::from(io::Error::new(
                     e.kind(),
-                    format!("创建回滚备份目录 {} 失败：{}", parent.display(), e),
+                    tf(
+                        TextId::Err_BackupDirFailed,
+                        &[
+                            ("path", &parent.display().to_string()),
+                            ("error", &e.to_string()),
+                        ],
+                    ),
                 ))
             })?;
         }
@@ -116,7 +135,13 @@ impl Rollback {
         copy_tree(target, &backup).map_err(|e| {
             ManagerError::from(io::Error::new(
                 e.kind(),
-                format!("备份待清理路径 {} 失败：{}", target.display(), e),
+                tf(
+                    TextId::Err_BackupFailed,
+                    &[
+                        ("path", &target.display().to_string()),
+                        ("error", &e.to_string()),
+                    ],
+                ),
             ))
         })?;
         self.removed.push(relative.to_path_buf());
@@ -157,12 +182,23 @@ impl Rollback {
             renamed: self.renamed.clone(),
         };
         let text = serde_json::to_vec_pretty(&journal)
-            .map_err(|e| ManagerError::Other(format!("写入回滚日志失败：{e}")))?;
+            .map_err(|e| {
+                ManagerError::Other(tf(
+                    TextId::Err_JournalWriteSimple,
+                    &[("error", &e.to_string())],
+                ))
+            })?;
 
         fs::create_dir_all(&self.backup_dir).map_err(|e| {
             ManagerError::from(io::Error::new(
                 e.kind(),
-                format!("创建回滚目录 {} 失败：{}", self.backup_dir.display(), e),
+                tf(
+                    TextId::Err_RollbackDirFailed,
+                    &[
+                        ("path", &self.backup_dir.display().to_string()),
+                        ("error", &e.to_string()),
+                    ],
+                ),
             ))
         })?;
 
@@ -170,13 +206,25 @@ impl Rollback {
         fs::write(&tmp_path, text).map_err(|e| {
             ManagerError::from(io::Error::new(
                 e.kind(),
-                format!("写入回滚日志 {} 失败：{}", tmp_path.display(), e),
+                tf(
+                    TextId::Err_JournalWriteFailed,
+                    &[
+                        ("path", &tmp_path.display().to_string()),
+                        ("error", &e.to_string()),
+                    ],
+                ),
             ))
         })?;
         fs::rename(&tmp_path, &self.journal_path).map_err(|e| {
             ManagerError::from(io::Error::new(
                 e.kind(),
-                format!("替换回滚日志 {} 失败：{}", self.journal_path.display(), e),
+                tf(
+                    TextId::Err_JournalReplaceFailed,
+                    &[
+                        ("path", &self.journal_path.display().to_string()),
+                        ("error", &e.to_string()),
+                    ],
+                ),
             ))
         })?;
 
@@ -240,14 +288,22 @@ pub fn recover_interrupted(game_root: &Path) -> Result<bool> {
     let text = fs::read_to_string(&journal_path).map_err(|e| {
         ManagerError::from(io::Error::new(
             e.kind(),
-            format!("读取回滚日志 {} 失败：{}", journal_path.display(), e),
+            tf(
+                TextId::Err_JournalReadFailed,
+                &[
+                    ("path", &journal_path.display().to_string()),
+                    ("error", &e.to_string()),
+                ],
+            ),
         ))
     })?;
     let journal: RollbackJournal = serde_json::from_str(&text).map_err(|e| {
-        ManagerError::Other(format!(
-            "解析回滚日志 {} 失败：{}",
-            journal_path.display(),
-            e
+        ManagerError::Other(tf(
+            TextId::Err_JournalParseFailed,
+            &[
+                ("path", &journal_path.display().to_string()),
+                ("error", &e.to_string()),
+            ],
         ))
     })?;
 
@@ -293,7 +349,13 @@ fn restore_plan(
         if target.is_file()
             && let Err(e) = fs::remove_file(&target)
         {
-            errors.push(format!("删除新建文件 {} 失败：{e}", target.display()));
+            errors.push(tf(
+                TextId::Err_DeleteFailed,
+                &[
+                    ("path", &target.display().to_string()),
+                    ("error", &e.to_string()),
+                ],
+            ));
         }
     }
 
@@ -312,13 +374,25 @@ fn restore_plan(
             };
 
             if let Err(e) = removal {
-                errors.push(format!("清理回滚目标 {} 失败：{e}", target.display()));
+                errors.push(tf(
+                    TextId::Err_CleanupTargetFailed,
+                    &[
+                        ("path", &target.display().to_string()),
+                        ("error", &e.to_string()),
+                    ],
+                ));
                 continue;
             }
         }
 
         if let Err(e) = copy_tree(&backup, &target) {
-            errors.push(format!("恢复 {} 失败：{e}", target.display()));
+            errors.push(tf(
+                TextId::Err_RestoreFailed,
+                &[
+                    ("path", &target.display().to_string()),
+                    ("error", &e.to_string()),
+                ],
+            ));
         }
     }
 
@@ -330,7 +404,13 @@ fn restore_plan(
         }
 
         if let Err(e) = atomic_rename_or_copy(&backup, &original) {
-            errors.push(format!("恢复 {} 失败：{e}", original.display()));
+            errors.push(tf(
+                TextId::Err_RestoreFailed,
+                &[
+                    ("path", &original.display().to_string()),
+                    ("error", &e.to_string()),
+                ],
+            ));
         }
     }
 
@@ -339,7 +419,13 @@ fn restore_plan(
         let target = game_root.join(relative);
 
         if let Err(e) = fs::copy(&backup, &target) {
-            errors.push(format!("还原文件 {} 失败：{e}", target.display()));
+            errors.push(tf(
+                TextId::Err_RestoreFailed,
+                &[
+                    ("path", &target.display().to_string()),
+                    ("error", &e.to_string()),
+                ],
+            ));
         }
     }
 

@@ -11,6 +11,7 @@ use crate::fs::file_ops::{
     glob_matches_by_filename, glob_matches_filtered, next_backup_path,
 };
 use crate::fs::temp_dir::create_temp_dir_with_guard;
+use crate::i18n::{t, tf, TextId};
 use crate::net::downloader::{DownloadJob, Downloader};
 use crate::ops::installer::update_bepinex_config;
 use crate::ops::preflight::run;
@@ -193,7 +194,7 @@ impl<'a> Upgrader<'a> {
         let installed = self.installed_versions()?;
         let Some(dll_state) = installed.dll else {
             return Err(ManagerError::Other(
-                "未找到已安装的 MetaMystia Mod，请先使用安装功能。".to_string(),
+                t(TextId::Err_ModNotInstalled).to_string(),
             ));
         };
         let current_dll_version = dll_state.version;
@@ -227,8 +228,12 @@ impl<'a> Upgrader<'a> {
                 .is_some_and(|new_ver| current_bepinex_version.as_ref() != Some(new_ver));
         if bepinex_needs_upgrade {
             self.ui.emit(UiEvent::UpgradeBepinexVersions(
-                current_bepinex_version.as_deref().unwrap_or("未知"),
-                new_bepinex_version.as_deref().unwrap_or("未知"),
+                current_bepinex_version
+                    .as_deref()
+                    .unwrap_or_else(|| t(TextId::Value_Unknown)),
+                new_bepinex_version
+                    .as_deref()
+                    .unwrap_or_else(|| t(TextId::Value_Unknown)),
             ))?;
         }
 
@@ -302,7 +307,10 @@ impl<'a> Upgrader<'a> {
         }
 
         let (temp_dir, _temp_guard) = create_temp_dir_with_guard(&self.game_root).map_err(|e| {
-            ManagerError::from(io::Error::new(e.kind(), format!("创建临时目录失败：{e}")))
+            ManagerError::from(io::Error::new(
+                e.kind(),
+                tf(TextId::Log_TempDirCreateFailed, &[("error", &e.to_string())]),
+            ))
         })?;
 
         run(
@@ -341,7 +349,7 @@ impl<'a> Upgrader<'a> {
 
         if let Some(path) = &temp_bepinex_path {
             jobs.push((
-                "下载 BepInEx",
+                "BepInEx",
                 Box::new(|slot| {
                     self.ui.emit(UiEvent::UpgradeDownloadingBepinex)?;
                     let from_primary =
@@ -355,7 +363,7 @@ impl<'a> Upgrader<'a> {
         }
         if let Some((path, _)) = &temp_dll_path {
             jobs.push((
-                "下载 MetaMystia DLL",
+                "MetaMystia",
                 Box::new(|slot| {
                     self.ui.emit(UiEvent::UpgradeDownloadingDll)?;
                     self.downloader.download_metamystia(
@@ -370,7 +378,7 @@ impl<'a> Upgrader<'a> {
         }
         if let Some((path, _)) = &temp_resourceex_path {
             jobs.push((
-                "下载 ResourceExample",
+                "ResourceExample",
                 Box::new(|slot| {
                     self.ui.emit(UiEvent::UpgradeDownloadingResourceex)?;
                     self.downloader.download_resourceex(
@@ -390,8 +398,9 @@ impl<'a> Upgrader<'a> {
             let removed = cleanup_tmp_residue(&self.game_root);
             if removed > 0 {
                 report_event("Upgrade.ResidueCleaned", Some(&removed.to_string()));
-                self.ui.emit(UiEvent::Message(&format!(
-                    "已清理 {removed} 个上次运行残留的临时文件"
+                self.ui.emit(UiEvent::Message(&tf(
+                    TextId::Log_CleanupResidue,
+                    &[("count", &removed.to_string())],
                 )))?;
             }
         }
@@ -509,20 +518,25 @@ impl<'a> Upgrader<'a> {
             return match rollback.restore() {
                 Ok(()) => {
                     self.ui
-                        .emit(UiEvent::Message("升级失败，已回滚到操作前状态"))?;
+                        .emit(UiEvent::Message(t(TextId::Log_RollbackUpgradeDone)))?;
                     report_event("Upgrade.Failed.RolledBack", Some(&format!("{e}")));
                     Err(e)
                 }
                 Err(restore_err) => {
-                    self.ui.emit(UiEvent::Warn(&format!(
-                        "升级失败，且回滚未完全成功：{restore_err}"
+                    self.ui.emit(UiEvent::Warn(&tf(
+                        TextId::Log_RollbackUpgradeIncomplete,
+                        &[("error", &restore_err.to_string())],
                     )))?;
                     report_event(
                         "Upgrade.Failed.RollbackIncomplete",
                         Some(&format!("{e};{restore_err}")),
                     );
-                    Err(ManagerError::Other(format!(
-                        "{e}；另外回滚未完全成功：{restore_err}"
+                    Err(ManagerError::Other(tf(
+                        TextId::Log_RollbackIncompleteDetail,
+                        &[
+                            ("error", &e.to_string()),
+                            ("restore_error", &restore_err.to_string()),
+                        ],
                     )))
                 }
             };
@@ -552,7 +566,7 @@ impl<'a> Upgrader<'a> {
         }
         for (path, err) in result.failed {
             self.ui
-                .emit(UiEvent::UpgradeDeleteFailed(&path, &format!("{err}")))?;
+                .emit(UiEvent::UpgradeDeleteFailed(&path, &err.localized()))?;
         }
 
         Ok(())
@@ -611,7 +625,13 @@ impl<'a> Upgrader<'a> {
             fs::create_dir_all(parent).map_err(|e| {
                 ManagerError::from(io::Error::new(
                     e.kind(),
-                    format!("创建目录 {} 失败：{}", parent.display(), e),
+                    tf(
+                        TextId::Err_CreateDirFailed,
+                        &[
+                            ("path", &parent.display().to_string()),
+                            ("error", &e.to_string()),
+                        ],
+                    ),
                 ))
             })?;
         }
@@ -620,17 +640,25 @@ impl<'a> Upgrader<'a> {
         fs::copy(temp_path, &tmp_new).map_err(|e| {
             ManagerError::from(io::Error::new(
                 e.kind(),
-                format!("复制临时文件 {} 失败：{}", tmp_new.display(), e),
+                tf(
+                    TextId::Err_CopyTempFailed,
+                    &[
+                        ("path", &tmp_new.display().to_string()),
+                        ("error", &e.to_string()),
+                    ],
+                ),
             ))
         })?;
 
         if let Err(e) = atomic_rename_or_copy(&tmp_new, destination) {
             let _ = fs::remove_file(&tmp_new);
 
-            return Err(ManagerError::from(io::Error::other(format!(
-                "安装新版本 {} 失败：{}",
-                destination.display(),
-                e
+            return Err(ManagerError::from(io::Error::other(tf(
+                TextId::Err_InstallFailedName,
+                &[
+                    ("name", &destination.display().to_string()),
+                    ("error", &e.to_string()),
+                ],
             ))));
         }
 
@@ -693,14 +721,16 @@ impl<'a> Upgrader<'a> {
         }) {
             if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
                 let Some(version) = (asset_pattern.version_from_filename)(filename) else {
-                    return Err(ManagerError::Other(format!(
-                        "升级扫描失败：无法从文件名解析版本：{filename}"
+                    return Err(ManagerError::Other(tf(
+                        TextId::Err_ScanVersionFromName,
+                        &[("name", filename)],
                     )));
                 };
 
                 let Some(parsed_version) = Self::parse_numeric_version(&version) else {
-                    return Err(ManagerError::Other(format!(
-                        "升级扫描失败：无法解析版本号：{filename}"
+                    return Err(ManagerError::Other(tf(
+                        TextId::Err_ScanVersionParse,
+                        &[("name", filename)],
                     )));
                 };
 
@@ -716,7 +746,7 @@ impl<'a> Upgrader<'a> {
 
         let Some((latest_version, latest_path)) = parsed.last().cloned() else {
             return Err(ManagerError::Other(
-                "升级扫描失败：未找到可用的已解析版本".to_string(),
+                t(TextId::Err_ScanNoVersion).to_string(),
             ));
         };
 
@@ -772,7 +802,13 @@ impl<'a> Upgrader<'a> {
         fs::remove_file(source).map_err(|e| {
             ManagerError::from(io::Error::new(
                 e.kind(),
-                format!("删除禁用区旧副本 {} 失败：{}", source.display(), e),
+                tf(
+                    TextId::Err_DeleteOldCopyFailed,
+                    &[
+                        ("path", &source.display().to_string()),
+                        ("error", &e.to_string()),
+                    ],
+                ),
             ))
         })?;
 

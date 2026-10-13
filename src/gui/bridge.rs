@@ -4,6 +4,7 @@
 use crate::config::BEPINEX_CORE_DLL;
 use crate::env::{check_game_directory, check_game_running_cached};
 use crate::error::Result;
+use crate::i18n::{TextId, t, tf};
 use crate::mode::{OperationMode, UninstallMode};
 use crate::net::downloader::{Downloader, MAX_PARALLEL_DOWNLOADS};
 use crate::net::remote_config;
@@ -348,15 +349,19 @@ pub fn prefetch_local(ui: &GuiUi) -> LocalInfo {
         match check_game_running_cached() {
             Ok(false) => match rollback::recover_interrupted(&root) {
                 Ok(true) => {
-                    ui.log("检测到上次安装/升级未完成，已自动恢复到操作前的状态");
+                    ui.log(t(TextId::Bridge_AutoRollbackRestored));
                     local = detect_local_at(ui, root);
                 }
                 Ok(false) => {}
-                Err(e) => ui.log(format!("自动恢复上次操作失败：{e}")),
+                Err(e) => ui.log(tf(
+                    TextId::Bridge_AutoRollbackFailed,
+                    &[("error", &e.localized())],
+                )),
             },
-            Ok(true) => ui.log("游戏正在运行，暂不自动恢复上次未完成的操作"),
-            Err(e) => ui.log(format!(
-                "检查游戏进程失败，暂不自动恢复上次未完成的操作：{e}"
+            Ok(true) => ui.log(t(TextId::Bridge_AutoRollbackGameRunning)),
+            Err(e) => ui.log(tf(
+                TextId::Bridge_AutoRollbackCheckFailed,
+                &[("error", &e.localized())],
             )),
         }
     }
@@ -369,7 +374,10 @@ pub fn detect_local(ui: &GuiUi) -> LocalInfo {
     match check_game_directory(ui) {
         Ok(root) => detect_local_at(ui, root),
         Err(e) => {
-            ui.log(format!("未自动找到游戏目录：{e}"));
+            ui.log(tf(
+                TextId::Bridge_GameDirNotFound,
+                &[("error", &e.localized())],
+            ));
             LocalInfo::default()
         }
     }
@@ -398,7 +406,10 @@ pub fn detect_local_at(ui: &GuiUi, root: PathBuf) -> LocalInfo {
                 )
             }
             Err(e) => {
-                ui.log(format!("检测已安装组件失败：{e}"));
+                ui.log(tf(
+                    TextId::Bridge_DetectComponentsFailed,
+                    &[("error", &e.localized())],
+                ));
                 report_event("Env.DetectInstalled.Failed", Some(&format!("{e}")));
 
                 (false, None, false, None, true)
@@ -455,7 +466,7 @@ pub fn run_self_update(ui: &GuiUi) {
             process::exit(0);
         }
         Err(e) => {
-            ui.push_event(Event::SelfUpdate(Some(e.to_string())));
+            ui.push_event(Event::SelfUpdate(Some(e.localized())));
         }
     }
 }
@@ -757,14 +768,14 @@ pub const fn yes_no(value: bool) -> &'static str {
 impl GuiUi {
     fn display_version(&self, manager_version: Option<&str>) -> Result<()> {
         if let Some(version) = manager_version {
-            self.log(format!("管理工具最新版本：v{version}"));
+            self.log(tf(TextId::Bridge_ManagerLatest, &[("version", version)]));
         }
 
         Ok(())
     }
 
     fn display_game_running_warning(&self) -> Result<()> {
-        self.error("检测到游戏正在运行，请先退出游戏再重试。");
+        self.error(t(TextId::Bridge_GameRunningRetry));
         Ok(())
     }
 
@@ -779,11 +790,16 @@ impl GuiUi {
     }
 
     fn path_display_steam_found(&self, app_id: u32, name: Option<&str>, path: &Path) -> Result<()> {
-        self.log(format!(
-            "检测到 Steam 安装：{}（AppID {}，{}）",
-            path.display(),
-            app_id,
-            name.unwrap_or("未知名称")
+        self.log(tf(
+            TextId::Bridge_SteamFound,
+            &[
+                ("path", &path.display().to_string()),
+                ("app_id", &app_id.to_string()),
+                (
+                    "name",
+                    name.unwrap_or_else(|| t(TextId::Bridge_UnknownName)),
+                ),
+            ],
         ));
         Ok(())
     }
@@ -795,12 +811,18 @@ impl GuiUi {
             _ => {}
         }
 
-        self.log(format!("第 {step} 步：{description}"));
+        self.log(tf(
+            TextId::Bridge_StepLabel,
+            &[("step", &step.to_string()), ("description", description)],
+        ));
         Ok(())
     }
 
     fn install_display_version_info(&self, version_info: &VersionInfo) -> Result<()> {
-        self.log(format!("将安装：{version_info}"));
+        self.log(tf(
+            TextId::Bridge_WillInstall,
+            &[("version_info", &version_info.to_string())],
+        ));
         Ok(())
     }
 
@@ -814,36 +836,46 @@ impl GuiUi {
     }
 
     fn install_cleanup_result(&self, success_count: usize, failed_count: usize) -> Result<()> {
-        self.log(format!(
-            "清理旧文件：成功 {success_count}，失败 {failed_count}"
+        self.log(tf(
+            TextId::Bridge_CleanupResult,
+            &[
+                ("success_count", &success_count.to_string()),
+                ("failed_count", &failed_count.to_string()),
+            ],
         ));
         Ok(())
     }
 
     fn install_finished(&self, show_bepinex_console: bool) -> Result<()> {
         if show_bepinex_console {
-            self.log("已开启 BepInEx 日志窗口");
+            self.log(t(TextId::Bridge_ConsoleEnabled));
         }
         Ok(())
     }
 
     fn upgrade_deleted(&self, path: &Path) -> Result<()> {
-        self.log(format!("已删除旧文件：{}", path.display()));
+        self.log(tf(
+            TextId::Bridge_OldFileDeleted,
+            &[("path", &path.display().to_string())],
+        ));
         Ok(())
     }
 
     fn upgrade_delete_failed(&self, path: &Path, err: &str) -> Result<()> {
-        self.log(format!("删除失败：{}（{err}）", path.display()));
+        self.log(tf(
+            TextId::Bridge_DeleteFailed,
+            &[("path", &path.display().to_string()), ("error", err)],
+        ));
         Ok(())
     }
 
     fn upgrade_checking_installed_version(&self) -> Result<()> {
-        self.log("正在检查已安装版本…");
+        self.log(t(TextId::Bridge_CheckingInstalled));
         Ok(())
     }
 
     fn upgrade_detected_resourceex(&self) -> Result<()> {
-        self.log("检测到已安装 ResourceExample");
+        self.log(t(TextId::Bridge_ResourceExDetected));
         Ok(())
     }
 
@@ -852,12 +884,26 @@ impl GuiUi {
         current: &str,
         latest: &str,
     ) -> Result<()> {
-        self.log(format!("BepInEx：{current} → {latest}"));
+        self.log(tf(
+            TextId::Bridge_VersionArrow,
+            &[
+                ("name", "BepInEx"),
+                ("current", current),
+                ("latest", latest),
+            ],
+        ));
         Ok(())
     }
 
     fn upgrade_display_current_and_latest_dll(&self, current: &str, latest: &str) -> Result<()> {
-        self.log(format!("MetaMystia：{current} → {latest}"));
+        self.log(tf(
+            TextId::Bridge_VersionArrow,
+            &[
+                ("name", "MetaMystia"),
+                ("current", current),
+                ("latest", latest),
+            ],
+        ));
         Ok(())
     }
 
@@ -866,45 +912,61 @@ impl GuiUi {
         current: &str,
         latest: &str,
     ) -> Result<()> {
-        self.log(format!("ResourceExample：{current} → {latest}"));
+        self.log(tf(
+            TextId::Bridge_VersionArrow,
+            &[
+                ("name", "ResourceExample"),
+                ("current", current),
+                ("latest", latest),
+            ],
+        ));
         Ok(())
     }
 
     fn upgrade_no_update_needed(&self) -> Result<()> {
-        self.log("没有需要执行的组件更新");
+        self.log(t(TextId::Bridge_NoComponentUpdates));
         self.push(Event::NoUpdate);
         Ok(())
     }
 
     fn upgrade_bepinex_needs_upgrade(&self, installed: bool) -> Result<()> {
         self.log(if installed {
-            "将升级 BepInEx"
+            tf(TextId::Bridge_WillUpgrade, &[("name", "BepInEx")])
         } else {
-            "将安装 BepInEx"
+            tf(TextId::Bridge_WillInstallComponent, &[("name", "BepInEx")])
         });
         Ok(())
     }
 
     fn upgrade_bepinex_already_latest(&self) -> Result<()> {
-        self.log("BepInEx 已是最新版本");
+        self.log(tf(TextId::Bridge_AlreadyLatest, &[("name", "BepInEx")]));
         Ok(())
     }
 
     fn upgrade_detected_new_dll(&self, current: &str, new: &str) -> Result<()> {
-        self.log(format!("将升级 MetaMystia：{current} → {new}"));
+        self.log(tf(
+            TextId::Bridge_WillUpgradeMetaMystia,
+            &[("current", current), ("new", new)],
+        ));
         Ok(())
     }
 
     fn upgrade_dll_already_latest(&self) -> Result<()> {
-        self.log("MetaMystia 已是最新版本");
+        self.log(tf(
+            TextId::Bridge_AlreadyLatest,
+            &[("name", "MetaMystia")],
+        ));
         Ok(())
     }
 
     fn upgrade_resourceex_needs_upgrade(&self, installed: bool) -> Result<()> {
         self.log(if installed {
-            "将升级 ResourceExample"
+            tf(TextId::Bridge_WillUpgrade, &[("name", "ResourceExample")])
         } else {
-            "将安装 ResourceExample"
+            tf(
+                TextId::Bridge_WillInstallComponent,
+                &[("name", "ResourceExample")],
+            )
         });
         Ok(())
     }
@@ -940,7 +1002,10 @@ impl GuiUi {
     }
 
     fn upgrade_install_success(&self, path: &Path) -> Result<()> {
-        self.log(format!("已安装：{}", path.display()));
+        self.log(tf(
+            TextId::Installed_List,
+            &[("list", &path.display().to_string())],
+        ));
         Ok(())
     }
 
@@ -950,17 +1015,20 @@ impl GuiUi {
     }
 
     fn upgrade_done(&self) -> Result<()> {
-        self.log("升级完成");
+        self.log(t(TextId::Bridge_UpgradeDone));
         Ok(())
     }
 
     fn uninstall_no_files_found(&self) -> Result<()> {
-        self.log("没有找到需要删除的 Mod 文件");
+        self.log(t(TextId::Bridge_NothingToDelete));
         Ok(())
     }
 
     fn uninstall_display_target_files(&self, files: &[PathBuf]) -> Result<()> {
-        self.log(format!("待删除 {} 个文件/目录", files.len()));
+        self.log(tf(
+            TextId::Bridge_FilesToDelete,
+            &[("count", &files.len().to_string())],
+        ));
         for file in files {
             self.log(format!("  · {}", file.display()));
         }
@@ -969,21 +1037,22 @@ impl GuiUi {
 
     fn uninstall_confirm_deletion(&self, mode: UninstallMode) -> Result<bool> {
         let content = match mode {
-            UninstallMode::Full => {
-                "删除 BepInEx、其他 Mod 与配置文件；游戏本体文件保持不变。删除后无法恢复。"
-            }
-            UninstallMode::Light => {
-                "只删除 MetaMystia 相关文件；BepInEx 与其他 Mod 保持不变。删除后无法恢复。"
-            }
+            UninstallMode::Full => t(TextId::Bridge_UninstallFullConfirm),
+            UninstallMode::Light => t(TextId::Bridge_UninstallLightConfirm),
         };
-        let confirmed = self.confirm("确认卸载？", content, "开始卸载", "取消");
+        let confirmed = self.confirm(
+            t(TextId::Bridge_UninstallConfirmTitle),
+            content,
+            t(TextId::Bridge_UninstallConfirmStart),
+            t(TextId::Button_Cancel),
+        );
         report_event("UI.Uninstall.Confirm.Choice", Some(yes_no(confirmed)));
 
         Ok(confirmed)
     }
 
     fn uninstall_files_in_use_warning(&self) -> Result<()> {
-        self.error("有文件被占用，请关闭游戏与相关程序后重试。");
+        self.error(t(TextId::Bridge_FileInUseWarning));
         Ok(())
     }
 
@@ -993,18 +1062,23 @@ impl GuiUi {
         attempt: usize,
         attempts: usize,
     ) -> Result<()> {
-        self.log(format!(
-            "文件仍被占用，{delay_secs} 秒后重试（{attempt}/{attempts}）"
+        self.log(tf(
+            TextId::Bridge_FileStillInUse,
+            &[
+                ("delay_secs", &delay_secs.to_string()),
+                ("attempt", &attempt.to_string()),
+                ("attempts", &attempts.to_string()),
+            ],
         ));
         Ok(())
     }
 
     fn uninstall_ask_elevate_permission(&self) -> Result<bool> {
         let confirmed = self.confirm(
-            "需要管理员权限",
-            "删除这些文件需要管理员权限，是否以管理员身份重新运行？",
-            "以管理员运行",
-            "取消",
+            t(TextId::Bridge_AdminRequiredTitle),
+            t(TextId::Bridge_AdminRequiredContent),
+            t(TextId::Bridge_RunAsAdmin),
+            t(TextId::Button_Cancel),
         );
         report_event("UI.Uninstall.Elevate.Choice", Some(yes_no(confirmed)));
 
@@ -1012,16 +1086,16 @@ impl GuiUi {
     }
 
     fn uninstall_restarting_elevated(&self) -> Result<()> {
-        self.log("正在以管理员身份重新启动…");
+        self.log(t(TextId::Bridge_RestartingElevated));
         Ok(())
     }
 
     fn uninstall_ask_retry_failures(&self) -> Result<bool> {
         let retry = self.confirm(
-            "重试失败项？",
-            "部分文件删除失败，通常是被游戏或杀毒软件占用。",
-            "重试",
-            "跳过",
+            t(TextId::Bridge_RetryFailedTitle),
+            t(TextId::Bridge_RetryFailedContent),
+            t(TextId::Button_Retry),
+            t(TextId::Bridge_Skip),
         );
         report_event("UI.Uninstall.Retry.Choice", Some(yes_no(retry)));
 
@@ -1029,12 +1103,12 @@ impl GuiUi {
     }
 
     fn uninstall_retrying_failed_items(&self) -> Result<()> {
-        self.log("正在重试删除失败的文件…");
+        self.log(t(TextId::Bridge_RetryingFailedItems));
         Ok(())
     }
 
     fn deletion_start(&self) -> Result<()> {
-        self.log("开始删除文件…");
+        self.log(t(TextId::Bridge_DeletionStart));
         Ok(())
     }
 
@@ -1044,17 +1118,20 @@ impl GuiUi {
     }
 
     fn deletion_display_success(&self, path: &str) -> Result<()> {
-        self.log(format!("已删除：{path}"));
+        self.log(tf(TextId::Bridge_Deleted, &[("path", path)]));
         Ok(())
     }
 
     fn deletion_display_failure(&self, path: &str, error: &str) -> Result<()> {
-        self.log(format!("删除失败：{path}（{error}）"));
+        self.log(tf(
+            TextId::Bridge_DeleteFailed,
+            &[("path", path), ("error", error)],
+        ));
         Ok(())
     }
 
     fn deletion_display_skipped(&self, path: &str) -> Result<()> {
-        self.log(format!("已跳过：{path}"));
+        self.log(tf(TextId::Bridge_Skipped, &[("path", path)]));
         Ok(())
     }
 
@@ -1064,8 +1141,13 @@ impl GuiUi {
         failed_count: usize,
         skipped_count: usize,
     ) -> Result<()> {
-        self.log(format!(
-            "删除结果：成功 {success_count}，失败 {failed_count}，跳过 {skipped_count}"
+        self.log(tf(
+            TextId::Bridge_DeletionSummary,
+            &[
+                ("success_count", &success_count.to_string()),
+                ("failed_count", &failed_count.to_string()),
+                ("skipped_count", &skipped_count.to_string()),
+            ],
         ));
         Ok(())
     }
@@ -1153,11 +1235,7 @@ impl GuiUi {
         let items: Vec<(usize, String)> = names
             .iter()
             .enumerate()
-            .map(|(slot, name)| {
-                let label = name.trim_start_matches("下载 ").trim_end_matches(" DLL");
-
-                (slot, label.to_string())
-            })
+            .map(|(slot, name)| (slot, (*name).to_string()))
             .collect();
 
         self.push(Event::JobPlan(items));
@@ -1197,7 +1275,10 @@ impl GuiUi {
     }
 
     fn download_version_info_parse_failed(&self, err: &str, snippet: &str) -> Result<()> {
-        self.log(format!("版本信息解析失败：{err}（{snippet}）"));
+        self.log(tf(
+            TextId::Bridge_VersionParseFailed,
+            &[("error", err), ("snippet", snippet)],
+        ));
         Ok(())
     }
 
@@ -1206,7 +1287,7 @@ impl GuiUi {
     }
 
     fn download_share_code_failed(&self, err: &str) -> Result<()> {
-        self.log(format!("获取分享码失败：{err}"));
+        self.log(tf(TextId::Bridge_ShareCodeFailed, &[("error", err)]));
         Ok(())
     }
 
@@ -1215,17 +1296,17 @@ impl GuiUi {
     }
 
     fn download_attempt_github_dll(&self) -> Result<()> {
-        self.log("尝试从 GitHub 下载 MetaMystia…");
+        self.log(t(TextId::Bridge_TryGithub));
         Ok(())
     }
 
     fn download_found_github_asset(&self, name: &str) -> Result<()> {
-        self.log(format!("找到文件：{name}"));
+        self.log(tf(TextId::Bridge_FileFound, &[("name", name)]));
         Ok(())
     }
 
     fn download_github_dll_not_found(&self) -> Result<()> {
-        self.log("GitHub 上未找到对应版本，改用备用源");
+        self.log(t(TextId::Bridge_GithubFallback));
         Ok(())
     }
 
@@ -1235,7 +1316,10 @@ impl GuiUi {
         name: &str,
         body: &str,
     ) -> Result<()> {
-        self.log(format!("发行说明 {tag} {name}"));
+        self.log(tf(
+            TextId::Bridge_ReleaseNotesLabel,
+            &[("tag", tag), ("name", name)],
+        ));
         for line in body.lines() {
             self.log(line);
         }
@@ -1243,12 +1327,12 @@ impl GuiUi {
     }
 
     fn download_switch_to_fallback(&self, reason: &str) -> Result<()> {
-        self.log(format!("切换备用源：{reason}"));
+        self.log(tf(TextId::Bridge_SwitchFallback, &[("reason", reason)]));
         Ok(())
     }
 
     fn download_try_fallback_metamystia(&self) -> Result<()> {
-        self.log("尝试备用源下载 MetaMystia…");
+        self.log(t(TextId::Bridge_TryFallback));
         Ok(())
     }
 
@@ -1257,7 +1341,10 @@ impl GuiUi {
     }
 
     fn download_bepinex_primary_failed(&self, err: &str) -> Result<()> {
-        self.log(format!("BepInEx 主源失败：{err}"));
+        self.log(tf(
+            TextId::Bridge_BepInExPrimaryFailed,
+            &[("error", err)],
+        ));
         Ok(())
     }
 
@@ -1269,42 +1356,56 @@ impl GuiUi {
         attempts: usize,
         err: &str,
     ) -> Result<()> {
-        self.log(format!(
-            "{op_desc} 失败：{err}；{delay_secs} 秒后重试（{attempt}/{attempts}）"
+        self.log(tf(
+            TextId::Bridge_NetworkRetrying,
+            &[
+                ("op_desc", op_desc),
+                ("error", err),
+                ("delay_secs", &delay_secs.to_string()),
+                ("attempt", &attempt.to_string()),
+                ("attempts", &attempts.to_string()),
+            ],
         ));
         Ok(())
     }
 
     fn network_retry_failed(&self, op_desc: &str, attempts: usize, err: &str) {
-        self.log(format!("{op_desc} 失败：{err}；已尝试 {attempts} 次"));
+        self.log(tf(
+            TextId::Bridge_NetworkRetryFailed,
+            &[
+                ("op_desc", op_desc),
+                ("error", err),
+                ("attempts", &attempts.to_string()),
+            ],
+        ));
     }
 
     fn network_rate_limited(&self, secs: u64) -> Result<()> {
-        self.log(format!("请求过于频繁，等待 {secs} 秒后重试"));
+        self.log(tf(TextId::Bridge_RateLimited, &[("secs", &secs.to_string())]));
         Ok(())
     }
 
     fn manager_update_starting(&self) -> Result<()> {
-        self.log("正在更新管理工具…");
+        self.log(t(TextId::Bridge_ManagerUpdateStarting));
         Ok(())
     }
 
     fn manager_update_failed(&self, err: &str) -> Result<()> {
-        self.error(format!("管理工具更新失败：{err}"));
+        self.error(tf(TextId::Bridge_ManagerUpdateFailed, &[("error", err)]));
         Ok(())
     }
 
     fn manager_prompt_manual_update(&self) -> Result<()> {
-        self.log("请手动下载最新版管理工具后重试");
+        self.log(t(TextId::Bridge_ManagerManualUpdate));
         Ok(())
     }
 
     fn sso_ask_open_browser(&self) -> Result<bool> {
         let confirmed = self.confirm(
-            "需要登录",
-            "安装/更新需要登录东方夜雀食堂小助手账号，接下来会在浏览器中完成授权。",
-            "打开浏览器",
-            "取消",
+            t(TextId::Bridge_LoginRequiredTitle),
+            t(TextId::Bridge_LoginRequiredContent),
+            t(TextId::Bridge_OpenBrowser),
+            t(TextId::Button_Cancel),
         );
         report_event("UI.Sso.OpenBrowser.Confirm", Some(yes_no(confirmed)));
 
@@ -1316,11 +1417,16 @@ impl GuiUi {
     }
 
     fn diagnostics_confirm_export(&self, entries: &[String]) -> Result<bool> {
-        let content = format!(
-            "将收集以下内容，不会修改游戏文件：\r\n{}",
-            entries.join("\r\n")
+        let content = tf(
+            TextId::Bridge_DiagnosticsContent,
+            &[("entries", &entries.join("\r\n"))],
         );
-        let confirmed = self.confirm("确认导出诊断包？", &content, "开始导出", "取消");
+        let confirmed = self.confirm(
+            t(TextId::Bridge_DiagnosticsConfirmTitle),
+            &content,
+            t(TextId::Bridge_DiagnosticsConfirmStart),
+            t(TextId::Button_Cancel),
+        );
         report_event("UI.Diagnostics.ConfirmExport", Some(yes_no(confirmed)));
 
         if !confirmed {

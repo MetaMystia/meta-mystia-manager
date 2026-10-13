@@ -7,6 +7,7 @@ use super::{
     WARMUP_DURATION, Write, atomic_rename_or_copy, check_response_status, cmp, fs, io,
     report_event, sleep,
 };
+use crate::i18n::{t, tf, TextId};
 use crate::ui::{JobOutcome, Ui, UiEvent};
 
 use std::{
@@ -72,19 +73,24 @@ impl ChunkReader {
         match self.rx.recv_timeout(timeout) {
             Ok(Ok(chunk)) if chunk.is_empty() => Ok(None),
             Ok(Ok(chunk)) => Ok(Some(chunk)),
-            Ok(Err(e)) => Err(ManagerError::NetworkError(format!("读取响应失败：{e}"))),
+            Ok(Err(e)) => Err(ManagerError::NetworkError(tf(
+                TextId::Err_ReadResponseFailed,
+                &[("error", &e.to_string())],
+            ))),
             Err(RecvTimeoutError::Timeout) => {
                 report_event(
                     "Download.Stalled",
                     Some(&format!("timeout={}", timeout.as_secs())),
                 );
-                Err(ManagerError::NetworkError(format!(
-                    "下载停顿超过 {} 秒，连接可能已中断",
-                    timeout.as_secs()
+                Err(ManagerError::NetworkError(tf(
+                    TextId::Err_DownloadStalled,
+                    &[("secs", &timeout.as_secs().to_string())],
                 )))
             }
             Err(RecvTimeoutError::Disconnected) => {
-                Err(ManagerError::NetworkError("读取线程异常结束".to_string()))
+                Err(ManagerError::NetworkError(
+                    t(TextId::Err_ReadThreadEnded).to_string(),
+                ))
             }
         }
     }
@@ -166,7 +172,13 @@ fn create_download_temp_file(dest: &Path) -> Result<(PathBuf, File)> {
         fs::create_dir_all(parent).map_err(|e| {
             ManagerError::from(io::Error::new(
                 e.kind(),
-                format!("创建目录 {} 失败：{}", parent.display(), e),
+                tf(
+                    TextId::Err_CreateDirFailed,
+                    &[
+                        ("path", &parent.display().to_string()),
+                        ("error", &e.to_string()),
+                    ],
+                ),
             ))
         })?;
     }
@@ -181,7 +193,13 @@ fn create_download_temp_file(dest: &Path) -> Result<(PathBuf, File)> {
     let tmp_file = fs::File::create(&tmp_path).map_err(|e| {
         ManagerError::from(io::Error::new(
             e.kind(),
-            format!("创建临时文件 {} 失败：{}", tmp_path.display(), e),
+            tf(
+                TextId::Err_CreateTempFileFailed,
+                &[
+                    ("path", &tmp_path.display().to_string()),
+                    ("error", &e.to_string()),
+                ],
+            ),
         ))
     })?;
 
@@ -225,7 +243,7 @@ impl Downloader<'_> {
         min_speed_bps: Option<usize>,
         slot: usize,
     ) -> Result<()> {
-        self.retry("下载文件", || {
+        self.retry(t(TextId::Err_Op_DownloadFile), || {
             self.try_download(url, dest, file_size, rate_limit_bps, min_speed_bps, slot)
         })
     }
@@ -245,7 +263,7 @@ impl Downloader<'_> {
             .call()
             .map_err(|e| ManagerError::NetworkError(Self::convert_ureq_error(&e)))?;
 
-        if let Some(err) = check_response_status(&response, self.ui, "下载文件") {
+        if let Some(err) = check_response_status(&response, self.ui, t(TextId::Err_Op_DownloadFile)) {
             return Err(err);
         }
 
@@ -286,7 +304,10 @@ impl Downloader<'_> {
 
         // 中途失败（含换源重试）时收尾进度条，避免留下卡住的下载行
         if result.is_err() {
-            let message = format!("下载失败：{}", display_name(dest));
+            let message = tf(
+                TextId::Err_DownloadFileFailed,
+                &[("name", &display_name(dest))],
+            );
             let _ = self
                 .ui
                 .emit(UiEvent::DownloadFinish(id, &message, JobOutcome::Failed));
@@ -343,7 +364,13 @@ impl Downloader<'_> {
 
                 return Err(ManagerError::from(io::Error::new(
                     e.kind(),
-                    format!("写入临时文件 {} 失败：{}", tmp_path.display(), e),
+                    tf(
+                        TextId::Err_WriteTempFileFailed,
+                        &[
+                            ("path", &tmp_path.display().to_string()),
+                            ("error", &e.to_string()),
+                        ],
+                    ),
                 )));
             }
             downloaded += chunk.len() as u64;
@@ -388,8 +415,12 @@ impl Downloader<'_> {
                                     "Download.SlowSpeed.Triggered.Window",
                                     Some(&format!("{speed_kbs:.1}KB/s<{threshold_kbs}KB/s")),
                                 );
-                                return Err(ManagerError::SlowDownload(format!(
-                                    "{speed_kbs:.1} KB/s < {threshold_kbs} KB/s"
+                                return Err(ManagerError::SlowDownload(tf(
+                                    TextId::Err_SlowSpeedDetail,
+                                    &[
+                                        ("speed", &format!("{speed_kbs:.1}")),
+                                        ("threshold", &threshold_kbs.to_string()),
+                                    ],
                                 )));
                             }
                         } else {
@@ -410,8 +441,12 @@ impl Downloader<'_> {
                                     "Download.SlowSpeed.Triggered.Overall",
                                     Some(&format!("{speed_kbs:.1}KB/s<{threshold_kbs}KB/s")),
                                 );
-                                return Err(ManagerError::SlowDownload(format!(
-                                    "整体均速 {speed_kbs:.1} KB/s < {threshold_kbs} KB/s"
+                                return Err(ManagerError::SlowDownload(tf(
+                                    TextId::Err_SlowSpeedDetail,
+                                    &[
+                                        ("speed", &format!("{speed_kbs:.1}")),
+                                        ("threshold", &threshold_kbs.to_string()),
+                                    ],
                                 )));
                             }
                         } else {
@@ -433,7 +468,13 @@ impl Downloader<'_> {
 
             return Err(ManagerError::from(io::Error::new(
                 e.kind(),
-                format!("同步临时文件 {} 失败：{}", tmp_path.display(), e),
+                tf(
+                    TextId::Err_SyncFileFailed,
+                    &[
+                        ("path", &tmp_path.display().to_string()),
+                        ("error", &e.to_string()),
+                    ],
+                ),
             )));
         }
 
@@ -444,15 +485,20 @@ impl Downloader<'_> {
     pub(super) fn finish_download(&self, tmp_path: &Path, dest: &Path, id: usize) -> Result<()> {
         if let Err(e) = atomic_rename_or_copy(tmp_path, dest) {
             let _ = fs::remove_file(tmp_path);
-            return Err(ManagerError::from(io::Error::other(format!(
-                "重命名或复制临时文件 {} 失败：{}",
-                tmp_path.display(),
-                e
+            return Err(ManagerError::from(io::Error::other(tf(
+                TextId::Err_RenameOrCopyFailed,
+                &[
+                    ("path", &tmp_path.display().to_string()),
+                    ("error", &e.to_string()),
+                ],
             ))));
         }
 
         let _ = fs::remove_file(tmp_path);
-        let message = format!("下载完成：{}", display_name(dest));
+        let message = tf(
+            TextId::Err_DownloadCompleted,
+            &[("name", &display_name(dest))],
+        );
         self.ui
             .emit(UiEvent::DownloadFinish(id, &message, JobOutcome::Completed))?;
 

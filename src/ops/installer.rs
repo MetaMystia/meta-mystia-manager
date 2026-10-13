@@ -11,6 +11,7 @@ use crate::fs::file_ops::{
     run_deletion,
 };
 use crate::fs::temp_dir::create_temp_dir_with_guard;
+use crate::i18n::{t, tf, TextId};
 use crate::mode::UninstallMode;
 use crate::net::downloader::{DownloadJob, Downloader};
 use crate::ops::preflight::run;
@@ -101,7 +102,8 @@ impl<'a> Installer<'a> {
     pub fn install(&self, cleanup_before_deploy: bool) -> Result<()> {
         report_event("Install.Start", None);
 
-        self.ui.emit(UiEvent::InstallStep(1, "获取版本信息"))?;
+        self.ui
+            .emit(UiEvent::InstallStep(1, t(TextId::Log_Step_FetchVersion)))?;
         let version_info = self.downloader.fetch_version_info()?;
         self.ui.emit(UiEvent::InstallVersionInfo(&version_info))?;
         report_event("Install.VersionInfo", Some(&version_info.to_string()));
@@ -145,10 +147,14 @@ impl<'a> Installer<'a> {
             .fetch_and_display_github_release_notes(Some(&dll_version));
 
         let (temp_dir, _temp_guard) = create_temp_dir_with_guard(&self.game_root).map_err(|e| {
-            ManagerError::from(io::Error::new(e.kind(), format!("创建临时目录失败：{e}")))
+            ManagerError::from(io::Error::new(
+                e.kind(),
+                tf(TextId::Log_TempDirCreateFailed, &[("error", &e.to_string())]),
+            ))
         })?;
 
-        self.ui.emit(UiEvent::InstallStep(2, "下载必要文件"))?;
+        self.ui
+            .emit(UiEvent::InstallStep(2, t(TextId::Log_Step_DownloadFiles)))?;
 
         run(
             self.ui,
@@ -167,7 +173,7 @@ impl<'a> Installer<'a> {
 
         let mut jobs: Vec<DownloadJob<'_>> = vec![
             (
-                "下载 BepInEx",
+                "BepInEx",
                 Box::new(|slot| {
                     let from_primary =
                         self.downloader
@@ -178,7 +184,7 @@ impl<'a> Installer<'a> {
                 }),
             ),
             (
-                "下载 MetaMystia DLL",
+                "MetaMystia",
                 Box::new(|slot| {
                     self.downloader.download_metamystia(
                         &dll_version,
@@ -193,7 +199,7 @@ impl<'a> Installer<'a> {
 
         if let (Some(version), Some(path)) = (&resourceex_version, &resourceex_path) {
             jobs.push((
-                "下载 ResourceExample",
+                "ResourceExample",
                 Box::new(|slot| {
                     self.downloader.download_resourceex(
                         version,
@@ -215,8 +221,9 @@ impl<'a> Installer<'a> {
             let removed = cleanup_tmp_residue(&self.game_root);
             if removed > 0 {
                 report_event("Install.ResidueCleaned", Some(&removed.to_string()));
-                self.ui.emit(UiEvent::Message(&format!(
-                    "已清理 {removed} 个上次运行残留的临时文件"
+                self.ui.emit(UiEvent::Message(&tf(
+                    TextId::Log_CleanupResidue,
+                    &[("count", &removed.to_string())],
                 )))?;
             }
         }
@@ -235,7 +242,8 @@ impl<'a> Installer<'a> {
             );
         }
 
-        self.ui.emit(UiEvent::InstallStep(3, "安装文件"))?;
+        self.ui
+            .emit(UiEvent::InstallStep(3, t(TextId::Log_Step_InstallFiles)))?;
 
         let bepinex_dir = self.game_root.join("BepInEx");
         let bepinex_exists = bepinex_dir.exists();
@@ -251,14 +259,14 @@ impl<'a> Installer<'a> {
         }
         let exclusions = exclusions.as_slice();
         let dll_destination = dll_path.file_name().map_or_else(
-            || Err(ManagerError::Other("无效的 DLL 文件名".to_string())),
+            || Err(ManagerError::Other(t(TextId::Log_InvalidDllName).to_string())),
             |name| Ok(bepinex_dir.join("plugins").join(name)),
         )?;
         let resourceex_destination = resourceex_path
             .as_ref()
             .map(|path| {
                 path.file_name().map_or_else(
-                    || Err(ManagerError::Other("无效的 ZIP 文件名".to_string())),
+                    || Err(ManagerError::Other(t(TextId::Log_InvalidZipName).to_string())),
                     |name| Ok(self.game_root.join("ResourceEx").join(name)),
                 )
             })
@@ -285,10 +293,12 @@ impl<'a> Installer<'a> {
                 fs::create_dir_all(&bepinex_config_dir).map_err(|e| {
                     ManagerError::from(io::Error::new(
                         e.kind(),
-                        format!(
-                            "创建 BepInEx 配置目录 {} 失败：{}",
-                            bepinex_config_dir.display(),
-                            e
+                        tf(
+                            TextId::Log_ConfigDirCreateFailed,
+                            &[
+                                ("path", &bepinex_config_dir.display().to_string()),
+                                ("error", &e.to_string()),
+                            ],
                         ),
                     ))
                 })?;
@@ -309,20 +319,25 @@ impl<'a> Installer<'a> {
             return match rollback.restore() {
                 Ok(()) => {
                     self.ui
-                        .emit(UiEvent::Message("安装失败，已回滚到操作前状态"))?;
+                        .emit(UiEvent::Message(t(TextId::Log_RollbackInstallDone)))?;
                     report_event("Install.Failed.RolledBack", Some(&format!("{e}")));
                     Err(e)
                 }
                 Err(restore_err) => {
-                    self.ui.emit(UiEvent::Warn(&format!(
-                        "安装失败，且回滚未完全成功：{restore_err}"
+                    self.ui.emit(UiEvent::Warn(&tf(
+                        TextId::Log_RollbackInstallIncomplete,
+                        &[("error", &restore_err.to_string())],
                     )))?;
                     report_event(
                         "Install.Failed.RollbackIncomplete",
                         Some(&format!("{e};{restore_err}")),
                     );
-                    Err(ManagerError::Other(format!(
-                        "{e}；另外回滚未完全成功：{restore_err}"
+                    Err(ManagerError::Other(tf(
+                        TextId::Log_RollbackIncompleteDetail,
+                        &[
+                            ("error", &e.to_string()),
+                            ("restore_error", &restore_err.to_string()),
+                        ],
                     )))
                 }
             };
@@ -453,10 +468,12 @@ pub fn update_bepinex_config(
         Err(e) => {
             return Err(ManagerError::from(io::Error::new(
                 e.kind(),
-                format!(
-                    "读取 BepInEx 配置文件 {} 失败：{}",
-                    config_path.display(),
-                    e
+                tf(
+                    TextId::Err_ConfigReadFailed,
+                    &[
+                        ("path", &config_path.display().to_string()),
+                        ("error", &e.to_string()),
+                    ],
                 ),
             )));
         }
@@ -498,7 +515,13 @@ pub fn update_bepinex_config(
         fs::create_dir_all(parent).map_err(|e| {
             ManagerError::from(io::Error::new(
                 e.kind(),
-                format!("创建 BepInEx 配置目录 {} 失败：{}", parent.display(), e),
+                tf(
+                    TextId::Err_CreateDirFailed,
+                    &[
+                        ("path", &parent.display().to_string()),
+                        ("error", &e.to_string()),
+                    ],
+                ),
             ))
         })?;
     }
@@ -507,11 +530,13 @@ pub fn update_bepinex_config(
     fs::write(&tmp_path, text.as_bytes()).map_err(|e| {
         ManagerError::from(io::Error::new(
             e.kind(),
-            format!(
-                "写入 BepInEx 临时配置文件 {} 失败：{}",
-                tmp_path.display(),
-                e
-            ),
+                tf(
+                    TextId::Err_ConfigTempWriteFailed,
+                    &[
+                        ("path", &tmp_path.display().to_string()),
+                        ("error", &e.to_string()),
+                    ],
+                ),
         ))
     })?;
 
@@ -522,10 +547,12 @@ pub fn update_bepinex_config(
         }
         Err(e) => {
             let _ = fs::remove_file(&tmp_path);
-            Err(ManagerError::from(io::Error::other(format!(
-                "写入 BepInEx 配置文件 {} 失败：{}",
-                config_path.display(),
-                e
+            Err(ManagerError::from(io::Error::other(tf(
+                TextId::Err_ConfigWriteFailed,
+                &[
+                    ("path", &config_path.display().to_string()),
+                    ("error", &e.to_string()),
+                ],
             ))))
         }
     }

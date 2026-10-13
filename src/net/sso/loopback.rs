@@ -5,6 +5,7 @@
 //! 也可能是用户在授权页取消（带 `error=access_denied` 与原始 `state`）。
 
 use crate::error::{ManagerError, Result};
+use crate::i18n::{t, tf, TextId};
 
 use percent_encoding::percent_decode_str;
 use std::{
@@ -57,14 +58,29 @@ impl CallbackServer {
     /// 绑定 `127.0.0.1` 的临时端口并设为非阻塞。
     pub fn bind() -> Result<Self> {
         let listener = TcpListener::bind(("127.0.0.1", 0))
-            .map_err(|e| ManagerError::SsoLoginFailed(format!("无法监听本地回调端口：{e}")))?;
+            .map_err(|e| {
+                ManagerError::SsoLoginFailed(tf(
+                    TextId::Err_LoopbackListenFailed,
+                    &[("error", &e.to_string())],
+                ))
+            })?;
         let port = listener
             .local_addr()
-            .map_err(|e| ManagerError::SsoLoginFailed(format!("无法读取本地回调端口：{e}")))?
+            .map_err(|e| {
+                ManagerError::SsoLoginFailed(tf(
+                    TextId::Err_LoopbackReadPortFailed,
+                    &[("error", &e.to_string())],
+                ))
+            })?
             .port();
         listener
             .set_nonblocking(true)
-            .map_err(|e| ManagerError::SsoLoginFailed(format!("无法设置本地回调监听属性：{e}")))?;
+            .map_err(|e| {
+                ManagerError::SsoLoginFailed(tf(
+                    TextId::Err_LoopbackSetOptionFailed,
+                    &[("error", &e.to_string())],
+                ))
+            })?;
 
         Ok(Self { listener, port })
     }
@@ -102,8 +118,9 @@ impl CallbackServer {
                     sleep(ACCEPT_POLL_INTERVAL);
                 }
                 Err(e) => {
-                    return Err(ManagerError::SsoLoginFailed(format!(
-                        "本地回调监听失败：{e}"
+                    return Err(ManagerError::SsoLoginFailed(tf(
+                        TextId::Err_LoopbackAcceptFailed,
+                        &[("error", &e.to_string())],
                     )));
                 }
             }
@@ -120,8 +137,8 @@ fn handle_connection(mut stream: TcpStream, expected_state: &str) -> Option<Call
         write_response(
             &mut stream,
             "400 Bad Request",
-            "无法读取请求",
-            "请返回管理工具重试。",
+            t(TextId::Err_Page_UnreadableTitle),
+            t(TextId::Err_Page_UnreadableBody),
             false,
         );
         return None;
@@ -130,40 +147,64 @@ fn handle_connection(mut stream: TcpStream, expected_state: &str) -> Option<Call
     match parse_request_target(&request_target) {
         CallbackRequest::Authorized { state, ticket } => {
             if state != expected_state {
-                write_response(&mut stream, "400 Bad Request", "回调校验失败", "", false);
+                write_response(
+                    &mut stream,
+                    "400 Bad Request",
+                    t(TextId::Err_Page_BadRequest),
+                    "",
+                    false,
+                );
                 return None;
             }
 
             write_response(
                 &mut stream,
                 "200 OK",
-                "登录完成",
-                "正在关闭页面…如未自动关闭，请手动关闭并返回管理工具。",
+                t(TextId::Err_Page_Done),
+                t(TextId::Err_Page_DoneBody),
                 true,
             );
             Some(CallbackOutcome::Authorized { ticket })
         }
         CallbackRequest::Cancelled { state } => {
             if state.as_deref() != Some(expected_state) {
-                write_response(&mut stream, "400 Bad Request", "回调校验失败", "", false);
+                write_response(
+                    &mut stream,
+                    "400 Bad Request",
+                    t(TextId::Err_Page_BadRequest),
+                    "",
+                    false,
+                );
                 return None;
             }
 
             write_response(
                 &mut stream,
                 "200 OK",
-                "已取消登录",
-                "可以关闭本页面并返回管理工具。",
+                t(TextId::Err_Page_Cancelled),
+                t(TextId::Err_Page_CancelledBody),
                 false,
             );
             Some(CallbackOutcome::Cancelled)
         }
         CallbackRequest::Ignored => {
-            write_response(&mut stream, "404 Not Found", "页面不存在", "", false);
+            write_response(
+                &mut stream,
+                "404 Not Found",
+                t(TextId::Err_Page_NotFound),
+                "",
+                false,
+            );
             None
         }
         CallbackRequest::Malformed => {
-            write_response(&mut stream, "400 Bad Request", "回调参数不完整", "", false);
+            write_response(
+                &mut stream,
+                "400 Bad Request",
+                t(TextId::Err_Page_BadParams),
+                "",
+                false,
+            );
             None
         }
     }
